@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+- **The regrain swap detaches the source it identified** (#1362). `regrain_step`'s swap ran `alter table <parent>
+  detach partition <source>` with both names rendered before the `DETACH` waited for `ACCESS EXCLUSIVE` on the
+  table behind a reader, and resolved them again once granted: a schema renamed aside during the wait, with a
+  same-named schema, partitioned table and partition committed in its place, had the stranger's partition detached
+  from the stranger's table (its rows no longer served, nothing logged), while the swap went on by oid, dropped the
+  source and reported success. The table and the source are now locked by oid (`pgpm._lock_oid_or_raise`) in the
+  `DETACH`'s own mode and order first, and named under those locks, so the `DETACH` waits for neither and reaches
+  them wherever their schema went. `tests/349` is the acceptance test; `bench/regrain_swap_detach_by_oid.sh` runs it
+  against `regrain_swap_detach_unlocked`.
+
+- **The regrain copy batch, the copy's making and the reconcile reach the relations pgpm identified** (#1358). The
+  copy batch, `insert into <copy> ... select ... from <source>`, named both by names rendered before it waited for
+  its locks, so a schema swapped during the wait sent the batch from a namesake source or into a namesake copy; the
+  short batch advanced the cursor past rows the recorded copy never got, and the swap dropped them with the source
+  (or served a stranger's rows in their place). The copy and the source are now locked by oid in the `INSERT`'s own
+  modes first and named under those locks. A new copy is handed back by the oid its `CREATE` made
+  (`_regrain_copy_make` returns it), so the statements after an outgoing key's `ADD`, which waits for its referenced
+  table, and the caller's owner and ACL mint, bound `CHECK`, `pgpm.part` anchor and first batch no longer name a
+  namesake. The reconcile locks the change-capture delta by oid before its first read and names it at each
+  statement, so it no longer consumes a namesake delta's rows as its batch. And `pgpm._truncate_checked` accepts a
+  `TRUNCATE` that kept the relation's file only when this transaction already held `ACCESS EXCLUSIVE` on its oid
+  before it (its `CREATE`, or an earlier `TRUNCATE` of it, as a second `regrain_cancel` in one transaction makes):
+  judged by its `pg_class` row, which the swap tick's grant to a new writer of the table rewrites too, a
+  never-written delta passed while the swap's `TRUNCATE` emptied a namesake. `tests/350`
+  is the acceptance test; `bench/regrain_copy_by_oid.sh` runs it against `regrain_copy_batch_unlocked`,
+  `regrain_copy_make_returns_by_name`, `regrain_reconcile_delta_unlocked`,
+  `truncate_checked_inplace_by_catalog_write` and `truncate_checked_inplace_by_creation`.
+
 - **`transmute` carries the reused key with its whole definition** (#766 bullets 1 and 2). The cutover declared
   the reused primary key or unique constraint on the parent from its column list and deferrability alone, so a
   `PRIMARY KEY ... INCLUDE` matched no index of the monolith and failed the cutover with "multiple primary keys"

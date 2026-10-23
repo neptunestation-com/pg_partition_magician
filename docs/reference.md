@@ -1736,9 +1736,12 @@ partitions'), a `TRUNCATE` must have given it a new file, a trigger must be on i
 owner must show on it. When the check fails the
 statement is rolled back: `retire` logs `fail_retain_drop` or `fail_retain_crossing` and returns false, or raises
 from the write block, and `regrain_cancel`, the regrain swap's and reclaim's emptying of the delta raise, saying the
-statement reached another relation. A read has no effect to check: the regrain reconcile, `untransmute`'s gate under
-its lock and the hypertable drain steps first lock the relation by OID and then name it through the name it has
-under that lock, so the read waits for nothing of its own and reaches the relation wherever its schema now is.
+statement reached another relation. A read has no effect to check: the regrain reconcile (the copies, the source
+and the change-capture delta), the regrain copy batch (the copy and the source), `untransmute`'s gate under its lock
+and the hypertable drain steps first lock the relation by OID, in the statement's own mode, and then name it through
+the name it has under that lock, so the statement waits for nothing of its own and reaches the relation wherever its
+schema now is. The regrain swap's `DETACH` of the source does the same for the table and the source, and a new
+regrain copy is found by the OID its `CREATE` made, never by its name after a wait.
 
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already

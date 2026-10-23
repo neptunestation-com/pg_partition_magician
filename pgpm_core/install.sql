@@ -3948,18 +3948,25 @@ end;
 $$;
 
 -- TRUNCATE p_rel: its relfilenode must have changed (#1335 b10, round 3). A relation created or rewritten in the
--- current subtransaction is truncated in place and keeps its relfilenode (regrain() prepares and swaps in one
--- transaction); it is accepted then only empty and only if this transaction wrote its pg_class row, which also means
--- this transaction has held ACCESS EXCLUSIVE on it since, so the TRUNCATE never waited for it.
+-- current transaction is truncated in place and keeps its relfilenode (regrain() prepares and swaps in one
+-- transaction; two regrain_cancel calls in one truncate the delta twice); it is accepted then only empty and only
+-- if this transaction already held ACCESS EXCLUSIVE on p_rel's oid before the TRUNCATE (its CREATE, or its earlier
+-- TRUNCATE or rewrite, took it, and it is held to the end), so the TRUNCATE waited for nothing of it and reached it.
+-- Not "this transaction wrote its pg_class row" (#1358): a GRANT or an owner change writes that one too, and a
+-- never-written delta (no page to empty) under the swap's grant to a new writer passed while the TRUNCATE, waiting
+-- behind a reader, emptied a namesake.
 create or replace function pgpm._truncate_checked(p_rel regclass, p_what text)
 returns void language plpgsql as $$
-declare v_rfn oid := (select c.relfilenode from pg_class c where c.oid = p_rel);
+declare
+  v_rfn oid := (select c.relfilenode from pg_class c where c.oid = p_rel);
+  v_held boolean := exists (select 1 from pg_catalog.pg_locks l
+                             where l.locktype = 'relation' and l.relation = p_rel::oid and l.pid = pg_backend_pid()
+                               and l.granted and l.mode = 'AccessExclusiveLock'
+                               and l.database = (select d.oid from pg_database d where d.datname = current_database()));
 begin
   execute format('truncate %s', p_rel::text);
   perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn
-    or (pg_relation_size(p_rel) = 0
-        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)
-                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),
+    or (pg_relation_size(p_rel) = 0 and v_held),
     p_rel, p_what);
 end;
 $$;
@@ -6953,11 +6960,20 @@ declare
   v_kshaped text;         -- does a delta row's key decode: _text_time_shaped of it, or true (#709)
   v_kfloor text;          -- a delta row's sub-range lo on the target grid, null when its key does not decode
   v_unshaped boolean := false;   -- the batch holds a key that does not decode (#709)
+  v_dreg regclass;        -- the delta, by its oid (#1358)
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);
   if v_delta is null then return 0; end if;   -- #955: nothing recorded, nothing to reconcile
+  -- #1358: the delta locked by oid first, in the mode its consuming DELETE takes, and named by v_dreg rendered at each
+  -- statement below: names read before a wait (this lock's, the ANALYZE's, a copy's) led every statement to a
+  -- namesake delta a schema swap put in its place, whose rows the tick consumed. The tick's later reads of the delta
+  -- (the swap gate's counts, the purge) then wait for nothing of it either.
+  v_dreg := format('%I.%I', v_dnsp, v_delta)::regclass;
+  perform pgpm._lock_oid_or_raise(v_dreg, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));
+  select n.nspname, c.relname into v_dnsp, v_delta
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_dreg;
   v_src := pgpm._regrain_child_rel(p_parent, p_child);
   if v_src is null then
     raise exception 'pg_partition_magician: internal error reconciling % -- the source pgpm.part records for % no longer exists, so its captured changes cannot be reread from it; refusing rather than discarding them.',
@@ -7070,14 +7086,14 @@ begin
   -- in the set. A row not in the set, whatever pgpm_seq it carries, is neither applied nor consumed, and
   -- waits for the tick that judges it eligible.
   -- The ordering column is the delta's identity column, under whatever name the mint gave it (#1074).
-  execute format('select array_agg(%1$I), array_agg(ctid) from (select %1$I, ctid from %2$I.%3$I where %4$s order by %1$I limit %5$s) t',
-                 v_seq, v_dnsp, v_delta, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
+  execute format('select array_agg(%1$I), array_agg(ctid) from (select %1$I, ctid from %2$s where %3$s order by %1$I limit %4$s) t',
+                 v_seq, v_dreg::text, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
   if v_seqs is null then return 0; end if;
   v_seq_q := quote_ident(v_seq);
   v_batch := format('k.%s = any($1) and k.ctid = any($2)', v_seq_q);
 
   -- one pair of set-based statements per distinct fine child touched, not per key
-  for r in execute format('select distinct %s as sub_lo from %I.%I k where %s', v_kfloor, v_dnsp, v_delta, v_batch)
+  for r in execute format('select distinct %s as sub_lo from %s k where %s', v_kfloor, v_dreg::text, v_batch)
     using v_seqs, v_rows
   loop
     if r.sub_lo is null then v_unshaped := true; continue; end if;   -- #709: placed by its encoded value, below
@@ -7131,12 +7147,12 @@ begin
     perform pgpm._lock_oid_or_raise(v_sub_rel, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));
     perform pgpm._lock_oid_or_raise(v_src, 'access share', true, format('the regrain reconcile of %s', p_parent));
     execute format(
-      'delete from %s d where %s in (select %s from %I.%I k where %s and %s = %L)',
-      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kfloor, r.sub_lo)
+      'delete from %s d where %s in (select %s from %s k where %s and %s = %L)',
+      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dreg::text, v_batch, v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
     execute format(
-      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and %s = %L)',
-      v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
+      'insert into %s (%s) select %s from %s s where %s in (select %s from %s k where %s and %s = %L)',
+      v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dreg::text, v_batch,
       v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
   end loop;
@@ -7159,16 +7175,16 @@ begin
                                       pgpm._encode($5, lo, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as lo_lit,
                                       pgpm._encode($5, hi, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as hi_lit
                                  from f where not pgpm._native_gt($5, $6, lo) and not pgpm._native_gt($5, hi, $7)),
-            u as (select k.%9$I as c from %10$I.%11$I k where %12$s and not %13$s)
+            u as (select k.%9$I as c from %10$s k where %11$s and not %12$s)
        select distinct m.child_name, m.lo_lit, m.hi_lit,
               case when m.child_name is null
-                   then coalesce((select g.hi from g where g.hi_lit <= u.c order by g.hi::%14$s desc limit 1), $6) end as gap_lo,
+                   then coalesce((select g.hi from g where g.hi_lit <= u.c order by g.hi::%13$s desc limit 1), $6) end as gap_lo,
               case when m.child_name is null
-                   then coalesce((select g.lo from g where g.lo_lit > u.c order by g.lo::%14$s limit 1), $8) end as gap_hi
+                   then coalesce((select g.lo from g where g.lo_lit > u.c order by g.lo::%13$s limit 1), $8) end as gap_hi
          from u left join g m on u.c >= m.lo_lit and u.c < m.hi_lit',
       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
       cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz,
-      cfg.control_column, v_dnsp, v_delta, v_batch, v_kshaped, v_ncast)
+      cfg.control_column, v_dreg::text, v_batch, v_kshaped, v_ncast)
       using v_seqs, v_rows, p_parent, p_child, cfg.control_kind, p_lo, p_hi, p_cursor
     loop
       if r.child_name is null then
@@ -7187,13 +7203,13 @@ begin
       perform pgpm._lock_oid_or_raise(v_sub_rel, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));
       perform pgpm._lock_oid_or_raise(v_src, 'access share', true, format('the regrain reconcile of %s', p_parent));
       execute format(
-        'delete from %s d where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
-        v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        'delete from %s d where %s in (select %s from %s k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_dkey_q, v_keycols_q, v_dreg::text, v_batch, v_kshaped,
         v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
         using v_seqs, v_rows;
       execute format(
-        'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
-        v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        'insert into %s (%s) select %s from %s s where %s in (select %s from %s k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dreg::text, v_batch, v_kshaped,
         v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
         using v_seqs, v_rows;
     end loop;
@@ -7201,7 +7217,7 @@ begin
 
   -- consume exactly the rows the statements above addressed: by identity, never by watermark (#497) and
   -- never by pgpm_seq alone (#1070)
-  execute format('delete from %I.%I k where %s', v_dnsp, v_delta, v_batch) using v_seqs, v_rows;
+  execute format('delete from %s k where %s', v_dreg::text, v_batch) using v_seqs, v_rows;
   get diagnostics v_n = row_count;
   if v_n > 0 then
     insert into pgpm.log (parent_table, action, lo, hi, rows)
@@ -7331,14 +7347,23 @@ $$;
 -- which makes one only to ask whether a copy made now would match the parent, and drops it. The two must make
 -- the same shape for that question to mean anything, so neither makes its own. p_spc_q is the tablespace
 -- clause, already quoted.
+-- Returns the copy BY OID (#1358), and names it by that oid in every statement after the CREATE. The CREATE can wait
+-- (the LIKE's lock on the parent) and an outgoing key's ADD below waits for its referenced table, and a schema renamed
+-- during such a wait sent every later statement that named the copy, and the caller's mint, bound CHECK, pgpm.part
+-- anchor and first batch, to a namesake of the copy. Found in the schema p_nsp named just before the CREATE, by that
+-- schema's oid: a CREATE that went to another schema is refused.
+drop function if exists pgpm._regrain_copy_make(regclass, name, name, text);
 create or replace function pgpm._regrain_copy_make(p_parent regclass, p_nsp name, p_name name, p_spc_q text)
-returns void language plpgsql as $$
-declare r record; v_nsp name; v_rel name;
+returns regclass language plpgsql as $$
+declare r record; v_nsp name; v_rel name; v_made_in oid; v_copy regclass;
 begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_made_in := (select n.oid from pg_namespace n where n.nspname = p_nsp);
   execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)%s',
                  p_nsp, p_name, v_nsp, v_rel, p_spc_q);
+  v_copy := (select c.oid from pg_class c where c.relnamespace = v_made_in and c.relname = p_name);
+  perform pgpm._effect_or_raise(v_copy is not null, p_parent, format('making the regrain copy %I.%I of %s', p_nsp, p_name, p_parent));
   -- #1261: LIKE gives the copy every CHECK of the parent as a VALIDATED one, a NOT VALID one included, and on
   -- PostgreSQL 18 a NOT VALID NOT NULL the same way. A NOT VALID constraint leaves the rows written before it in
   -- place, and the parent still serves them, so on the copy it refused the first such row: every copy batch of
@@ -7350,14 +7375,14 @@ begin
   for r in
     select c.conname
       from pg_constraint k
-      join pg_constraint c on c.conrelid = format('%I.%I', p_nsp, p_name)::regclass and c.contype = k.contype
+      join pg_constraint c on c.conrelid = v_copy and c.contype = k.contype
      where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
        and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
        and case when k.contype = 'c' then c.conname = k.conname
                 else (select a.attname from pg_attribute a where a.attrelid = k.conrelid and a.attnum = k.conkey[1])
                    = (select a.attname from pg_attribute a where a.attrelid = c.conrelid and a.attnum = c.conkey[1]) end
   loop
-    execute format('alter table %I.%I drop constraint %I', p_nsp, p_name, r.conname);
+    execute format('alter table %s drop constraint %I', v_copy::text, r.conname);
   end loop;
   -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
   -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
@@ -7377,9 +7402,10 @@ begin
      where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
        and convalidated
   loop
-    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
-    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+    execute format('alter table %s add constraint %I %s not valid', v_copy::text, r.conname, r.def);
+    execute format('alter table %s validate constraint %I', v_copy::text, r.conname);
   end loop;
+  return v_copy;
 end;
 $$;
 
@@ -7402,8 +7428,7 @@ begin
   if to_regclass(format('%I.%I', v_nsp, v_name)) is not null then
     return null;
   end if;
-  perform pgpm._regrain_copy_make(p_parent, v_nsp, v_name, '');
-  v_probe := format('%I.%I', v_nsp, v_name)::regclass;
+  v_probe := pgpm._regrain_copy_make(p_parent, v_nsp, v_name, '');
   v_d := pgpm._regrain_shape_drift(p_parent, array[v_probe::oid]);
   execute format('drop table %s', v_probe::text);
   return v_d;
@@ -9328,26 +9353,35 @@ begin
       v_spc_q := coalesce((select format(' tablespace %I', t.spcname)
                              from pg_class c join pg_tablespace t on t.oid = c.reltablespace
                             where c.oid = p_parent), '');
-      perform pgpm._regrain_copy_make(p_parent, v_sub_nsp, v_sub_name, v_spc_q);   -- #633: its shape
+      -- #633: its shape; #1358: and from here on the table that CREATE made, by its oid
+      v_copy := pgpm._regrain_copy_make(p_parent, v_sub_nsp, v_sub_name, v_spc_q);
       -- #949: the parent's owner and an owner-only ACL from the tick that creates it, before a row is copied in.
       -- The reset used to wait for the sub-range's last short batch (below), and between ticks a role the
       -- creating role's default privileges name read every row copied so far, past the parent's row security.
-      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);
-      execute format('alter table %I.%I add constraint %I check (%I >= %L and %I < %L)',
-                     v_sub_nsp, v_sub_name, (v_sub_name || '_ck'), cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit);
+      perform pgpm._scratch_mint(p_parent, v_copy);
+      execute format('alter table %s add constraint %I check (%I >= %L and %I < %L)',
+                     v_copy::text, (v_sub_name || '_ck'), cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit);
       -- child_oid (#421): the fine child is standalone here and joins pg_inherits only at the swap,
       -- so this is the only point at which its identity can be recorded from the CREATE that made it.
       insert into pgpm.part (parent_table, child_name, lo, hi, attached, child_oid)
-        values (p_parent, v_sub_name, v_sub_lo, v_sub_hi, false,
-                format('%I.%I', v_sub_nsp, v_sub_name)::regclass::oid)
+        values (p_parent, v_sub_name, v_sub_lo, v_sub_hi, false, v_copy::oid)
         on conflict (parent_table, child_name) do nothing;
       -- #631: a row that outlived its relation (the copy was dropped by hand) now names this one, so
       -- regrain_cancel's drop by recorded oid reaches the table just created rather than nothing.
       if v_sub_known then
-        update pgpm.part set child_oid = format('%I.%I', v_sub_nsp, v_sub_name)::regclass::oid
+        update pgpm.part set child_oid = v_copy::oid
          where parent_table = p_parent and child_name = v_sub_name and not attached;
       end if;
     end if;
+    -- #1358: the copy and the source locked by oid first, in the INSERT's own modes and order, and the copy named
+    -- under its lock: the INSERT then waits for neither, so it writes the copy pgpm.part recorded from the source
+    -- pgpm.part recorded. Named before its wait, a schema swapped during it sent the batch from a namesake source,
+    -- or into a namesake copy, and the short batch advanced the cursor past rows the copy never got.
+    v_copy := coalesce(v_copy, v_sub_oid::regclass, v_sub_now);
+    perform pgpm._lock_oid_or_raise(v_copy, 'row exclusive', true, format('regrain_step(%s), copying a batch,', p_parent));
+    perform pgpm._lock_oid_or_raise(v_child, 'access share', true, format('regrain_step(%s), copying a batch,', p_parent));
+    select n.nspname, c.relname into v_sub_nsp, v_sub_name
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_copy;
     execute format($f$
       insert into %7$I.%8$I (%6$s)
       select %6$s from %1$s s
@@ -9368,9 +9402,9 @@ begin
       -- the fine child holds all its rows now and is still standalone (it is attached later, at the swap):
       -- ANALYZE it here, off the swap's exclusive-lock window, so the swap and any query that hits it after
       -- see real stats, not reltuples = -1 (#164).
-      perform pgpm._own_like_parent(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- #277
-      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875
-      perform pgpm._analyze(format('%I.%I', v_sub_nsp, v_sub_name)::regclass);
+      perform pgpm._own_like_parent(p_parent, v_copy);   -- #277
+      perform pgpm._acl_reset(v_copy, true);   -- #875
+      perform pgpm._analyze(v_copy);
     end if;
     update pgpm.config set regrain_cursor = v_cursor where parent_table = p_parent;
     return 'copied:' || v_moved;
@@ -9466,6 +9500,11 @@ begin
   select array_agg(id) into v_fk_ids from pgpm.dropped_fk
    where parent_table = p_parent and restored_at is not null;
   v_fk := pgpm.suspend_incoming_fks(p_parent, true);
+  -- #1362: the parent and the source locked by oid first, in the DETACH's own mode and order, so the DETACH waits for
+  -- neither and its names, rendered under those locks, reach them (rendered before its wait, a schema swapped
+  -- during it detached a namesake's partition from a namesake parent, and the swap went on by oid)
+  perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));
+  perform pgpm._lock_oid_or_raise(v_child, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));
   execute format('alter table %s detach partition %s', p_parent::text, v_child::text);
   -- #892: capture must still be live NOW. This tick's check above ran before anything here locked the source,
   -- and an ALTER TABLE ... DISABLE TRIGGER needs only SHARE ROW EXCLUSIVE, which the copy and the reconcile do
