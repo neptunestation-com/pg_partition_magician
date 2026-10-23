@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **The timescale tests that claim the cutover's pre-drain ran now witness it** (#1377).
+  `tests/timescale/db/14`'s automatic pre-drain section asserted only the cutover's end state, which the under-lock
+  reconcile produces with no pre-drain at all, and a drain-key index nothing has built since #175;
+  `tests/timescale/db/47` (B) witnessed "its pre-drain applied" the update at the default `p_drain_batch` of 5000,
+  under which a 2-row delta never reaches the drain step, `pgpm_dbatch`'s only site. Both now record each write
+  into the copy with whether the hypertable's `ACCESS EXCLUSIVE` lock was held, and assert backlog keys written
+  without it (14: in more than one batch, with at most one batch's residual under the lock; 47: with
+  `p_drain_batch => 1`, the update to id 4). `bench/tests_witness_the_step.sh` runs both against a cutover that
+  skips its tracked pre-drain, and fails against `predrain_witnessed_by_end_state_ts14` and
+  `predrain_witnessed_by_end_state_ts47`.
+
+- **Two core witnesses no longer hold before, or without, what they vouch for** (#1378). `tests/190` (E) witnessed
+  that the later regrain steps were copying by one copy not attached, which the step before them made true, so
+  steps that did nothing passed "do not ANALYZE it again"; it now reads the in-flight copy's ids before them (1)
+  and after them (1, 2, 3). `tests/279` part 3 and `tests/129` read `progress()` columns as scalar subqueries
+  asserted null, which an empty result also gives; they now read them as an array over the table's row, which
+  `is()` refuses when the row is missing. `bench/tests_witness_the_step.sh` runs tests/190 against later steps
+  made no-ops and tests/279 against a `progress()` that loses a table with a hand-detached cell, and fails against
+  `later_steps_witnessed_before_them_190` and `detached_write_child_scalar_null_279`.
 - **The fix-phase skill's command for the highest guard database gives the highest** (#1372). It sorted
   `pgpm_perfNNN` on field 3 of a split on `f`, which has no field 3, so sort compared whole lines lexically and
   printed `pgpm_perf99` where the highest was `pgpm_perf406`: a coordinator following it assigned fixers databases

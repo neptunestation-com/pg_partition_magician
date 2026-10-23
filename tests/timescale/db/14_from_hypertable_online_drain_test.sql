@@ -5,7 +5,7 @@
 -- cutover still finishes any post-drain residual, that a threshold leaves a residual for the cutover, that a
 -- single step reconciles a bounded batch, and that tracking is refused on a nullable key column.
 -- Autocommit, disposable-db.
-select plan(27);
+select plan(29);
 
 -- =====================================================================================================
 -- Main flow: copy with tracking, change rows, drain ONLINE, assert the dest converged before any cutover.
@@ -107,9 +107,23 @@ select is((select count(*)::int from hp_thr where temp = -1), 30,
 -- =====================================================================================================
 -- The cutover's AUTOMATIC pre-drain actually drains a backlog above its threshold (exercises the nested
 -- cutover -> drain_delta -> step + per-batch COMMIT path), then the under-lock pass finishes the residual.
+-- The end state alone cannot say so: the under-lock reconcile produces it with no pre-drain at all
+-- (correctness never depends on the pre-drain), so every write into the copy is recorded with the
+-- transaction it landed in and whether this backend held the hypertable's ACCESS EXCLUSIVE lock then
+-- (#1377). The pre-drain's batches land without that lock, each in a transaction of its own.
 -- =====================================================================================================
 select mk_keyed_hypertable('hp_auto', 60, '1 day', '6 days');
 call pgpm.from_hypertable_copy('hp_auto', 'ts', p_track_changes => true);
+create table hp_auto_src as select 'hp_auto'::regclass::oid as src;
+create table hp_auto_writes (device_id bigint, xid xid8, locked boolean);
+create function hp_auto_write_seen() returns trigger language plpgsql as $$
+begin
+  insert into hp_auto_writes values (new.device_id, pg_current_xact_id(),
+    exists (select 1 from pg_locks l where l.pid = pg_backend_pid() and l.relation = (select src from hp_auto_src)
+              and l.mode = 'AccessExclusiveLock' and l.granted));
+  return null;
+end $$;
+create trigger hp_auto_write_seen after insert on hp_auto_pgpm_dest for each row execute function hp_auto_write_seen();
 update hp_auto set temp = -1 where device_id <= 30;                 -- 60 delta rows, well above a small batch
 -- a direct cutover with a small batch: the pre-drain loops (committing per batch) down to the threshold,
 -- then the brief lock finishes the rest. No manual from_hypertable_drain_delta call.
@@ -118,8 +132,13 @@ select is((select relkind::text from pg_class where oid = 'hp_auto'::regclass), 
   'the cutover auto-pre-drain migrated the table');
 select is((select count(*)::int from hp_auto where temp = -1), 30,
   'the cutover auto-pre-drain reconciled the whole backlog (online batches + under-lock residual)');
-select ok(to_regclass('public.hp_auto_pgpm_drainkey') is null,
-  'the cutover dropped the drain key index its own pre-drain built');
+select is((select array_agg(distinct device_id order by device_id) from hp_auto_writes),
+  (select array_agg(g::bigint order by g) from generate_series(1, 30) g),
+  'the cutover wrote into the copy exactly the 30 backlog keys');
+select ok((select count(distinct xid) >= 2 from hp_auto_writes where not locked),
+  'the cutover''s pre-drain applied backlog keys to the copy online, in more than one committed batch, before the hypertable''s lock');
+select cmp_ok((select count(distinct device_id)::int from hp_auto_writes where locked), '<=', 7,
+  'the under-lock pass applied only the residual within one batch, not the backlog the pre-drain drained');
 
 -- =====================================================================================================
 -- Tracking is refused on a key with a nullable (non-control) column: a NULL key component can never be
