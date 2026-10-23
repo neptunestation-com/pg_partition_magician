@@ -54,8 +54,8 @@
 # CHANGELOG.md is excluded from checks 1 to 6: its entries are historical by design and must keep naming the
 # machinery, versions and actions they removed.
 #
-# CHECK 7: CHANGELOG.md carries no merge residue (scripts/check_changelog_residue.py): no bullet twice, and
-# no bullet carrying a stale copy of its own text after it. It is a list file every fix PR adds to, and a
+# CHECK 7: CHANGELOG.md carries no merge residue (scripts/check_changelog_residue.py): no bullet twice (or two
+# versions of one bullet side by side, #1387), and no bullet carrying a stale copy of its own text after it. It is a list file every fix PR adds to, and a
 # conflict in it resolved by keeping both sides left five bullets twice and one fix's entry promising the
 # opposite of what the code does in its stale second tail. `--selftest` runs that script's own self-test too.
 set -uo pipefail
@@ -446,7 +446,7 @@ selftest() {
   # opening mid-parenthesis), against a sample changelog rather than the tree's, which moves every PR.
   python3 scripts/check_changelog_residue.py --selftest || rc=1
 
-  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their eight re-breaks, check 7 against its four)"
+  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their eight re-breaks, check 7 against its seven)"
   else echo "selftest: FAIL"; fi
   return "$rc"
 }

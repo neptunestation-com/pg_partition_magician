@@ -14885,6 +14885,69 @@ MUTATION_SRC["archive_child_by_oid_cast_case_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_data_read_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_identity_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_set_operation_unread"] = _G1287_SRC
+# Issue #1386 (review pass 13, F13-03): the value a name may stand alone as is widened over every cast around it,
+# a cast to regclass included, so `select c.relname::regclass into v_x` (the relname resolved through search_path)
+# passes rule 1 while `regclass(c.relname)` is refused. One site, the stop at a cast to a name type.
+MUTATIONS["archive_child_by_oid_name_cast_alone"] = (
+    _G1287,
+    "Pre-#1386 scripts/check_archive_child_by_oid.py: widen() takes a cast to regclass around a name column as part "
+    "of the value that may stand alone in a select list, so `select c.relname::regclass into v_x` and `select "
+    "cast(c.relname as regclass) into v_x`, a relation found by its name, pass rule 1. One site, widen()'s stop.",
+    [("    while True:\n        if name_cast(toks, s, e):\n            return s, e\n", "    while True:\n", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_name_cast_alone"] = _G1287_SRC
+MUTATIONS["archive_child_by_oid_rendered_recast_alone"] = (
+    _G1287,
+    "#1386's sibling in scripts/check_archive_child_by_oid.py: rendered_regclass() widens a rendering over a cast "
+    "back to regclass, so `select c.oid::regclass::text::regclass into v_x`, the rendered name resolved again, is "
+    "one rendering standing alone and passes rule 1. One site, the rendering's stop.",
+    [("            if rendered and name_cast(toks, s, e):\n"
+      "                break                                 # the rendered name resolved again: no part of it (#1386)\n",
+      "", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_rendered_recast_alone"] = _G1287_SRC
+# Issue #1387 (review pass 13, F13-04 and F8-07): scripts/check_changelog_residue.py reads two versions of one
+# bullet as residue only when word for word the same, and a bullet only over its indented lines. One mutation per
+# clause of the fix; bench/lint_changelog_residue_spellings.sh catches both, on residue planted in the real file.
+MUTATIONS["changelog_residue_near_copy_unread"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: two bullets are compared for whole-text identity only, so two "
+    "versions of one reworded bullet kept side by side (#1161's bullet beside its older round, which says "
+    "`set_regrain` refuses where the bullet says it warns) pass. One site, the near-copy check.",
+    [("    for i, j, r in near_copies(bs):\n", "    for i, j, r in []:\n", 1)],
+)
+MUTATION_SRC["changelog_residue_near_copy_unread"] = "scripts/check_changelog_residue.py"
+MUTATIONS["changelog_residue_lazy_line_unread"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: bullets() goes on only over lines that start with a space, so a "
+    "stale tail glued after a bullet unindented, which Markdown renders as more of the same list item, is no "
+    "bullet's text and its repeated run passes. One site, the continuation test.",
+    [("        elif cur is not None and (line.startswith(\"  \") if gap else\n"
+      "                                  line.startswith(\" \") or not INTERRUPTS.match(line)):\n",
+      "        elif cur is not None and (line.startswith(\"  \") if gap else line.startswith(\" \")):\n", 1)],
+)
+MUTATION_SRC["changelog_residue_lazy_line_unread"] = "scripts/check_changelog_residue.py"
+MUTATIONS["changelog_residue_paragraph_unread"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: a blank line ends a bullet, so a stale tail kept after it as an "
+    "indented paragraph, which Markdown renders as the same list item's, is no bullet's text and its repeated run "
+    "passes. One site, the blank line's gap.",
+    [("        elif cur is not None and not line.strip():\n            gap = True\n",
+      "        elif cur is not None and not line.strip():\n            cur = None\n", 1)],
+)
+MUTATION_SRC["changelog_residue_paragraph_unread"] = "scripts/check_changelog_residue.py"
+MUTATIONS["changelog_residue_fence_ends_item"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: a code fence ends the bullet it stands in, so a stale tail kept "
+    "as a paragraph of the item after a code block fenced inside it is no bullet's text and its repeated run "
+    "passes. One site, the fence's handling of the item.",
+    [("            if cur is not None and line.startswith(\"  \"):\n"
+      "                gap = True                            # a code block inside the item: its text goes on after it\n"
+      "            else:\n"
+      "                cur = None\n",
+      "            cur = None\n", 1)],
+)
+MUTATION_SRC["changelog_residue_fence_ends_item"] = "scripts/check_changelog_residue.py"
 
 
 # Issues #1285 and #1286 (pass 12 G27): tests/72 asked only the role its policy names what it reads through the
