@@ -16512,6 +16512,50 @@ MUTATIONS["screenshot_chrome_reset"] = (
     [('CHROME="${CHROME:-}"\n', 'CHROME=""\n', 1)],
 )
 MUTATION_SRC["screenshot_chrome_reset"] = "scripts/screenshot.sh"
+MUTATIONS["land_renumber_by_substring"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 land.sh verify_tree: a duplicate guard database is located for renumbering with s.rfind(d), a "
+    "substring search, so when the duplicate (pgpm_perf33) prefixes a name later in test.sh (pgpm_perf332) that "
+    "unrelated guard's database is rewritten and the duplicate kept. One clause, the search. The guard's (g) "
+    "catches it (pgpm_perf332 rewritten; the run stops on the duplicate left).",
+    [('        i = [m.start() for m in re.finditer(re.escape(d) + r"\\b", s)][-1]\n',
+      '        i = s.rfind(d)\n', 1)],
+)
+MUTATION_SRC["land_renumber_by_substring"] = "scripts/review/land.sh"
+MUTATIONS["land_renumber_unchecked"] = (
+    "bench/review_tooling_verdicts.sh",
+    "#1389's re-check dropped: verify_tree does not read the names again after renumbering, so a database three "
+    "PRs took is written back twice while the run reports the guard databases unique. One clause. The guard's (g) "
+    "catches it (the triple written back with a duplicate, exit 0).",
+    [('    if left: print("    guard databases still duplicated after renumbering:", left); sys.exit(1)\n', '', 1)],
+)
+MUTATION_SRC["land_renumber_unchecked"] = "scripts/review/land.sh"
+MUTATIONS["stop_check_capture_half_to_even"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 stop_check.py criterion 4: the Tier 1 capture-recapture estimate is judged with Python's round(), "
+    "which rounds half to even, so 0.5 Tier 1 remaining (estimate 4.5, found 4) reads as rounding to zero and the "
+    "loop as converged. One clause, the comparison. The guard's (h) catches it.",
+    [('        c4_met = all(cr[p]["remaining"] < 0.5 for p in pair)\n',
+      '        c4_met = all(round(cr[p]["remaining"]) == 0 for p in pair)\n', 1)],
+)
+MUTATION_SRC["stop_check_capture_half_to_even"] = "scripts/review/stop_check.py"
+MUTATIONS["flake_check_lost_runner_by_steps_only"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 flake_check.sh lost_runner: the step count alone, so a job GitHub failed before any step with a log "
+    "naming a real error (a job container image that does not exist) is a known flake, exit 0, and land.sh reruns "
+    "it. One clause, the log's test. The guard's (i) catches it.",
+    [("    if grep -q '[^[:space:]]' <<<\"$jlog\" && ! grep -q 'BlobNotFound' <<<\"$jlog\"; then\n",
+      "    if false; then\n", 1)],
+)
+MUTATION_SRC["flake_check_lost_runner_by_steps_only"] = "scripts/review/flake_check.sh"
+MUTATIONS["flake_check_not_acquired_steps_unread"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 flake_check.sh runner_not_acquired: the annotation alone, though its header also requires that no "
+    "step ran, so a job carrying the annotation whose steps ran and failed is retried as a known flake. One "
+    "clause, the step count. The guard's (i) catches it.",
+    [('  [ "$steps" = 0 ] || { all_runner=0; break; }\n', '', 1)],
+)
+MUTATION_SRC["flake_check_not_acquired_steps_unread"] = "scripts/review/flake_check.sh"
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:

@@ -89,8 +89,13 @@ if dups:
     # two PRs each took "the next free" database; the branch's line is the LAST occurrence
     nxt = max(int(n[9:]) for n in names) + 1
     for d in dups:
-        i = s.rfind(d); s = s[:i] + f"pgpm_perf{nxt}" + s[i + len(d):]
+        # the last WHOLE-name occurrence: a substring search finds pgpm_perf33 inside pgpm_perf332 (#1389)
+        i = [m.start() for m in re.finditer(re.escape(d) + r"\b", s)][-1]
+        s = s[:i] + f"pgpm_perf{nxt}" + s[i + len(d):]
         print(f"    renumbered the second {d} to pgpm_perf{nxt}"); nxt += 1
+    names = re.findall(r"pgpm_perf[0-9]+\b", s)
+    left = sorted({n for n in names if names.count(n) > 1})
+    if left: print("    guard databases still duplicated after renumbering:", left); sys.exit(1)
     open("test.sh", "w").write(s)
 src = open("bench/mutations/mutate.py").read()
 tree = ast.parse(src)
