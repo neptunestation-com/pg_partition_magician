@@ -999,11 +999,13 @@ run_archive() {
   # claim row left unlocked before the ledger lookup.
   echo "--- a direct archive_fn call racing a tick on the same chunk is refused guard (issue #1069) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk_tick_race.sh" pgpm_test-archive pgpm_g1race || fail=1
-  # The read-back guard (#1093, #1284) re-runs tests/archive/db/08, 16 and 44 for the same reason: the clean-code
-  # half of the pairs bench/discriminate.sh completes with each file's read-back weakened to its pre-fix shape
-  # (archive_fn_parquet_readback_trusted, archive_fn_ndjson_readback_by_count,
-  # archive_key_parquet_readback_by_presence, archive_extres_parquet_by_prefix).
-  echo "--- tests/archive/db/08, 16 and 44 read their objects back by identity guard (issues #1093, #1284) ---"
+  # The read-back guard (#1093, #1284, #1376) re-runs tests/archive/db/08, 16, 26, 42, 44, 48 and 54 for the same
+  # reason: the clean-code half of the pairs bench/discriminate.sh completes with each file's read-back weakened
+  # to its pre-fix shape (archive_fn_parquet_readback_trusted, archive_fn_ndjson_readback_by_count,
+  # archive_key_parquet_readback_by_presence, archive_extres_parquet_by_prefix, archive_schema_zone_parquet_by_size,
+  # archive_recorded_chunk_rerun_by_length, archive_recorded_rows_rerun_by_length,
+  # archive_direct_bounds_parquet_by_status).
+  echo "--- tests/archive/db/08, 16, 26, 42, 44, 48 and 54 read their objects back by identity guard (issues #1093, #1284, #1376) ---"
   bash "$(dirname "$0")/bench/archive_fn_s3_readback.sh" pgpm_test-archive pgpm_perf123 || fail=1
   # The key-by-resolved-oid guard (#1064) re-runs tests/archive/db/49 for the same reason, and runs
   # scripts/check_archive_child_by_oid.py on the module: the clean-code half of the pair bench/discriminate.sh
@@ -1360,6 +1362,7 @@ run_perf() {
     "bench/archive_log_bounds_canonical.sh pgpm_perf424"
     "bench/archive_remedy_encoded_bounds.sh pgpm_perf425"
     "bench/tests_identity_not_count.sh pgpm_perf426"
+    "bench/verify_parquet_tests_see_rows.sh pgpm_perf427"
   )
   local selected=()
   local n=${#guards[@]} idx

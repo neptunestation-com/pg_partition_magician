@@ -74,6 +74,21 @@ begin
 end;
 $$;
 
+-- An object's bytes (null when there is none); text_to_bytea undoes the extension's reinterpretation of the
+-- body, as in tests/archive/db/16, so a Parquet object reads back as the bytes that were PUT.
+create function t54.object(p_parent regclass, p_key text) returns bytea
+language plpgsql as $$
+declare cfg archive.config; v_key_id text; v_secret text; v_resp record;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
+  select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;
+  v_resp := archive.s3_signed_request('GET', cfg.endpoint, cfg.bucket, cfg.region, p_key, '', 'text/plain', '', v_key_id, v_secret);
+  if v_resp.status not between 200 and 299 then return null; end if;
+  return text_to_bytea(v_resp.content);
+end;
+$$;
+
 -- What a session on the default DateStyle and zone reads a bound text as: the reading the stem used to apply.
 create function t54.default_reading(p_text text) returns text
 language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$ select pgpm._ts_text(p_text::timestamptz) $$;
@@ -126,8 +141,11 @@ reset datestyle;
 select is(:'pq_rows_archived'::bigint, 2::bigint, 'the Parquet call archived the two rows of the range it read');
 select is(:'pq_s3_key'::text, :'p' || 't54.pq_2024010200000000.parquet',
   'the Parquet object is keyed by the 2 January the call read, not the 1 February the text names elsewhere');
-select is(t54.status('t54.pq', 'GET', :'p' || 't54.pq_2024010200000000.parquet'), 200,
-  'the Parquet object sits at the 2 January key');
+-- by its rows, as the NDJSON one is (#1376): byte for byte the file of the 2 January cell, ids 1 and 2
+select ok(t54.object('t54.pq', :'p' || 't54.pq_2024010200000000.parquet')
+          = archive._pq_to_parquet_range('t54.pq', 'ts', '2024-01-02 00:00:00+00', '2024-01-03 00:00:00+00',
+                                         (select compress from archive.config where parent_table = 't54.pq'::regclass)),
+  'the Parquet object at the 2 January key is byte for byte the file of the 2 January rows, ids 1 and 2');
 select is(t54.status('t54.pq', 'GET', :'p' || 't54.pq_2024020100000000.parquet'), 404,
   'nothing was written at the 1 February chunk''s key');
 

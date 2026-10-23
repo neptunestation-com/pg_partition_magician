@@ -131,8 +131,10 @@ select is(t48.rows(:'knd'), t48.expect('n', 1, 90),
   'CONTROL: the re-run left the NDJSON object holding exactly ids 1..90');
 -- the Parquet object as the re-run left it, which is what retire() leaves as the only copy
 create temp table t48_pq_rerun as select t48.bytes(:'kpq') as b;
-select ok((select octet_length(b) > 0 from t48_pq_rerun),
-  'CONTROL: the re-run left a Parquet object at the key');
+-- by identity (#1376): the file of the chunk's 70 rows, which are still in the table, under its compress setting
+select ok((select b from t48_pq_rerun) = archive._pq_to_parquet_range('t48.pq', 'id', '0', '100',
+                                            (select compress from archive.config where parent_table = 't48.pq'::regclass)),
+  'CONTROL: the re-run left at the key byte for byte the Parquet file of the chunk''s 70 rows');
 
 -- ======================================================================================================
 -- retire() drops the partitions; the objects are the only copies

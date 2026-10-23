@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **Four more archive tests judge a Parquet object by identity** (#1376). `tests/archive/db/26` Part B judged the
+  t26a object by being larger than t26b's 3-row file, so an object holding 10 of t26a's 20 rows passed;
+  `tests/archive/db/42` and `tests/archive/db/48` asked only `octet_length > 0` of the object the documented
+  Parquet re-run left, and every later "still holds its bytes" check compares with that capture, so a re-run that
+  left 35 of the chunk's 70 rows at its key passed the whole file; and `tests/archive/db/54` Part B asked only
+  that an object sits at the 2 January key. Each object is now compared byte for byte with the Parquet file of
+  its own chunk (26 takes the files before the tick retires the rows). `bench/archive_fn_s3_readback.sh` now
+  judges these four files too, against a strategy that PUTs every row of the chunk but the last while recording
+  them all (mutations `archive_schema_zone_parquet_by_size`, `archive_recorded_chunk_rerun_by_length`,
+  `archive_recorded_rows_rerun_by_length` and `archive_direct_bounds_parquet_by_status`). A test change only.
+
+- **The independent-reader checks of the Parquet writer compare row counts and see a misaligned tie** (#1388).
+  `scripts/verify_parquet.py`'s `test_timestamptz`, `test_uuid`, `test_uuid_nullable` and `test_timestamp_naive`
+  compared the file's rows one by one over the expected list and never the counts, so a file holding a spurious
+  extra row passed; each now asks `same_count` first, the count check `check()` shares. And
+  `scripts/verify_parquet_range.py`'s keyless fixture had one column besides the control, so a writer that read
+  each column in its own order wrote the same rows a correct one does; its tied rows now differ in two columns.
+  `bench/verify_parquet_tests_see_rows.sh` runs those test functions against a writer that adds a row, drops one
+  or misaligns the tie (mutations `verify_parquet_timestamptz_rows_uncounted`, `verify_parquet_uuid_rows_uncounted`,
+  `verify_parquet_uuid_nullable_rows_uncounted`, `verify_parquet_naive_rows_uncounted` and
+  `verify_parquet_range_keyless_one_column`).
+
 - **Core tests name the rows, parents and constraint they say survive** (#1374). Twenty-three assertions in
   `tests/51`, `52`, `67`, `69`, `70`, `74`, `79`, `80`, `88`, `91`, `93`, `105`, `108`, `115`, `121` and `295`
   asserted conservation by a count: `count(*) = N`, a count compared with a snapshot's, `status()` and

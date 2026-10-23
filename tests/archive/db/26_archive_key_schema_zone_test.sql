@@ -17,11 +17,14 @@
 -- (identity, not merely "the two differ"), from sessions chosen so that the old rendering would differ.
 --
 -- Fixtures are asymmetric so that a clobbered object cannot pass an identity check: 20 rows against 3 in
--- the two `evt` tables and in the two `pq` tables, 3 rows against 1 in the two time chunks. Every
+-- the two `evt` tables and in the two `pq` tables, 3 rows against 1 in the two time chunks. Each object is
+-- judged by identity too: an NDJSON one by its ids, a Parquet one byte for byte against the file of its own
+-- chunk, taken before the tick (retire() drops the rows after it). Part B used to judge the t26a object by
+-- its size (larger than t26b's), which an object holding 10 of t26a's 20 rows also is (#1376). Every
 -- candidate key (the shared legacy one and each new one) is cleared and witnessed absent first, because
 -- the bucket outlives a test database; the prefix carries current_database() so a concurrent run of this
 -- file elsewhere cannot share a key with this one.
-select plan(36);
+select plan(37);
 
 create schema t26;
 
@@ -62,7 +65,8 @@ end;
 $$;
 
 -- An object's byte length (null when there is none); text_to_bytea undoes the extension's reinterpretation
--- of the body, as in tests/archive/db/16, so a Parquet object's length is its real one.
+-- of the body, as in tests/archive/db/16, so a Parquet object's length is its real one. For the diagnostic
+-- line only: a size is no identity (#1376).
 create function t26.bytes(p_parent regclass, p_key text) returns int
 language plpgsql as $$
 declare cfg archive.config; v_key_id text; v_secret text; v_resp http_response;
@@ -73,6 +77,20 @@ begin
   v_resp := archive.s3_signed_request('GET', cfg.endpoint, cfg.bucket, cfg.region, p_key, '', 'text/plain', '', v_key_id, v_secret);
   if v_resp.status not between 200 and 299 then return null; end if;
   return octet_length(text_to_bytea(v_resp.content));
+end;
+$$;
+
+-- An object's bytes (null when there is none), read back the same way: what an identity check compares.
+create function t26.object(p_parent regclass, p_key text) returns bytea
+language plpgsql as $$
+declare cfg archive.config; v_key_id text; v_secret text; v_resp http_response;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
+  select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;
+  v_resp := archive.s3_signed_request('GET', cfg.endpoint, cfg.bucket, cfg.region, p_key, '', 'text/plain', '', v_key_id, v_secret);
+  if v_resp.status not between 200 and 299 then return null; end if;
+  return text_to_bytea(v_resp.content);
 end;
 $$;
 
@@ -150,6 +168,16 @@ select archive.configure('t26b.pq', 'archive-test-bucket', p_endpoint => 'http:/
 select pgpm.set_archive_fn('t26a.pq', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 select pgpm.set_archive_fn('t26b.pq', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 
+-- each chunk's Parquet file as the tick encodes it, under the table's own compress setting, taken now: the tick's
+-- retire() drops the rows
+select is((select array_agg(id order by id) from t26a.pq where id < 10000) || (select array_agg(-id order by id) from t26b.pq where id < 10000),
+          (select array_agg(g::bigint) from generate_series(1, 20) g) || array[-1, -2, -3]::bigint[],
+  'LIVENESS: t26a.pq holds exactly ids 1..20 and t26b.pq ids 1..3 in [0, 10000) when their files are taken');
+create temp table t26_pq_file as
+  select t.tbl, archive._pq_to_parquet_range(t.tbl::regclass, 'id', '0', '10000',
+                                             (select compress from archive.config where parent_table = t.tbl::regclass)) as file
+    from (values ('t26a.pq'), ('t26b.pq')) t(tbl);
+
 select is(t26.clear('t26a.pq', :'p' || 'pq_0.parquet'), 404, 'LIVENESS: no object at the shared legacy key <prefix>pq_0.parquet');
 select is(t26.clear('t26a.pq', :'p' || 't26a.pq_0.parquet'), 404, 'LIVENESS: no object at <prefix>t26a.pq_0.parquet');
 select is(t26.clear('t26b.pq', :'p' || 't26b.pq_0.parquet'), 404, 'LIVENESS: no object at <prefix>t26b.pq_0.parquet');
@@ -170,8 +198,12 @@ select is((select s3_key from pgpm.archive_ledger where parent_table = 't26a.pq'
 select is((select s3_key from pgpm.archive_ledger where parent_table = 't26b.pq'::regclass and lo = '0'),
           :'p' || 't26b.pq_0.parquet',
   'the parquet key names t26b.pq schema-qualified');
-select ok(t26.bytes('t26a.pq', :'p' || 't26a.pq_0.parquet') > t26.bytes('t26b.pq', :'p' || 't26b.pq_0.parquet'),
-  'the t26a object is the larger, 20-row file, not the 3-row file that used to share its key');
+select diag(format('parquet: the t26a object is %s bytes, the t26b object %s bytes',
+                   t26.bytes('t26a.pq', :'p' || 't26a.pq_0.parquet'), t26.bytes('t26b.pq', :'p' || 't26b.pq_0.parquet')));
+select is((select string_agg(f.tbl || ':' || coalesce((t26.object(f.tbl::regclass, :'p' || f.tbl || '_0.parquet') = f.file)::text, 'no object'),
+                             ', ' order by f.tbl) from t26_pq_file f),
+          't26a.pq:true, t26b.pq:true',
+  'each object is byte for byte the Parquet file of its own chunk: t26a''s 20 rows, not the 3-row file that used to share its key');
 select is(t26.status('t26a.pq', 'GET', :'p' || 'pq_0.parquet'), 404,
   'nothing was written at the shared, search_path-relative key <prefix>pq_0.parquet');
 

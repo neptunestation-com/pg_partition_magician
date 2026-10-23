@@ -93,7 +93,10 @@ def read_with_both_readers(raw):
         os.unlink(path)
 
 
-def check(name, expected, arrow_rows, duck_rows):
+def same_count(name, expected, arrow_rows, duck_rows):
+    """Whether each reader read exactly as many rows as the table holds, recording a failure when not. A test
+    that walks the expected rows one by one never sees a row the file holds beyond them, so every comparison
+    here asks this first (#1388): check() does, and so does each test that compares its rows by hand."""
     ok = True
     if len(arrow_rows) != len(expected):
         FAILURES.append(f"{name}: pyarrow row count {len(arrow_rows)} != expected {len(expected)}")
@@ -101,6 +104,11 @@ def check(name, expected, arrow_rows, duck_rows):
     if len(duck_rows) != len(expected):
         FAILURES.append(f"{name}: duckdb row count {len(duck_rows)} != expected {len(expected)}")
         ok = False
+    return ok
+
+
+def check(name, expected, arrow_rows, duck_rows):
+    ok = same_count(name, expected, arrow_rows, duck_rows)
     for i, exp in enumerate(expected):
         if i >= len(arrow_rows) or i >= len(duck_rows):
             break
@@ -196,8 +204,8 @@ def test_timestamptz(conn):
     arrow_rows, duck_rows = read_with_both_readers(raw)
     expected_raw = run(conn, "select ts from t_ts order by ctid")
     expected = [{"ts": r[0]} for r in expected_raw]
-    ok = True
-    for i, exp in enumerate(expected):
+    ok = same_count("timestamptz", expected, arrow_rows, duck_rows)
+    for i, exp in enumerate(expected[:min(len(arrow_rows), len(duck_rows))]):
         exp_ts = exp["ts"]
         a_ts = arrow_rows[i]["ts"]
         d_ts = duck_rows[i]["ts"]
@@ -320,7 +328,9 @@ def test_timestamp_naive(conn):
         ok = False
 
     arrow_rows, duck_rows = read_with_both_readers(raw)
-    for i, (exp_ts, exp_tstz) in enumerate(zip(expected_ts, expected_tstz)):
+    if not same_count("timestamp naive", expected_ts, arrow_rows, duck_rows):
+        ok = False
+    for i, (exp_ts, exp_tstz) in enumerate(list(zip(expected_ts, expected_tstz))[:min(len(arrow_rows), len(duck_rows))]):
         a_ts, d_ts = arrow_rows[i]["ts"], duck_rows[i]["ts"]
         if a_ts.tzinfo is not None or a_ts != exp_ts:
             FAILURES.append(f"timestamp naive: row {i} pyarrow ts={a_ts!r} expected naive {exp_ts!r}")
@@ -567,8 +577,8 @@ def test_uuid(conn):
     arrow_rows, duck_rows = read_with_both_readers(raw)
     expected_raw = run(conn, "select uuid_send(u) from t_uuid order by ctid")
     expected = [{"u": bytes(r[0])} for r in expected_raw]
-    ok = True
-    for i, exp in enumerate(expected):
+    ok = same_count("uuid", expected, arrow_rows, duck_rows)
+    for i, exp in enumerate(expected[:min(len(arrow_rows), len(duck_rows))]):
         a = arrow_rows[i]["u"]
         d = duck_rows[i]["u"]
         av = bytes(a) if a is not None else a
@@ -592,8 +602,8 @@ def test_uuid_nullable(conn):
     arrow_rows, duck_rows = read_with_both_readers(raw)
     expected_raw = run(conn, "select uuid_send(u) from t_uuid_null order by ctid")
     expected = [{"u": (bytes(r[0]) if r[0] is not None else None)} for r in expected_raw]
-    ok = True
-    for i, exp in enumerate(expected):
+    ok = same_count("uuid nullable", expected, arrow_rows, duck_rows)
+    for i, exp in enumerate(expected[:min(len(arrow_rows), len(duck_rows))]):
         a = arrow_rows[i]["u"]
         d = duck_rows[i]["u"]
         av = bytes(a) if a is not None else a
