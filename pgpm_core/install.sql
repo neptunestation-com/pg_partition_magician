@@ -5740,9 +5740,11 @@ $$;
 -- (p_latest false), the latest for a hi. Text that names its instant (pgpm._native_named) is that instant. Any
 -- other text was written in a session whose TimeZone and DateStyle nothing recorded, so it is read as wall time
 -- under each DateStyle that parses it (MDY and DMY: every pre-#500 render carries a four-digit year), ignoring any
--- zone it names, and placed in the zone furthest along: UTC+14 for a lo, UTC-12 for a hi. Nothing narrower is
--- safe: the chunk is the record of the only copy of its rows, and a partition it does not hold is archived to its
--- key. Text nothing parses (a strategy's covered_hi in another encoding, a named shape with month 13) could be
+-- zone it names, and placed at the furthest offset a session can take: 168 hours east of UTC for a lo, 168 west
+-- for a hi (#1363). Not the -12 to +14 of today's civil zones: SET accepts a POSIX zone to 167:59:60 either side
+-- ('XYZ167:59:60' is UTC-168), an interval or a number of hours to just under that, and tzdata's LMT reaches
+-- -15:56:08 (Asia/Manila before 1845). Nothing narrower is safe: the chunk is the record of the only copy of its
+-- rows, and a partition it does not hold is archived to its key. Text nothing parses (a strategy's covered_hi in another encoding, a named shape with month 13) could be
 -- anywhere, so it reaches as far as a bound can, -Infinity for a lo and Infinity for a hi, rather than raising out of
 -- every archive step and retain() of the parent (#1351's P1-02). The SET clauses keep the DateStyle it sets to the call.
 create or replace function pgpm._native_bound_reach(p_kind text, p_text text, p_tz text, p_latest boolean)
@@ -5765,7 +5767,7 @@ begin
     end loop;
   end if;
   if v is null then return case when p_latest then 'Infinity' else '-Infinity' end::numeric; end if;
-  return v + case when p_latest then 43200 else -50400 end;
+  return v + case when p_latest then 604800 else -604800 end;
 end;
 $$;
 
@@ -6070,7 +6072,7 @@ begin
                          '. If they are, because %I is the relation those chunks were read from, renamed (an upgrade cannot tell that from a drop), the rows are in a live partition: once you have confirmed it holds them, delete the retired rows recorded under %s (delete from pgpm.archive_ledger where parent_table = %L::regclass and child_name = <that name> and retired_at is not null) and it archives afresh',
                          r.child_name, r.other_names, p_parent::text) else '' end,
                        case when r.unnamed is not null then format(
-                         '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach in any zone from UTC-12 to UTC+14 and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
+                         '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach at any offset a session can take (to 168 hours either side of UTC) and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
                          r.unnamed, p_parent::text) else '' end));
     end if;
   end loop;
