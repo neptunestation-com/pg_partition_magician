@@ -13556,13 +13556,84 @@ MUTATIONS["throws_pinned_site_by_spelling"] = (
     "bench/throws_pinned_sites.sh",
     "Pre-#1182 bench/throws_pinned.sh: a statement is a site only when its text matches `call\\s+pgpm\\.`, so an "
     "unpinned throws_ok around call \"pgpm\".transmute, CALL PGPM . \"transmute\", a commented or unqualified call, "
-    "or a format() with the schema as %I is never probed and the file passes on a pinned neighbour. One site, the "
-    "exact pre-#1182 decision; calls_pgpm and its self-check are left in place (the self-check still passes), so "
-    "only a run over files can tell.",
-    [("        if not calls_pgpm(args[0]):\n",
-      "        if not re.search(r\"\\bcall\\s+pgpm\\.\", args[0], re.I):\n", 1)],
+    "a format() with the schema as %I, or a statement assembled by || is never probed and the file passes on a "
+    "pinned neighbour. One clause, the exact pre-#1182 decision put back in front of the site (#1235 removed the "
+    "decision altogether, so it is added here rather than swapped), and only a run over files can tell.",
+    [("        args, _end = split\n        kind = m.group(1).lower()\n",
+      "        args, _end = split\n"
+      "        if not re.search(r\"\\bcall\\s+pgpm\\.\", args[0], re.I):\n"
+      "            continue\n"
+      "        kind = m.group(1).lower()\n", 1)],
 )
 MUTATION_SRC["throws_pinned_site_by_spelling"] = "bench/throws_pinned.sh"
+
+# Issue #1235: bench/throws_pinned.sh probes EVERY throws_*, whatever its statement, and its closing summary
+# restates the per-site verdicts rather than being one. One test-file mutation for the real guard on a real file,
+# and four that put a reading by text (or the unprefixed summary) back into the guard, for
+# bench/throws_pinned_sites.sh.
+MUTATIONS["throws_ok_helper_unpinned"] = (
+    "bench/throws_pinned.sh",
+    "A throws_ok($$ call pg_temp.mk72(...) $$, NULL, desc) added to tests/72 beside its pinned throws_like: a test's "
+    "own helper procedure around pgpm.transmute, the pg_temp.mk and mk_archive_table shape. A helper that does not "
+    "refuse dies with the transmute's 2D000 inside pgTAP and the NULL accepts it. Pre-#1235 bench/throws_pinned.sh "
+    "probed only a statement that CALLed a pgpm procedure by name, so this was no site and the file passed on the "
+    "pinned neighbour alone; the neighbour is there for the reason throws_ok_one_argument gives.",
+    [("select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n",
+      "select throws_ok($$ call pg_temp.mk72('public.ev72t') $$, NULL,\n"
+      "  'an unpinned refusal: through a helper of the test');\n"
+      "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
+)
+MUTATION_SRC["throws_ok_helper_unpinned"] = "tests/72_transmute_attributes_test.sql"
+MUTATIONS["throws_pinned_site_by_name"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh: a statement is a site only when it names pgpm, a reading by the name its CALL "
+    "spells, so an unpinned throws_ok around a test's own helper (call pg_temp.mk, select pg_temp.mk_fn), a "
+    "statement held in a psql variable (:'stmt') or a U&\"!0070gpm\" UESCAPE '!' name is no site and the file passes "
+    "on its pinned neighbour (B07-01, B07-02, B07-04, F8-06). One clause in front of the site.",
+    [("        args, _end = split\n        kind = m.group(1).lower()\n",
+      "        args, _end = split\n"
+      "        if \"pgpm\" not in args[0].lower():\n"
+      "            continue\n"
+      "        kind = m.group(1).lower()\n", 1)],
+)
+MUTATION_SRC["throws_pinned_site_by_name"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_comment_by_spelling"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh: a throws_* is skipped as commented out when a `--` appears anywhere before it "
+    "on its line, so select is(x, 'a -- b'); select throws_ok($$ call pgpm.transmute(...) $$, NULL, desc) is no site "
+    "and the file passes on its pinned neighbour.",
+    [("        if commented(src, m.start()):\n",
+      "        if \"--\" in src[src.rfind(\"\\n\", 0, m.start()) + 1:m.start()]:\n", 1)],
+)
+MUTATION_SRC["throws_pinned_comment_by_spelling"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_quoted_form"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh: the assertion is read by its unquoted name only, so select "
+    "\"throws_ok\"($$ call pgpm.transmute(...) $$, NULL, desc), the same function to the server, is no site and the "
+    "file passes on its pinned neighbour.",
+    [("CALL = re.compile(r'\"?\\bthrows_(' + \"|\".join(re.escape(f) for f in forms) + r')\"?\\s*\\(', re.I)\n",
+      "CALL = re.compile(r'\\bthrows_(' + \"|\".join(re.escape(f) for f in forms) + r')\\s*\\(', re.I)\n", 1)],
+)
+MUTATION_SRC["throws_pinned_quoted_form"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_var_in_comment"] = (
+    "bench/throws_pinned_sites.sh",
+    "bench/throws_pinned.sh's psql_var() reading a pattern's /* */ comments as text, so throws_ok($$ call "
+    "pgpm.transmute(...) $$, NULL /* :expected */, desc) reads as a pattern built from a psql variable, is reported "
+    "unevaluable and never probed, and the file passes on its pinned neighbour (#1235, review thread on PR #1395). "
+    "One clause, the block-comment skip.",
+    [("        elif text.startswith(\"/*\", i):\n            depth, i = 1, i + 2   # nested, as the server reads them\n",
+      "        elif False:\n            depth, i = 1, i + 2   # nested, as the server reads them\n", 1)],
+)
+MUTATION_SRC["throws_pinned_var_in_comment"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_summary_not_restated"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh (B06-02): the closing FAIL summary is a plain verdict rather than a restated "
+    "`N ran, M failed`, so a run whose only failure is its LIVENESS: zero-site premise reads to discriminate.sh's "
+    "starved() as a defect check and is certified as a catch. One clause, the restated tail.",
+    [("of ${sites:-none}: $judged ran, $((accepts + malformed)) failed\"\n",
+      "of ${sites:-none}\"\n", 1)],
+)
+MUTATION_SRC["throws_pinned_summary_not_restated"] = "bench/throws_pinned.sh"
 
 # Pass 11's three novel seeds (#1226), catalogued after the pass with a guard that fails against each: no test
 # caught them while they were planted, and every finder had to find them by reading.
@@ -15145,6 +15216,13 @@ MUTATION_SRC["fh_conservation_by_count"] = "bench/run_fh.sh"
 # would silently stop balancing the mutation it was measured for.
 MUTATION_COST_DEFAULT = 2
 MUTATION_COST = {
+    # bench/throws_pinned_sites.sh, measured 2026-10-22 on the core image: about 16 s, 17 runs of the guard.
+    "throws_pinned_site_by_spelling": 16,
+    "throws_pinned_site_by_name": 16,
+    "throws_pinned_comment_by_spelling": 16,
+    "throws_pinned_quoted_form": 16,
+    "throws_pinned_var_in_comment": 16,
+    "throws_pinned_summary_not_restated": 16,
     "archive_lz77_hash_scratch": 240,
     "archive_deflate_raises": 112,
     "archive_deflate_six_arrays": 94,

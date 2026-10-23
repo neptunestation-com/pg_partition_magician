@@ -185,9 +185,10 @@ transmute_lock_timeout|D|transmute gives up instead of waiting forever
 archive_recorded_chunk_tick_race|W|the race fixture was built
 archive_recorded_chunk_tick_race|W|the archive module under test installed
 archive_recorded_chunk_tick_race|D|the direct call for \[0, 50\) was refused
-throws_pinned|W|the probe found at least one throws_\* around call pgpm\.
+throws_pinned|W|the probe found at least one throws_\* assertion
 throws_pinned|W|2D000 is raised inside the wrapper and NULL accepts it
-throws_pinned|D|every throws_\* around call pgpm\. rejects a bare 2D000
+throws_pinned|W|every site the probe found was judged
+throws_pinned|D|accepts 2D000: a procedure that did NOT refuse satisfies it
 tests_fail_on_defect|W|planted the defect:
 tests_fail_on_defect|W|the clean install loaded
 tests_fail_on_defect|W|the install with no length check loaded
