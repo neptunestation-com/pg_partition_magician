@@ -30,8 +30,11 @@
 --           the namesake keeps both its rows.
 --   PART E  the swap's TRUNCATE of a delta never written (no page to empty) waits behind a reader, in the tick that
 --           grants the table's new writer INSERT on the delta (a write of its pg_class row); the schema is swapped
---           with a namesake delta holding two rows: the TRUNCATE's effect check refuses (the delta was not created by
---           this transaction, whatever wrote its catalog row), the namesake keeps its rows, and the next tick swaps.
+--           with a namesake delta holding two rows: the TRUNCATE's effect check refuses (this transaction held no
+--           ACCESS EXCLUSIVE on the delta before it, whatever wrote its catalog row), the namesake keeps its rows,
+--           and the next tick swaps.
+--           E2: two regrain_cancel calls in one transaction, the second TRUNCATE emptying in place a delta an earlier
+--           transaction created: accepted (this transaction already held its ACCESS EXCLUSIVE lock), the delta empty.
 -- Every concurrent order is set by a lock queue: a second session ('h350') holds the lock, a third ('r350') makes the
 -- call, and a server-side poll (snapshot cleared every iteration) sees the call waiting on the oid before the holder
 -- renames, creates and commits.
@@ -45,7 +48,7 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(49);
+select plan(53);
 
 -- the call in session r350 is waiting, ungranted, on p_oid (in p_mode, or any mode when it is null): one statement
 -- per sample, snapshot cleared
@@ -344,6 +347,35 @@ select is(pgpm.regrain_step(:'e_parent'::oid::regclass, :'e_src', '500', 1000), 
 select is(pg_temp.rows_of(:'e_parent'),
   (select array_agg(g * 10 || '=real' order by g) from generate_series(1, 99) g) || '20000=frontier'::text,
   'E: and the table serves every one of ids 10..990 and its frontier row');
+-- E2: the other half of that judge. Two regrain_cancel calls in one transaction truncate the delta twice: the first
+-- gives it a new file, and PostgreSQL empties that one in place on the second, the file being this transaction's
+-- already. The delta was created by an earlier transaction, so a judge by its creation refused the second cancel as
+-- a redirected TRUNCATE; the judge is the ACCESS EXCLUSIVE this transaction already held on the delta's oid.
+create schema e2350s;
+create table e2350s.t (id bigint primary key, payload text);
+insert into e2350s.t select g * 10, 'real' from generate_series(1, 99) g;
+call pgpm.transmute('e2350s.t', 'id', 1000, p_paused => true);
+insert into e2350s.t values (20000, 'frontier');
+select is(pgpm.regrain_step('e2350s.t', (select child_name from pgpm.part
+    where parent_table = 'e2350s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
+  'fixture: E2''s regrain is prepared, its delta committed');
+insert into e2350s.t values (25, 'captured');
+select regrain_delta_oid as e2_delta from pgpm.config where parent_table = 'e2350s.t'::regclass \gset
+select ok(pg_temp.n_of(:'e2_delta') > 0, 'fixture: E2''s delta holds the captured key 25');
+create function pg_temp.cancel_twice(p_parent regclass, p_delta oid) returns text language plpgsql as $$
+declare v_first oid; v_second oid;
+begin
+  perform pgpm.regrain_cancel(p_parent);
+  select relfilenode into v_first from pg_class where oid = p_delta;
+  perform pgpm.regrain_cancel(p_parent);
+  select relfilenode into v_second from pg_class where oid = p_delta;
+  return case when v_first = v_second then 'in place' else 'new file' end;
+exception when others then
+  return 'refused: ' || sqlerrm;
+end $$;
+select is(pg_temp.cancel_twice('e2350s.t', :'e2_delta'), 'in place',
+  'E2: a second regrain_cancel in the same transaction empties the delta in place, not refused as a redirection');
+select is(pg_temp.n_of(:'e2_delta'), 0::bigint, 'E2: and the delta is empty');
 revoke all on e350s_aside.t from e350_writer;
 drop owned by e350_writer;
 drop role e350_writer;

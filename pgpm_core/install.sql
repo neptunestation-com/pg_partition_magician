@@ -3968,21 +3968,25 @@ end;
 $$;
 
 -- TRUNCATE p_rel: its relfilenode must have changed (#1335 b10, round 3). A relation created or rewritten in the
--- current subtransaction is truncated in place and keeps its relfilenode (regrain() prepares and swaps in one
--- transaction); it is accepted then only empty and only if this transaction CREATED it, which also means this
--- transaction has held ACCESS EXCLUSIVE on it since, so the TRUNCATE never waited for it. Created, read from the row
--- its CREATE wrote for its ctid column, which nothing rewrites, and not from its pg_class row (#1358): a GRANT or an
--- owner change this transaction rewrites that one, and a never-written delta (no page to empty) under the swap's
--- grant to a new writer passed while the TRUNCATE emptied a namesake.
+-- current transaction is truncated in place and keeps its relfilenode (regrain() prepares and swaps in one
+-- transaction; two regrain_cancel calls in one truncate the delta twice); it is accepted then only empty and only
+-- if this transaction already held ACCESS EXCLUSIVE on p_rel's oid before the TRUNCATE (its CREATE, or its earlier
+-- TRUNCATE or rewrite, took it, and it is held to the end), so the TRUNCATE waited for nothing of it and reached it.
+-- Not "this transaction wrote its pg_class row" (#1358): a GRANT or an owner change writes that one too, and a
+-- never-written delta (no page to empty) under the swap's grant to a new writer passed while the TRUNCATE, waiting
+-- behind a reader, emptied a namesake.
 create or replace function pgpm._truncate_checked(p_rel regclass, p_what text)
 returns void language plpgsql as $$
-declare v_rfn oid := (select c.relfilenode from pg_class c where c.oid = p_rel);
+declare
+  v_rfn oid := (select c.relfilenode from pg_class c where c.oid = p_rel);
+  v_held boolean := exists (select 1 from pg_catalog.pg_locks l
+                             where l.locktype = 'relation' and l.relation = p_rel::oid and l.pid = pg_backend_pid()
+                               and l.granted and l.mode = 'AccessExclusiveLock'
+                               and l.database = (select d.oid from pg_database d where d.datname = current_database()));
 begin
   execute format('truncate %s', p_rel::text);
   perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn
-    or (pg_relation_size(p_rel) = 0
-        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)
-                            + (select a.xmin::text::bigint from pg_attribute a where a.attrelid = p_rel and a.attnum = -1))::text::xid8) = 'in progress'),
+    or (pg_relation_size(p_rel) = 0 and v_held),
     p_rel, p_what);
 end;
 $$;

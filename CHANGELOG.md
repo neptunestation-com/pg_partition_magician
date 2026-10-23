@@ -22,12 +22,13 @@
   table, and the caller's owner and ACL mint, bound `CHECK`, `pgpm.part` anchor and first batch no longer name a
   namesake. The reconcile locks the change-capture delta by oid before its first read and names it at each
   statement, so it no longer consumes a namesake delta's rows as its batch. And `pgpm._truncate_checked` accepts a
-  `TRUNCATE` that kept the relation's file only for a relation this transaction created, judged by the row its
-  `CREATE` wrote for its `ctid` column: judged by its `pg_class` row, which the swap tick's grant to a new writer of
-  the table rewrites too, a never-written delta passed while the swap's `TRUNCATE` emptied a namesake. `tests/350`
+  `TRUNCATE` that kept the relation's file only when this transaction already held `ACCESS EXCLUSIVE` on its oid
+  before it (its `CREATE`, or an earlier `TRUNCATE` of it, as a second `regrain_cancel` in one transaction makes):
+  judged by its `pg_class` row, which the swap tick's grant to a new writer of the table rewrites too, a
+  never-written delta passed while the swap's `TRUNCATE` emptied a namesake. `tests/350`
   is the acceptance test; `bench/regrain_copy_by_oid.sh` runs it against `regrain_copy_batch_unlocked`,
-  `regrain_copy_make_returns_by_name`, `regrain_reconcile_delta_unlocked` and
-  `truncate_checked_inplace_by_catalog_write`.
+  `regrain_copy_make_returns_by_name`, `regrain_reconcile_delta_unlocked`,
+  `truncate_checked_inplace_by_catalog_write` and `truncate_checked_inplace_by_creation`.
 
 - **A retired chunk's offset-less bound reaches every offset a session can take** (#1363). `pgpm._native_bound_reach`
   widened a retired ledger row's bound that names no instant (a pre-#977 `covered_hi`) only to UTC-12 for a `hi`

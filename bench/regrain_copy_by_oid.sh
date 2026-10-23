@@ -12,7 +12,7 @@
 # file is the acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run
 # against the mutant, in the shape of bench/retire_locks_by_oid.sh.
 #
-# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
+# FIVE mutations are required to fail against it (bench/mutations/mutate.py):
 #   regrain_copy_batch_unlocked        -- the copy and the source are not locked by oid before the INSERT, so it
 #                                         waits by name and reaches the namesakes (parts A and B).
 #   regrain_copy_make_returns_by_name  -- _regrain_copy_make hands back the copy by its name after its statements
@@ -25,6 +25,10 @@
 #                                         pg_class row, which the swap tick's GRANT to a new writer does, so a
 #                                         never-written delta passes while the swap's TRUNCATE empties a namesake
 #                                         (part E).
+#   truncate_checked_inplace_by_creation
+#                                      -- the in-place branch asks whether this transaction created the delta, so a
+#                                         second regrain_cancel in one transaction, whose TRUNCATE empties in place
+#                                         the file the first gave it, is refused as a redirection (part E2).
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.
