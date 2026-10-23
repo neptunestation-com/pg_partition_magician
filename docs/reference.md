@@ -112,6 +112,21 @@ locked statement, so a write outside `[lo, hi)` is rejected for that span (`p_bo
 the top), and a conversion that dies between transactions leaves the `CHECK` behind. See
 [`transmute_abort`](#transmute_abort).
 
+Across its transactions the conversion follows the table by **oid**, not by name. A lock on a table pins its
+own name but not its schema's (`ALTER SCHEMA ... RENAME` takes no lock on the tables in it), so a statement
+that waits for a lock reaches whatever a schema renamed during the wait put under the name. Each phase
+therefore locks the table by its oid before its statement and names it under that lock: the bound and its
+`VALIDATE` reach the table wherever its schema now is, never a same-named table put in its place. The names
+the cutover makes (the staging parent, the monolith, the forward partitions) come from the table's name as
+the preflight read it, so the preflight's first lock and the cutover's first lock are taken through that
+name, and a table **renamed**, or whose schema was renamed, since then is refused, saying so: before the
+preflight's reads nothing is committed; at the cutover the claim and the validated bound stay, and running
+`transmute` again on the table's name now resumes from them. The cutover asks again whether the schema still
+has its name after each wait for another relation's lock (an incoming key's referencing table, an outgoing
+key's referenced table, a sequence, a publication) and refuses, rolled back to that resumable state, when it
+does not; and it checks by oid that the incoming keys it drops, the outgoing keys, policies and publication
+memberships it re-creates and the sequences it hands over landed where it meant them to.
+
 The new parent also takes over everything `CREATE TABLE ... LIKE` does not carry: the **owner**, table and
 **column-level grants**, **row level security** (both `ENABLE` and `FORCE`), every **policy**, table and
 column **comments**, **row triggers**, each in the enabled state it had (`DISABLE`, `ENABLE ALWAYS`
@@ -591,7 +606,10 @@ the table's lock, from the claim as it stands then, so a conversion you resumed 
 sweep was waiting is left to finish rather than undone. Both this function and the sweep find the
 table by the identity the claim recorded, not by its name, so a half-converted table that was renamed or
 moved to another schema after its conversion failed is still found and has its bound dropped; the sweep
-forgets a claim without acting only when that table no longer exists at all. The sweep waits at most 5 s
+forgets a claim without acting only when that table no longer exists at all. Each takes the table's lock by
+that identity before it drops the bound, so a schema renamed while the call waits for the lock, with a
+same-named table put in its place, is followed to the claimed table: the bound comes off it, and the
+other table keeps what it had. The sweep waits at most 5 s
 for the table's lock: behind a longer transaction it logs `skip_transmute_reap` and tries again next tick,
 rather than queue every read and write of the table behind its own `ACCESS EXCLUSIVE` request.
 
@@ -684,6 +702,15 @@ On PostgreSQL 18 a key on a partitioned referencing table comes back `NOT VALID`
 `NOTICE`. Before 18 a partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added
 validated in one step, as `restore_incoming_fks` does there: the scan of the referencing table runs under the
 `ACCESS EXCLUSIVE` this call holds on the restored table, and an orphan in it fails the reverse.
+
+The statements the reverse captures off the parent (its comments, grants, policies and publication
+memberships) name the table in the parent's schema, read under the reverse's first lock, and are run after
+it has waited for other locks (the parent's `ACCESS EXCLUSIVE`, the referencing tables', the sequences').
+So the reverse asks again, after its check for rows outside the monolith and after each of those waits,
+whether that schema still has its name, and refuses, rolled back, when it was renamed meanwhile; run
+`untransmute` again on the table's name now. The keys it drops and re-adds on referencing tables, the
+policies, the publication memberships and the sequences it hands back are checked by oid as `transmute`'s
+are.
 
 It is a **one-way door** once any row lives outside the monolith's range -- a forward partition after the
 frontier crosses `B`, or the finer children a regrain's swap has put in the monolith's place -- because a
@@ -3834,6 +3861,12 @@ any other unrestored FK for the next tick.
 It re-adds each FK `NOT VALID` and **stops there**. `NOT VALID` already enforces every *new* write, so
 referential integrity is live the moment this returns; only pre-existing rows are unverified, which
 `status().fks_unvalidated` reports. `maintain` finishes the validation on a later tick.
+
+The re-add waits for the referencing table's lock behind its writers, so a schema renamed during that wait
+could send it to a same-named table: each re-add is checked by oid afterwards, and one that did not land on
+the recorded table referencing the managed parent is rolled back and logged `fail_restore_incoming_fk`, its
+record left suspended for the next call. `validate_incoming_fks`, `suspend_incoming_fks`, `transmute`'s drop
+of the keys and `untransmute`'s drop and re-add of them are checked the same way, and raise.
 
 That split is deliberate. The re-add briefly blocks writes to **both** the referencing table and the
 managed parent; validating in the same statement would hold that block across a full scan of the

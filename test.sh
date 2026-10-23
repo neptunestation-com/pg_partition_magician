@@ -1336,6 +1336,7 @@ run_perf() {
     "bench/adopt_partition_isolation.sh pgpm_perf370"
     "bench/retire_locks_by_oid.sh pgpm_perf400"
     "bench/uninstall_drops_by_oid.sh pgpm_perf406"
+    "bench/transmute_by_oid.sh pgpm_perf410"
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
     "bench/install_keeps_surface_grants.sh pgpm_perf375"
     "bench/retirement_mark_needs_dispatch.sh pgpm_perf367"

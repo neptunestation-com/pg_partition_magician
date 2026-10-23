@@ -3979,6 +3979,56 @@ begin
 end;
 $$;
 
+-- A constraint statement's effect, checked by oid after it ran (#1364, #1355 siblings). ALTER TABLE ... ADD, DROP or
+-- VALIDATE CONSTRAINT on a table pgpm did not lock first (an incoming key's referencing table, an outgoing key's
+-- referenced one) waits for that table's lock, and resolves the names again once granted: a schema swapped during
+-- the wait sends it to a namesake, which gains the key, loses its own of that name or has it validated, while the
+-- table pgpm identified is left as it was and its record says otherwise. So p_rel must show the state asked for:
+-- p_state 'present' (referencing p_ref, when given), 'absent' or 'validated'. Raised before the statement commits.
+create or replace function pgpm._con_effect_or_raise(p_rel regclass, p_con name, p_state text, p_what text,
+                                                     p_ref regclass default null)
+returns void language plpgsql as $$
+begin
+  perform pgpm._effect_or_raise(
+    coalesce((select p_state <> 'absent' and (p_state <> 'validated' or c.convalidated)
+                     and (p_ref is null or c.confrelid = p_ref)
+                from pg_constraint c where c.conrelid = p_rel and c.conname = p_con), p_state = 'absent'),
+    p_rel, p_what);
+end;
+$$;
+
+-- _lock_oid through the name a caller read earlier, refused when the name no longer denotes p_rel (#1355, #1367).
+-- transmute reads the table's schema and name in its preflight and derives every name it makes from them (the
+-- staging parent, the monolith, the children), across three transactions with no lock held between them: a table
+-- renamed, or its schema renamed, since then is refused here, before the step does anything, rather than renamed
+-- back by the cutover or followed by some statements and not by others.
+create or replace function pgpm._lock_named_or_raise(p_rel regclass, p_mode text, p_only boolean, p_nsp name,
+                                                     p_name name, p_what text)
+returns void language plpgsql as $$
+begin
+  if not pgpm._lock_oid(p_rel, p_mode, p_only, p_nsp, p_name) then
+    raise exception 'pg_partition_magician: % could not take its % lock on % (oid %) under the name %.% it read before: the table or its schema was renamed since, or the table dropped. Nothing of this step was done. Re-run it on the table''s name now',
+      p_what, p_mode, p_rel, p_rel::oid, quote_ident(p_nsp), quote_ident(p_name);
+  end if;
+end;
+$$;
+
+-- The schema p_nsp still names p_nspoid (#1367). A lock pins a relation's own name, never its schema's, so a caller
+-- holding the table's lock that renders names in the schema it read (the cutover's monolith and staging names, the
+-- captured triggers, policies and grants) and then waits for ANOTHER object's lock (a referencing table's, a
+-- referenced table's, a sequence's) reaches a namesake schema committed during that wait with every later
+-- statement. Asked after each such wait, before the next of those statements runs: a schema swapped away in a wait
+-- is refused before anything reaches it, so one swapped back in a later wait has had nothing reach it meanwhile.
+create or replace function pgpm._nsp_held_or_raise(p_nspoid oid, p_nsp name, p_what text)
+returns void language plpgsql as $$
+begin
+  if (select n.nspname from pg_namespace n where n.oid = p_nspoid) is distinct from p_nsp then
+    raise exception 'pg_partition_magician: % names the table''s objects in its schema % (oid %), which was renamed or dropped while it waited for a lock; rolled back. Re-run it on the table''s name now',
+      p_what, quote_ident(p_nsp), p_nspoid;
+  end if;
+end;
+$$;
+
 -- retire(): the sanctioned single-partition drop (issue #195) -- retain()'s per-partition body,
 -- public and claim-guarded, so an external assistant (e.g. an archive-then-drop scanner) or several
 -- cooperating ones can drive retirement themselves through the same protocol retain() uses: claim,
@@ -11200,6 +11250,7 @@ create or replace procedure pgpm._transmute(
 language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_relkind "char"; v_default name; v_staging name; v_parent regclass;
+  v_nspoid oid;   -- #1367: the schema v_nsp names, asked again after every wait of the cutover
   v_resumed boolean := false;
   v_own_start timestamptz;   -- #771: this session's backend_start, the claim's owner identity
   v_typname text; v_oldpk text[]; v_pkcols text[]; v_idcols name[]; v_pkname name; v_col name;
@@ -11302,7 +11353,7 @@ begin
     raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
   end;
 
-  select n.nspname, c.relname, c.relkind into v_nsp, v_rel, v_relkind
+  select n.nspname, c.relname, c.relkind, n.oid into v_nsp, v_rel, v_relkind, v_nspoid
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   -- #509: transmute converts an ORDINARY table, once. Nothing checked either, and every shape refused here
@@ -11332,6 +11383,11 @@ begin
     raise exception 'pg_partition_magician: % has inheritance children (%). transmute converts a standalone table only: its cutover attaches the table to a new parent, and PostgreSQL refuses to attach an inheritance parent as a partition.',
       p_parent, (select string_agg(inhrelid::regclass::text, ', ' order by inhrelid) from pg_inherits where inhparent = p_parent);
   end if;
+
+  -- #1355: the table's first lock, through the name read above and held to phase 1's commit, so every read below
+  -- reaches the table under the name it has now: a read that waited for its lock behind another session's ALTER
+  -- reached whatever a schema swapped during that wait put under the name. Nothing is committed yet.
+  perform pgpm._lock_named_or_raise(p_parent, 'access share', true, v_nsp, v_rel, 'transmute');
 
   -- #825: every read below (the bound's min and max, the plausibility samples, the identity maxima) has to
   -- see every row, and under row-level security that filters this caller none of them would.
@@ -12076,6 +12132,11 @@ begin
   perform set_config('lock_timeout', p_lock_timeout, true);
   if not exists (select 1 from pg_constraint
                   where conrelid = p_parent and conname = 'pgpm_monolith_bound') then
+    -- #1355: the ADD's ACCESS EXCLUSIVE taken first, by oid, and the ADD named under it, so it waits for nothing: an
+    -- ADD that waited behind a reader resolved the name again once granted, and a schema swapped during that wait
+    -- put the write-rejecting bound on a namesake and committed it. Phases 1 and 2 follow the table by oid; the
+    -- cutover, which makes names from the preflight's, refuses a table moved since (#1367).
+    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, 'transmute');
     execute format('alter table %s add constraint pgpm_monolith_bound check (%I >= %L and %I < %L) not valid',
                    p_parent::text, p_control, pgpm._encode(p_control_kind, v_lo_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz),
                    p_control, pgpm._encode(p_control_kind, v_hi_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz));
@@ -12089,6 +12150,8 @@ begin
   perform set_config('lock_timeout', p_lock_timeout, true);   -- `set local` did not survive the COMMIT
   if not (select convalidated from pg_constraint
            where conrelid = p_parent and conname = 'pgpm_monolith_bound') then
+    -- #1355: the VALIDATE's lock first, the same way: a namesake carrying a constraint of that name was validated
+    perform pgpm._lock_oid_or_raise(p_parent, 'share update exclusive', true, 'transmute');
     execute format('alter table %s validate constraint pgpm_monolith_bound', p_parent::text);
   end if;
   commit;
@@ -12136,7 +12199,9 @@ begin
   -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
   -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
   -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
-  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');   -- #1335 b10: by oid, pinning the name
+  -- #1367: through the preflight's name, which every name the cutover makes is derived from and which nothing held
+  -- still between the phases: a RENAME committed since was undone by the renames below. Refused, not followed.
+  perform pgpm._lock_named_or_raise(p_parent, 'access share', false, v_nsp, v_rel, 'transmute');
   perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
@@ -12169,6 +12234,7 @@ begin
       end if;
       raise;
   end;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the CREATE's wait for a holder
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
   -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
@@ -12298,6 +12364,8 @@ begin
   -- no policies yet to count among them: they are created after the renames (#897), where a subquery over
   -- the table binds to the new parent rather than to this oid.
   perform pgpm._refuse_oid_bound_dependants(p_parent, false);   -- #779, again under the lock
+  -- #1367: the schema the names below are made in, asked again after that wait, and after each wait further down
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');
 
   -- 0b (under the lock, #630 and #656). What the preflight listed, listed again now that nothing can change
   -- it: the secondary indexes 9b carries, the outgoing keys 7a re-adds, and where 8b resumes each identity
@@ -12388,11 +12456,13 @@ begin
        order by c.conname
     loop
       execute format('alter table %s drop constraint %I', v_fk.reltbl::text, v_fk.conname);
+      perform pgpm._con_effect_or_raise(v_fk.reltbl, v_fk.conname, 'absent', 'transmute''s drop of an incoming key');
       insert into pgpm.dropped_fk (parent_table, referencing_table, constraint_name, definition)
         values (v_parent, v_fk.reltbl, v_fk.conname, v_fk.def);
       insert into pgpm.log (parent_table, action, method) values (v_parent, 'drop_incoming_fk', v_fk.conname);
     end loop;
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the sequences' and the drops' waits
 
   -- 0d. The records in which THIS table is the REFERENCER (#498). pgpm.dropped_fk.referencing_table is an
   -- oid, and the rename below turns p_parent into the monolith child of this conversion. A key another
@@ -12491,6 +12561,7 @@ begin
   -- and their grants (#1076): each sequence's ACL reset, the owner included, and the original's grants
   -- replayed, each under its grantor, as 7b does for the table. Step 6 made it under this role's ALTER DEFAULT
   -- PRIVILEGES. After the OWNER TO (7b), which the parent's sequences follow and the reset needs.
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the drop of identity's waits
   foreach v_grant in array v_seqgrants loop
     execute v_grant;
   end loop;
@@ -12513,7 +12584,11 @@ begin
      order by a.attnum
   loop
     execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_parent::text, v_sq.attname);
+    -- #1367: the sequence is named before the wait for its lock, behind a session holding it
+    perform pgpm._effect_or_raise(exists (select 1 from pg_depend d where d.objid = v_sq.seq and d.refobjid = v_parent
+                                            and d.deptype = 'a'), v_sq.seq, 'transmute''s hand-over of a sequence');
   end loop;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: those waits, before 7b names the parent
   -- only a reused PRIMARY KEY makes its other columns NOT NULL; a reused UNIQUE constraint legitimately
   -- permits nullable non-control columns, so leave those as they are (and never scan them).
   if v_add_pk and v_pkcols is not null then
@@ -12558,8 +12633,11 @@ begin
     for v_i2 in 1 .. array_length(v_out_names, 1) loop
       execute format('alter table %s add constraint %I %s',
                      v_parent::text, v_out_names[v_i2], v_out_defs[v_i2]);
+      perform pgpm._con_effect_or_raise(v_parent, v_out_names[v_i2], 'present', 'transmute''s re-add of an outgoing key',
+        (select k.confrelid from pg_constraint k where k.conrelid = p_parent and k.conname = v_out_names[v_i2])::regclass);
     end loop;
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: 3b's and 7a's waits
 
   -- 7b (triggers). Last of the replay from 0b, and only now that both renames are done: the captured text
   -- names the ORIGINAL table, which only resolves to the parent once the live name is in place. The
@@ -12600,6 +12678,10 @@ begin
     execute v_poldef;   -- names the ORIGINAL table, which is now the parent: replays verbatim
   end loop;
 
+  -- #1367: each CREATE POLICY names the table and can wait inside itself (a subquery's table), so what is checked
+  -- is where they went, by oid: the parent carries every one, or a schema swapped meanwhile took some
+  perform pgpm._effect_or_raise((select count(*) from pg_policy where polrelid = v_parent) = cardinality(v_poldefs),
+                                v_parent, 'transmute''s replay of the policies');
   -- 7b (comments). Read and replayed under the lock (see 0b): COMMENT takes only SHARE UPDATE EXCLUSIVE,
   -- which the staging LIKE's ACCESS SHARE does not exclude. p_parent is the monolith's oid by now, which
   -- is the table the comments are on.
@@ -12646,6 +12728,10 @@ begin
       execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
                      case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
                      case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
+      -- #1367: the table is named after the wait for the publication's lock, so the effect is checked by oid
+      perform pgpm._effect_or_raise(exists (select 1 from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+                                             where p.pubname = v_pub.pubname and r.prrelid = v_parent),
+                                    v_parent, 'transmute''s ADD TABLE to a publication');
     end loop;
   exception when others then
     perform pgpm._transmute_refuse_publications(p_parent, v_parent);
@@ -12699,6 +12785,7 @@ begin
     end loop;
   end if;
 
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: 7c's and 8's waits, before 9b's names
   -- 9b. recreate secondary indexes as partitioned indexes, attaching the monolith's
   if v_idx_names is not null then
     for j in 1 .. array_length(v_idx_names, 1) loop
@@ -12861,6 +12948,7 @@ begin
       raise;
   end;
   perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: obtain's waits, and that asking
 
   -- the conversion is complete: deleting the claim row IS releasing the claim, and nothing is left for the
   -- reaper to undo.
@@ -13014,6 +13102,10 @@ begin
   v_prev_lock_timeout := current_setting('lock_timeout');
   perform set_config('lock_timeout', p_lock_timeout, true);
   begin
+    -- #1364: the lock by the claim's oid first, and the DROP named under it, so the DROP waits for nothing: named
+    -- before its own wait, it reached whatever a schema swapped during that wait put under the name, while the
+    -- claim was deleted and the table logged restored with its bound still on.
+    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', false, 'transmute_abort');
     execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);
   exception when lock_not_available then
     raise exception 'pg_partition_magician: transmute_abort(%) could not take ACCESS EXCLUSIVE on % within % (another transaction holds a lock on it); nothing was changed, the bound and the claim are as they were. Retry when that transaction has finished, or pass a longer p_lock_timeout.',
@@ -13366,6 +13458,7 @@ create or replace function pgpm.untransmute(p_parent regclass)
 returns regclass language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_rel name; v_monreg regclass; v_restored regclass;
+  v_nspoid oid; v_cfn_reg regprocedure;   -- #1367: the schema v_nsp names; the capture function, by oid
   v_mon name; v_mon_lo text; v_mon_hi text; v_outside boolean;
   v_gate_q text; v_door text;   -- #443: the outside-rows check and its refusal, asked twice
   v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext numeric[]; v_seq regclass;
@@ -13383,6 +13476,7 @@ declare
   v_g record;
   v_owner oid; v_comdefs text[] := '{}';
   v_pubdefs text[] := '{}';   -- #780: the parent's publication memberships, as ADD TABLEs naming the restored table
+  v_pubwant text[];           -- #1367: the same, kept whole, for the check of where they went
   v_key_name name; v_key_mon name;   -- #789: the parent's key name, and the monolith copy's pgpm_key_<oid>
   v_ix_oids oid[] := '{}'; v_ix_names name[] := '{}';   -- #830: monolith index oids, and the parent copies' names
   v_ri "char"; v_ri_idx oid;   -- #815: the parent's replica identity, and the monolith's index under its identity index
@@ -13411,7 +13505,7 @@ begin
   -- what both runs read. Held to the end, this pins the name every later statement renders.
   perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'untransmute');
 
-  select n.nspname, c.relname into v_nsp, v_rel
+  select n.nspname, c.relname, n.oid into v_nsp, v_rel, v_nspoid
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   -- resolve the regrain change-capture names (#267) NOW, while the parent and its config row still exist:
   -- they come from the oids recorded there at prepare (#496), or failing that from the parent's own name,
@@ -13419,6 +13513,9 @@ begin
   select nsp, delta, fn, fn_nsp into v_cnsp, v_cdelta, v_cfn, v_cfnsp from pgpm._regrain_capture_names(p_parent);
   if v_cdelta is not null then   -- #1335 b10: dropped at the end by this oid, not by the name
     v_cdelta_reg := to_regclass(format('%I.%I', v_cnsp, v_cdelta));
+  end if;
+  if v_cfn is not null then   -- #1367: and the function, the same way
+    v_cfn_reg := to_regprocedure(format('%I.%I()', v_cfnsp, v_cfn));
   end if;
   -- #969: and they are dropped at the end, with the copies a regrain in flight leaves, which a table handed to a
   -- new owner may have left with the old one. Asked before anything is changed, so the new owner's untransmute
@@ -13509,6 +13606,7 @@ begin
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null order by id loop
     execute format('alter table %s drop constraint %I', r.referencing_table::text, r.constraint_name);
+    perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'absent', 'untransmute''s drop of an incoming key');
   end loop;
 
   -- THE GATE, AGAIN, UNDER THE LOCK (#443). The check above ran under ACCESS SHARE, which excludes no
@@ -13534,6 +13632,9 @@ begin
     raise exception '%', v_door;
   end if;
   perform pgpm._refuse_oid_bound_dependants(p_parent, true);   -- #779, final: no CREATE VIEW passes this lock
+  -- #1367: the parent's own name is pinned since the first lock, its schema's is not: the statements captured below
+  -- name the table in the schema read then, so a schema renamed in this wait or a later one is refused, after the door
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');
 
   -- Capture the parent's triggers before it is dropped (#277). transmute dropped the monolith's own
   -- originals in favour of the parent's, which clone down to every partition, and DETACH strips those
@@ -13731,6 +13832,8 @@ begin
      order by a.attnum
   loop
     execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_monreg::text, v_sq.attname);
+    perform pgpm._effect_or_raise(exists (select 1 from pg_depend d where d.objid = v_sq.seq and d.refobjid = v_monreg
+                                            and d.deptype = 'a'), v_sq.seq, 'untransmute''s hand-back of a sequence');
   end loop;
   execute format('drop table %s', p_parent::text);
   -- the parent's key went with it, which frees its name for the table's own key again (#789), and so did
@@ -13802,10 +13905,12 @@ begin
       execute format('alter table %s add constraint %I %s',
                      r.referencing_table::text, r.constraint_name,
                      pgpm._fk_readd_definition(r.definition, v_restored));   -- #872: the restored table by oid
+      perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'untransmute''s re-add of an incoming key', v_restored);
     else
       execute format('alter table %s add constraint %I %s not valid',
                      r.referencing_table::text, r.constraint_name,
                      pgpm._fk_readd_definition(r.definition, v_restored));   -- #872: the restored table by oid
+      perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'untransmute''s re-add of an incoming key', v_restored);
       raise notice 'pg_partition_magician: untransmute re-added % on % NOT VALID; validate it outside this transaction with: ALTER TABLE % VALIDATE CONSTRAINT %',
         quote_ident(r.constraint_name), r.referencing_table::text, r.referencing_table::text, quote_ident(r.constraint_name);
     end if;
@@ -13816,9 +13921,11 @@ begin
   -- restored table goes there, its indexes, its row type and the sequences it owns with it, so the statements
   -- captured off the parent (triggers, comments, grants, policies, publication memberships) replay against
   -- the name they were built with. The parent's DROP freed that name.
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: every wait since the gate
   if (select relnamespace from pg_class where oid = v_restored) <> (select oid from pg_namespace where nspname = v_nsp) then
     execute format('alter table %s set schema %I', v_restored::text, v_nsp);
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: the move's owned sequences' waits
 
   -- The restored table's identity sequences take the names the managed table's carried (#877). They were
   -- re-added above on the monolith, still named <table>_p<label>, so PostgreSQL named each
@@ -13853,6 +13960,7 @@ begin
   if (select relowner from pg_class where oid = v_restored) <> v_owner then
     execute format('alter table %s owner to %I', v_restored::text, pg_get_userbyid(v_owner));
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: the moves' and owner's sequence waits
   foreach v_tdef in array v_comdefs loop
     execute v_tdef;
   end loop;
@@ -13886,12 +13994,16 @@ begin
   foreach v_tdef in array v_poldefs loop
     execute v_tdef;
   end loop;
+  -- #1367: where the policies went, by oid, as transmute's 7b asks
+  perform pgpm._effect_or_raise((select count(*) from pg_policy where polrelid = v_restored) = cardinality(v_poldefs),
+                                v_restored, 'untransmute''s replay of the policies');
 
   -- Put the parent's publication memberships on the restored table in place of the monolith's (#780;
   -- captured under the lock, above). The two are compared as the statements that would create them: one the
   -- restored table has and the parent did not, or has with another column list or row filter, is dropped;
   -- one the parent had is then added, unless the restored table already has it exactly. FOR ALL TABLES and
   -- FOR TABLES IN SCHEMA name no table, so they cover the restored table as they covered the parent.
+  v_pubwant := v_pubdefs;
   for v_g in select o_pub, o_def from pgpm._publication_adds(v_restored, v_nsp, v_rel) loop
     if v_g.o_def = any(v_pubdefs) then
       v_pubdefs := array_remove(v_pubdefs, v_g.o_def);
@@ -13902,6 +14014,11 @@ begin
   foreach v_tdef in array v_pubdefs loop
     execute v_tdef;
   end loop;
+  -- #1367: each ALTER PUBLICATION names the table after waiting for the publication's lock, so where they went is
+  -- checked by oid: the restored table's memberships are now the parent's, or a schema swapped meanwhile took some
+  perform pgpm._effect_or_raise(array(select o_def from pgpm._publication_adds(v_restored, v_nsp, v_rel) order by 1)
+                                = array(select d from unnest(v_pubwant) d order by 1),
+                                v_restored, 'untransmute''s publication memberships');
 
   -- Put the parent's replica identity on the restored table in place of the monolith's conversion-time one
   -- (#815; captured under the lock, above). Only when they differ, so a reverse with nothing changed costs
@@ -13920,7 +14037,7 @@ begin
   -- #555: where they are, not the parent's schema; #955: only what pgpm.config recorded, never a namesake;
   -- #1271: each in its OWN schema, since either may have been moved without the other
   if v_cdelta_reg is not null then perform pgpm._drop_by_oid(v_cdelta_reg, 'untransmute, dropping the regrain delta,'); end if;
-  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cfnsp, v_cfn); end if;
+  if exists (select 1 from pg_proc where oid = v_cfn_reg) then execute format('drop function %s', v_cfn_reg::text); end if;
 
   -- forget all pgpm state for this table (matched by the dropped parent's oid, which p_parent still
   -- carries), and log the reversal against the restored table.
@@ -16191,11 +16308,15 @@ begin
         execute format('alter table %s add constraint %I %s',
                        r.referencing_table::text, r.constraint_name,
                        pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid
+        perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'the re-add of an incoming key', p_parent);
         update pgpm.dropped_fk set restored_at = now(), validated_at = now(), validate_retry_after = null where id = r.id;
       else
         execute format('alter table %s add constraint %I %s not valid',
                        r.referencing_table::text, r.constraint_name,
                        pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid
+        -- the ADD waits for the referencing table's lock and the parent's, and a schema swapped during that wait sent
+        -- it to a namesake: the record was marked restored, and _forget_dangling_fks then forgot the key for good
+        perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'the re-add of an incoming key', p_parent);
         update pgpm.dropped_fk set restored_at = now(), validated_at = null where id = r.id;
       end if;
       v_readded := true;
@@ -16260,6 +16381,7 @@ begin
             order by id loop
     begin
       execute format('alter table %s validate constraint %I', r.referencing_table::text, r.constraint_name);
+      perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'validated', 'the VALIDATE of an incoming key');
       update pgpm.dropped_fk set validated_at = now(), validate_retry_after = null where id = r.id;
       insert into pgpm.log (parent_table, action, method) values (p_parent, 'validate_incoming_fk', r.constraint_name);
       v_n := v_n + 1;
@@ -16352,6 +16474,7 @@ begin
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null order by id loop
     execute format('alter table %s drop constraint %I', r.referencing_table::text, r.constraint_name);
+    perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'absent', 'the suspension of an incoming key');
     update pgpm.dropped_fk set restored_at = null, validated_at = null where id = r.id;
     insert into pgpm.log (parent_table, action, method) values (p_parent, 'suspend_incoming_fk', r.constraint_name);
     v_n := v_n + 1;
