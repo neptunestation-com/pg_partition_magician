@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **The archive step logs an aggregated range as canonical bounds** (#1370, and the second site #814's second
+  bullet names). `pgpm._mark_gone_chunks`' `archive_chunk_retired` row and `_archive_step`'s orphan discard
+  (`archive_coverage_reset`, #511) rendered the range of the chunks they act on as `min(lo::timestamptz)::text`, in
+  the archive tick's DateStyle and zone: under `SQL, DMY` in Asia/Kolkata the row read `01/12/2026 05:30:00 IST`,
+  which names no instant and reads back elsewhere as 12 January or not at all. Both render through
+  `pgpm._typed_text`, `_ts_text`'s rendering for a value whose type the dynamic SQL names at run time.
+  `bench/archive_log_bounds_canonical.sh` runs `tests/357` against `archive_log_bounds_session_render`.
+
+- **Every skip_archive remedy's `ATTACH` attaches as typed on a uuidv7 or text_time grid** (#1371). The remedies of
+  `_archive_unheld_reason` (a row with no oid, a table pgpm's retirement detached) and `_archive_left_reason` (a
+  detach begun under the hold) spelled `FOR VALUES FROM (...) TO (...)` with `pgpm.part`'s native bounds, so on a
+  uuidv7 grid the statement was refused (`invalid input syntax for type uuid`) and on a text_time grid it named
+  bounds none of the table's rows fall in. `pgpm._attach_back_sql` spells all three with the bounds encoded for the
+  column, as `_disown_retirement`'s remedy does. `bench/archive_remedy_encoded_bounds.sh` runs `tests/358`, which
+  types each remedy out of its log row, against `archive_remedy_bounds_unencoded`.
 - **`transmute_abort` drops the bound on the table its claim names** (#1364). It rendered the table's name and
   then waited for `ACCESS EXCLUSIVE` behind a reader, and the `DROP CONSTRAINT` resolved the name again once
   granted: a schema renamed during the wait, with a same-named schema and table put in its place, sent the drop

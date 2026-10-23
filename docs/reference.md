@@ -2485,7 +2485,9 @@ partition's detach only once its range is covered, so this is reached only when 
 (`set_archive_fn`) after that retirement began. Such a table is not archived and nothing is recorded for it,
 `retire` keeps it while its range is uncovered, and every tick logs `skip_archive` over its range with the
 remedy: once it is no longer pending a detach, attach it back on its bounds (`ALTER TABLE <parent> ATTACH
-PARTITION <partition> FOR VALUES FROM (<lo>) TO (<hi>)`, which the `method` spells out); the next tick
+PARTITION <partition> FOR VALUES FROM (<lo>) TO (<hi>)`, which the `method` spells out with the bounds as the
+control column holds them, encoded on a uuidv7 or text_time grid, as in every remedy that attaches a table back);
+the next tick
 archives it through the parent and `retire` completes the retirement. `scripts/archive_partition_whole.sql`
 refuses it with the same message.
 
