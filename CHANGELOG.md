@@ -14,8 +14,9 @@
   whose rows all carried one payload, now give each row its own, and `tests/52`'s random values are now a
   function of the row. `bench/tests_identity_not_count.sh` plants each site's wrong state right before its
   assertion and requires the file to fail against it (23 mutations, one per site, from
-  `t51_unique_constraint_by_count` to `t295_history_rows_by_count` and `t93_fan_out_by_ledger_rows`). A test
-  change only.
+  `t51_unique_constraint_by_count` to `t295_history_rows_by_count` and `t93_fan_out_by_ledger_rows`). Now that a
+  wrapper runs them, `tests/108` and `121` spell their premises at the head (`LIVENESS: (a)`, `fixture:`), where
+  `bench/discriminate.sh`'s `starved()` reads them. A test change only.
 
 - **`tests/338` names every row the restored tables keep** (#1375). '(A) the restored table keeps its rows, 1 to
   120' and its (B) and (D) siblings looked at ids 1, N and N + 1 only, so a table that lost its middle rows

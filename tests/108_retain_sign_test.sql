@@ -221,7 +221,7 @@ insert into public.rs108h (id, payload) values (3500, 'frontier');
 create table pgpm_test108.h_before as
   select lo, child_name from pgpm.part where parent_table = 'public.rs108h'::regclass and attached;
 select is((select array_agg(lo order by lo::numeric) from pgpm_test108.h_before), array['0', '1000', '2000', '3000'],
-  'setup: four attached partitions, two of them below the legitimate horizon (the tick has real work to refuse)');
+  'fixture: four attached partitions, two of them below the legitimate horizon (the tick has real work to refuse)');
 
 update pgpm.config set retain = '-5000' where parent_table = 'public.rs108h'::regclass;   -- THE HAND EDIT
 
@@ -311,7 +311,7 @@ select child_name as r_mono from pgpm.part where parent_table = 'public.rs108r':
 update pgpm.config set retain = '-30000' where parent_table = 'public.rs108r'::regclass;   -- THE HAND EDIT
 
 select is(pgpm.regrain_step('public.rs108r', :'r_mono'), 'prepared',
-  'setup: the first regrain_step call installs change capture, which happens before the horizon is computed');
+  'fixture: the first regrain_step call installs change capture, which happens before the horizon is computed');
 -- (built with format(): psql does not interpolate :'r_mono' inside a dollar-quoted string)
 select throws_like(
   format($$ select pgpm.regrain_step('public.rs108r', %L) $$, :'r_mono'),
