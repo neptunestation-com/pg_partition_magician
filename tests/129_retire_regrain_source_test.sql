@@ -114,8 +114,9 @@ select is((select array_agg(distinct action order by action) from pgpm.log
           null, 'the ticks after the drop log nothing but further retention (no skip_, fail_ or regrain_ rows)');
 select is((select inflight_partitions from pgpm.status() where parent = 'public.rrs_a'::regclass),
           0::bigint, 'status() reports no in-flight partition for the parent');
-select is((select regrain_child from pgpm.progress('public.rrs_a')), null,
-          'progress() reports no regrain in flight');
+-- as a row (#1378): a scalar subquery over no row is null too, so a progress() that lost the table would pass
+select is((select array[regrain_child::text] from pgpm.progress('public.rrs_a')), array[null]::text[],
+          'progress() still reports the table, with no regrain in flight');
 
 -- ============================ B: retire() by hand, with a captured change still pending ============================
 -- The same reclamation on the direct path, and with something in the delta, so "the delta is empty"

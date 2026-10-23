@@ -15928,6 +15928,69 @@ MUTATIONS["t319_rows_after_swap_sampled"] = (
 )
 MUTATION_SRC["t319_rows_after_swap_sampled"] = "tests/319_set_regrain_restated_target_test.sql"
 
+# pass 13 G14 (#1377, #1378): four witnesses that held without the step they vouch for, each back to its pre-fix
+# shape. Judged by bench/tests_witness_the_step.sh, which takes the step away and requires the file to fail in
+# that witness's section.
+MUTATIONS["predrain_witnessed_by_end_state_ts14"] = (
+    "bench/tests_witness_the_step.sh",
+    "Pre-#1377 tests/timescale/db/14: the hp_auto section witnesses the cutover's automatic pre-drain by the "
+    "cutover's end state and a drain-key index nothing builds, which the under-lock reconcile satisfies alone, so "
+    "a cutover that never pre-drains passes. The three write-log assertions go back to the drain-key one.",
+    [("select plan(29);\n", "select plan(27);\n", 1),
+     ("""select is((select array_agg(distinct device_id order by device_id) from hp_auto_writes),
+  (select array_agg(g::bigint order by g) from generate_series(1, 30) g),
+  'the cutover wrote into the copy exactly the 30 backlog keys');
+select ok((select count(distinct xid) >= 2 from hp_auto_writes where not locked),
+  'the cutover''s pre-drain applied backlog keys to the copy online, in more than one committed batch, before the hypertable''s lock');
+select cmp_ok((select count(distinct device_id)::int from hp_auto_writes where locked), '<=', 7,
+  'the under-lock pass applied only the residual within one batch, not the backlog the pre-drain drained');
+""", """select ok(to_regclass('public.hp_auto_pgpm_drainkey') is null,
+  'the cutover dropped the drain key index its own pre-drain built');
+""", 1)],
+)
+MUTATION_SRC["predrain_witnessed_by_end_state_ts14"] = "tests/timescale/db/14_from_hypertable_online_drain_test.sql"
+MUTATION_TRACK["predrain_witnessed_by_end_state_ts14"] = "timescale"
+MUTATIONS["predrain_witnessed_by_end_state_ts47"] = (
+    "bench/tests_witness_the_step.sh",
+    "Pre-#1377 tests/timescale/db/47 (B): the tracked cutover's pre-drain is witnessed only by the converted "
+    "table's rows, which the under-lock reconcile writes alone, so the pgpm_dbatch survival beside it passes with "
+    "no drain step run. One clause, the online write's witness.",
+    [("select plan(21);\n", "select plan(20);\n", 1),
+     ("""select is((select array_agg(id || ':' || v order by id) from public.g3_a_writes where not locked),
+  array['4:a4-new'],
+  'LIVENESS: its pre-drain applied the update to id 4 in a drain step, online, before the hypertable''s lock');
+""", "", 1)],
+)
+MUTATION_SRC["predrain_witnessed_by_end_state_ts47"] = "tests/timescale/db/47_from_hypertable_scratch_tables_in_pg_temp_test.sql"
+MUTATION_TRACK["predrain_witnessed_by_end_state_ts47"] = "timescale"
+MUTATIONS["later_steps_witnessed_before_them_190"] = (
+    "bench/tests_witness_the_step.sh",
+    "Pre-#1378 tests/190 (E): 'those steps were copying' is one copy not attached, which the step before them "
+    "made true, so later steps that do nothing pass 'do not ANALYZE it again'. The exact pre-#1378 witness.",
+    [("""select is((select array_agg(id order by id) from public.rc190_p0000000000000000000), array[1, 2, 3]::bigint[],
+  'LIVENESS: (E) those steps were copying: each copied one more row, ids 2 and 3');
+""", """select is((select count(*) from pgpm.part where parent_table = 'public.rc190'::regclass and not attached), 1::bigint,
+  'LIVENESS: (E) those steps were copying (the regrain is in flight, one copy started)');
+""", 1)],
+)
+MUTATION_SRC["later_steps_witnessed_before_them_190"] = "tests/190_reverse_and_legibility_edges_test.sql"
+MUTATIONS["detached_write_child_scalar_null_279"] = (
+    "bench/tests_witness_the_step.sh",
+    "Pre-#1378 tests/279 (3): write_child and write_ceiling read as scalar subqueries over progress() and asserted "
+    "null, which an empty result gives too, so a progress() that loses the table passes. The exact pre-#1378 pair.",
+    [("""select is((select array[write_child::text, write_ceiling] from pgpm.progress('public.pg279')),
+  array[null, null]::text[],
+  'progress() still reports pg279, and not a hand-detached partition as its write child');
+select is((select array[freeze_margin, freeze_in::text] from pgpm.progress('public.pg279')),
+  array[null, null]::text[], 'nor its ceiling, freeze margin or freeze_in');
+""", """select is((select write_child from pgpm.progress('public.pg279')), null,
+  'progress() does not report a hand-detached partition as the write child');
+select is((select write_ceiling from pgpm.progress('public.pg279')), null,
+  'nor its ceiling');
+""", 1)],
+)
+MUTATION_SRC["detached_write_child_scalar_null_279"] = "tests/279_progress_write_child_exists_test.sql"
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the
