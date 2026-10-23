@@ -1350,6 +1350,7 @@ run_perf() {
     "bench/harness_calls_resolve.sh pgpm_perf389"
     "bench/harness_conservation_identity.sh pgpm_perf390"
     "bench/transmute_reused_key_shape.sh pgpm_perf420"
+    "bench/archive_log_bounds_canonical.sh pgpm_perf424"
   )
   local selected=()
   local n=${#guards[@]} idx

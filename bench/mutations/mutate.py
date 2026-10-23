@@ -644,8 +644,8 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
                                      and l.retired_at is null
                                      and not exists (select 1 from pgpm.part p
                                                       where p.parent_table = l.parent_table and p.child_name = l.child_name))
-     select o.child_name, count(*) as chunks, coalesce(min(case when o.named then o.lo::%1$s end)::text, min(o.lo)) as lo,
-            coalesce(max(case when o.named then o.hi::%1$s end)::text, max(o.hi)) as hi
+     select o.child_name, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
+            coalesce(pgpm._typed_text(max(case when o.named then o.hi::%1$s end)), max(o.hi)) as hi
        from orphan o
       where case when o.named then exists (select 1 from pgpm.part t
                                             where t.parent_table = o.parent_table
@@ -12440,8 +12440,8 @@ MUTATIONS["mark_gone_chunks_casts_unnamed"] = (
     "Pre-#1336 _mark_gone_chunks (P1-02): the archive_chunk_retired row's range casts every gone chunk's bounds, so a "
     "pre-#500 render ('15/10/2025 00:00:00 UTC' under SQL, DMY) raises out of it, and out of every archive step of the "
     "parent, every tick. One clause, the lo's guard. tests/346 part F catches it.",
-    [("            coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,\n",
-      "            min(lo::%1$s)::text as lo,\n", 1)],
+    [("            coalesce(pgpm._typed_text(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)), min(lo)) as lo,\n",
+      "            pgpm._typed_text(min(lo::%1$s)) as lo,\n", 1)],
 )
 MUTATIONS["mark_retired_chunks_unnamed_placed"] = (
     _G1336,
@@ -15473,6 +15473,18 @@ MUTATIONS["incoming_key_effect_unchecked"] = (
       "                     and (p_ref is null or c.confrelid = p_ref)\n"
       "                from pg_constraint c where c.conrelid = p_rel and c.conname = p_con), p_state = 'absent'),\n"
       "    p_rel, p_what);\n", "  null;\n", 1)],
+)
+
+# Issue #1370 (and #814's second bullet): the archive step's log rows over an aggregated range render it as canonical
+# native text. bench/archive_log_bounds_canonical.sh runs tests/357 against the mutant.
+MUTATIONS["archive_log_bounds_session_render"] = (
+    "bench/archive_log_bounds_canonical.sh",
+    "Pre-#1370 rendering: pgpm._typed_text renders without its DateStyle pin, so _mark_gone_chunks' "
+    "archive_chunk_retired row and _archive_step's orphan-discard archive_coverage_reset row take the archive tick's "
+    "DateStyle and zone ('01/12/2026 05:30:00 IST' under SQL, DMY in Asia/Kolkata), text that names no instant and "
+    "reads back elsewhere as 12 January or not at all. One clause, the SET. tests/357 parts A and B catch it.",
+    [("returns text language sql stable set datestyle = 'ISO, MDY' as $$\n  select p_val::text;\n",
+      "returns text language sql stable as $$\n  select p_val::text;\n", 1)],
 )
 
 def main() -> int:

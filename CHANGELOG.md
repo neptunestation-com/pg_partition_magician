@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **The archive step logs an aggregated range as canonical bounds** (#1370, and the second site #814's second
+  bullet names). `pgpm._mark_gone_chunks`' `archive_chunk_retired` row and `_archive_step`'s orphan discard
+  (`archive_coverage_reset`, #511) rendered the range of the chunks they act on as `min(lo::timestamptz)::text`, in
+  the archive tick's DateStyle and zone: under `SQL, DMY` in Asia/Kolkata the row read `01/12/2026 05:30:00 IST`,
+  which names no instant and reads back elsewhere as 12 January or not at all. Both render through
+  `pgpm._typed_text`, `_ts_text`'s rendering for a value whose type the dynamic SQL names at run time.
+  `bench/archive_log_bounds_canonical.sh` runs `tests/357` against `archive_log_bounds_session_render`.
+
 - **`transmute_abort` drops the bound on the table its claim names** (#1364). It rendered the table's name and
   then waited for `ACCESS EXCLUSIVE` behind a reader, and the `DROP CONSTRAINT` resolved the name again once
   granted: a schema renamed during the wait, with a same-named schema and table put in its place, sent the drop

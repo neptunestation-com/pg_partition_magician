@@ -1496,6 +1496,14 @@ returns text language sql immutable as $$
   select case when p_kind = 'id' then 'max(hi::numeric)::text' else 'pgpm._ts_text(max(hi::timestamptz))' end;
 $$;
 
+-- A native value already cast to its kind's type (pgpm._native_type: numeric or timestamptz) as canonical native
+-- text, for dynamic SQL that names the type only at run time (#1370): _ts_text's rendering for an instant, a
+-- number's own text. The log rows that aggregate ledger bounds (min(lo::%s)) render through this, not ::text.
+create or replace function pgpm._typed_text(p_val anyelement)
+returns text language sql stable set datestyle = 'ISO, MDY' as $$
+  select p_val::text;
+$$;
+
 -- A native value handed to pgpm from OUTSIDE (an archive_fn's covered_hi) as the canonical text of what THIS
 -- session reads it as (#977): the same rendering _max_hi_native gives the ledger's watermark, so a chunk's hi
 -- and the next chunk's lo are the same text. Text pgpm did not render can be offset-less ('2026-03-01
@@ -5277,8 +5285,8 @@ begin
                                and to_regclass(format(''%%I.%%I'', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name)) is null))
                    returning l.child_name, l.child_oid, l.lo, l.hi)
      select child_name, child_oid, count(*) as chunks,
-            coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,
-            coalesce(max(case when pgpm._native_named(%4$L, hi) then hi::%1$s end)::text, max(hi)) as hi
+            coalesce(pgpm._typed_text(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)), min(lo)) as lo,
+            coalesce(pgpm._typed_text(max(case when pgpm._native_named(%4$L, hi) then hi::%1$s end)), max(hi)) as hi
        from gone group by child_name, child_oid',
     pgpm._native_type(cfg.control_kind), p_parent::text, p_child, cfg.control_kind)
   loop
@@ -6084,8 +6092,8 @@ begin
                                      and l.retired_at is null
                                      and not exists (select 1 from pgpm.part p
                                                       where p.parent_table = l.parent_table and p.child_name = l.child_name))
-     select o.child_name, count(*) as chunks, coalesce(min(case when o.named then o.lo::%1$s end)::text, min(o.lo)) as lo,
-            coalesce(max(case when o.named then o.hi::%1$s end)::text, max(o.hi)) as hi
+     select o.child_name, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
+            coalesce(pgpm._typed_text(max(case when o.named then o.hi::%1$s end)), max(o.hi)) as hi
        from orphan o
       where case when o.named then exists (select 1 from pgpm.part t
                                             where t.parent_table = o.parent_table
