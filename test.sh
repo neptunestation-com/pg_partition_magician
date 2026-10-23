@@ -1371,6 +1371,7 @@ run_perf() {
     "bench/verify_parquet_tests_see_rows.sh pgpm_perf427"
     "bench/fix_phase_assign_commands.sh pgpm_perf433"
     "bench/screenshot_chrome_override.sh pgpm_perf434"
+    "bench/fix_phase_assign_commands.sh pgpm_perf433"
   )
   local selected=()
   local n=${#guards[@]} idx

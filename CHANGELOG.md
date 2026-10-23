@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **The fix-phase skill's command for the highest guard database gives the highest** (#1372). It sorted
+  `pgpm_perfNNN` on field 3 of a split on `f`, which has no field 3, so sort compared whole lines lexically and
+  printed `pgpm_perf99` where the highest was `pgpm_perf406`: a coordinator following it assigned fixers databases
+  `test.sh` already used. It sorts on field 2, numerically. `bench/fix_phase_assign_commands.sh` runs both of the
+  skill's assignment commands as written, on planted names whose lexical and numeric maxima differ and on this
+  checkout. Mutation `fix_phase_guard_db_sorts_empty_key`.
+
 - **`bench/guards_run_on_clean_code.sh` credits only the tracks `test.sh` runs** (#1385). It counted a guard as
   run against the unmodified code when any `run_<track>()` body named it, though `test.sh` runs a track only by
   calling its function, so a guard whose only call sat in a `run_*` function nothing called (run against its
