@@ -1760,12 +1760,17 @@ its place, holds under the name, and it can wait again inside itself (an RI chec
 are swapped back. So each such write is checked after it ran, before anything commits, by what it did to the
 relation pgpm identified, by OID: a `DROP` must have removed it, every row a `DELETE` took must be its (or its
 partitions'), a `TRUNCATE` must have given it a new file, a trigger must be on it, a rename or a change of
-owner must show on it. When the check fails the
+owner must show on it. A function cannot be locked, so the `DROP FUNCTION` of a hypertable capture function (by
+the cutover, or by a re-run of `from_hypertable_copy`) must have removed the function pgpm recorded, or the call
+refuses, rolled back, rather than leave that function behind after dropping another under its name. When the check fails the
 statement is rolled back: `retire` logs `fail_retain_drop` or `fail_retain_crossing` and returns false, or raises
 from the write block, and `regrain_cancel`, the regrain swap's and reclaim's emptying of the delta raise, saying the
 statement reached another relation. A read has no effect to check: the regrain reconcile, `untransmute`'s gate under
-its lock and the hypertable drain steps first lock the relation by OID and then name it through the name it has
-under that lock, so the read waits for nothing of its own and reaches the relation wherever its schema now is.
+its lock, the hypertable drains and their steps (the copy, the source and the delta, the residual checks and the
+copy's watermark included) and the cutover's catch-up and conservation check first lock the relation by OID and
+then name it through the name it has under that lock, so the read waits for nothing of its own and reaches the
+relation wherever its schema now is. A drain that waited while the hypertable's schema was renamed drains the
+relations pgpm recorded where they went, and never reads what took their names as nothing left to drain.
 
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already

@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+- **The hypertable module reaches what pgpm recorded by its oid after a lock wait** (#1366). The cutover and a re-run
+  of `from_hypertable_copy` dropped the recorded capture function by the name its oid rendered to, and `DROP
+  FUNCTION` looks the name up again once it has the function's lock: the function or its schema renamed aside with
+  a namesake committed while the drop waited made it drop the operator's function and leave pgpm's behind, its
+  record deleted. Each drop now goes through `pgpm._from_hypertable_drop_fn`, which requires the oid gone after
+  it and otherwise refuses, rolled back. `from_hypertable_drain_delta_step` read the source in its reconcile
+  without locking it (`row_security_active` takes none), so a schema swap during that read's wait reconciled the
+  batch from a namesake; it locks the source by oid first now. `from_hypertable_drain_appends` locked the copy and
+  read its watermark by the name read at its start, so an empty namesake copy's NULL watermark had the step copy
+  every row a second time; both drains lock the copy by oid (`pgpm._from_hypertable_lock_copy`) and name it by
+  its oid's rendering. And the cutover read its conservation baseline and ran its catch-up and conservation check
+  through the names read at its start: a schema swapped to namesakes while it waited for the copy or the delta,
+  and swapped back while it waited for the source or an incoming key, made a keyless swap commit every copied row
+  twice and a tracking swap commit a stale row, the check agreeing; each of those statements names the copy and
+  the source by their oids' renderings under the cutover's locks, and the handoff gives `transmute` the swapped-in
+  table by its oid. `tests/timescale/db/346` is the acceptance test; `bench/hypertable_by_oid_after_wait.sh` runs
+  it against `hypertable_capture_fn_drop_unchecked`, `hypertable_drain_delta_step_source_unlocked`,
+  `hypertable_drain_copy_unlocked`, `hypertable_cutover_baseline_by_name`, `hypertable_cutover_reconcile_by_name`
+  and `hypertable_cutover_nomatch_by_name`.
+
+- **The hypertable drains never report "converged" from an empty namesake** (#1356). `from_hypertable_drain_appends`
+  and `from_hypertable_drain_delta` asked whether anything was left with an `EXISTS` on the source or the delta
+  named before it waited for its lock, and `from_hypertable_drain_appends_step` read its batch bound from the
+  source the same way, none of them locked by oid first: a schema renamed aside during the wait with an empty
+  namesake committed made the drains return converged and the step return its input watermark while the source
+  and delta pgpm recorded still held undrained rows. Each locks its relation by oid before it names it, so the
+  drains follow the relations pgpm recorded and drain them. `tests/timescale/db/347` is the acceptance test;
+  `bench/hypertable_drain_probe_by_oid.sh` runs it against `hypertable_drain_appends_probe_unlocked`,
+  `hypertable_drain_delta_probe_unlocked` and `hypertable_drain_appends_step_source_unlocked`.
+
 - **The archive step logs an aggregated range as canonical bounds** (#1370, and the second site #814's second
   bullet names). `pgpm._mark_gone_chunks`' `archive_chunk_retired` row and `_archive_step`'s orphan discard
   (`archive_coverage_reset`, #511) rendered the range of the chunks they act on as `min(lo::timestamptz)::text`, in
