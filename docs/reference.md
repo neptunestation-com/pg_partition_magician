@@ -2716,9 +2716,11 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   relation gone (`archive_chunk_retired`) and holds the range the same way. Which partitions a retired chunk
   holds is the same answer from every session, and never narrower than the chunk. A retired chunk's bound that
   names no instant by itself (one an older install stored as a strategy wrote its `covered_hi`, in a session
-  whose zone nothing recorded) is read at its widest: as wall time under both day-month orders, a `lo` at
-  UTC+14 and a `hi` at UTC-12, whatever zone the text names; text no DateStyle parses reaches without
-  bound, and the call never raises on it. So such a chunk can hold a partition next to it,
+  whose zone nothing recorded) is read at its widest: as wall time under both day-month orders, a `lo` 168
+  hours east of UTC and a `hi` 168 hours west, whatever zone the text names. That is every offset a session can
+  take (a POSIX `TimeZone` reaches 167:59:60 either side, `'XYZ167:59:60'` being UTC-168, and tzdata's LMT
+  passes -12 and +14), not only today's civil zones. Text no DateStyle parses reaches without
+  bound, and the call never raises on it. So such a chunk can hold the partitions within a week of it,
   pgpm's own included, for as long as the row stays as written; the skip row then names the chunk's `lo` and
   the remedy: once you know the instant the bound names (for a partition's last chunk, usually the `hi` of the
   `retain_drop` row `pgpm.log` has for it), write it with its offset (`update pgpm.archive_ledger set hi =
