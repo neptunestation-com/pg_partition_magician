@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **Three review-loop verdicts read what they claim to** (#1389). `land.sh`'s `verify_tree` found a duplicate
+  guard database to renumber by substring, so a duplicate `pgpm_perf33` before a `pgpm_perf332` rewrote the
+  unrelated guard's database and kept the duplicate; it now renumbers the last whole name and stops when a name
+  is still duplicated afterwards. `stop_check.py` judged criterion 4 with Python's `round()`, which rounds half to
+  even, so half a Tier 1 estimated left read as zero; it now needs less than one half. `flake_check.sh` called
+  any job with no step `lost_runner` whatever its log said, so a job failed before its first step by a real error
+  (a container image that does not exist) was rerun as a flake; the signature now needs an empty or
+  `BlobNotFound` log, and `runner_not_acquired` needs no step run as its header says. `bench/review_tooling_verdicts.sh`
+  sections (g), (h) and (i) hold each. Mutations `land_renumber_by_substring`, `land_renumber_unchecked`,
+  `stop_check_capture_half_to_even`, `flake_check_lost_runner_by_steps_only` and
+  `flake_check_not_acquired_steps_unread`.
+
 - **`scripts/screenshot.sh` uses the browser `CHROME=` names** (#1373). Its refusal told the operator to pass
   the browser's path via `CHROME=...`, and it set `CHROME` empty before its search on every run, so the path
   passed was discarded and the same refusal came back. A `CHROME` naming an executable is now the browser used,
