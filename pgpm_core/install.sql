@@ -571,10 +571,19 @@ end $$;
 -- (or renamed) by hand before the upgrade; pgpm._part_built reads it as gone once every partition of the
 -- table is accounted for, so obtain forgets and rebuilds it (#981: forget_missing clears only rows whose
 -- PARENT is gone, so it never reached these).
+--
+-- AND ONLY THE PARTITION THE OLDER INSTALL MEANT (#1365). Two partitions of one parent can carry the name in different
+-- schemas (an operator's, attached over a range pgpm does not hold), and the relname alone adopted whichever came
+-- first, so retire() dropped the operator's table as the cell's. An install that predates this anchor resolved a row
+-- as <the parent's schema>.<child_name>, so the namesake there is the one adopted; elsewhere only a sole namesake
+-- (a moved parent's partitions stay where they were, #727), and two with neither in the parent's schema none.
 update pgpm.part p set child_oid = i.inhrelid
   from pg_inherits i join pg_class c on c.oid = i.inhrelid
  where i.inhparent = p.parent_table and c.relname = p.child_name
-   and p.attached and p.child_oid is null;
+   and p.attached and p.child_oid is null
+   and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p.parent_table)
+        or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid
+                        where i2.inhparent = p.parent_table and c2.relname = p.child_name and i2.inhrelid <> i.inhrelid));
 update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.child_name))::oid
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
  where c.oid = p.parent_table and not p.attached and p.child_oid is null;
@@ -3678,7 +3687,8 @@ $$;
 --   child_oid           the schema of the relation pgpm recorded for this row (#421), wherever it is now.
 --   pg_inherits         an unanchored row (child_oid null: an install older than #421, or a backfill that
 --                       could not resolve it) takes the schema of the partition OF THIS PARENT that carries
---                       the name, so a moved parent's legacy rows are reached too.
+--                       the name, so a moved parent's legacy rows are reached too: the one in the parent's
+--                       schema, else the sole one, by the #421 backfill's rule (#1365); with two elsewhere, none.
 --   the parent          a row whose relation is gone takes the parent's schema, the answer every step gave
 --                       before this, so a vanished partition is reported as the identity failure it is.
 create or replace function pgpm._child_nsp(p_parent regclass, p_child name)
@@ -3692,7 +3702,9 @@ returns name language sql stable as $$
        join pg_class c on c.oid = i.inhrelid
        join pg_namespace n on n.oid = c.relnamespace
       where i.inhparent = p_parent and c.relname = p_child
-      limit 1),
+        and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p_parent)
+             or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid
+                             where i2.inhparent = p_parent and c2.relname = p_child and i2.inhrelid <> i.inhrelid))),
     (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
 $$;
 
@@ -3815,11 +3827,18 @@ $$;
 -- operator's rows. A mark on a partition still ATTACHED at the upgrade, whose detach that install dispatched and
 -- pg_cron has yet to run, is given its record instead (see the loop), so the detach that lands is pgpm's own. On an
 -- install that has the record the pass changes nothing retire() would not.
+--
+-- A MARK ON ANOTHER RELATION THAN THE ROW'S (#1365). A retire() older than #1365 chose the partition to retire by
+-- relname alone, and could record a namesake in another schema as retiring_oid and arm the job with its detach;
+-- every later retire() then refused the cell (fail_retain_identity) and its conditional disarm, rendered from the
+-- partition's own schema, never matched. Such a mark vouches for no retirement of this row's: the job is disarmed
+-- if it still holds that relation's detach, the mark cleared (logged retain_disown, with where that relation stands
+-- now), and the cell's retirement starts over on the partition the row records.
 create or replace function pgpm._disown_unvouched_retirements()
 returns int language plpgsql as $$
-declare r record; v_n int := 0; v_why_q text;
+declare r record; v_n int := 0; v_why_q text; v_other_q text; v_other_nsp name; v_other_rel name;
 begin
-  for r in select p.parent_table, p.child_name, n.nspname, c.oid as rel,
+  for r in select p.parent_table, p.child_name, n.nspname, c.oid as rel, p.retiring_oid, p.lo, p.hi,
                   (select i.inhdetachpending from pg_inherits i
                     where i.inhparent = p.parent_table and i.inhrelid = c.oid) as pending
              from pgpm.part p
@@ -3828,6 +3847,31 @@ begin
              join pg_namespace n on n.oid = c.relnamespace
             where p.retiring_at is not null and c.relname = p.child_name
   loop
+    if r.retiring_oid <> r.rel then   -- #1365: an older retire()'s namesake
+      select n2.nspname, c2.relname into v_other_nsp, v_other_rel
+        from pg_class c2 join pg_namespace n2 on n2.oid = c2.relnamespace where c2.oid = r.retiring_oid;
+      if v_other_rel is not null then
+        perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent_table, v_other_nsp, v_other_rel));
+      end if;
+      v_other_q := case when v_other_rel is null then 'a relation that no longer exists'
+                        else format('%I.%I', v_other_nsp, v_other_rel) end;
+      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+       where parent_table = r.parent_table and child_name = r.child_name;
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (r.parent_table, 'retain_disown', r.lo, r.hi,
+                format('the retirement mark of %I.%I (oid %s) recorded oid %s, %s, which a pgpm older than this release chose by its name alone; the mark is cleared, the pgpm_detach job disarmed if it still held that relation''s detach, and the retirement of %I.%I starts over. %s is %s',
+                       r.nspname, r.child_name, r.rel, r.retiring_oid, v_other_q, r.nspname, r.child_name, v_other_q,
+                       case when v_other_rel is null then 'gone'
+                            when exists (select 1 from pg_inherits i where i.inhparent = r.parent_table
+                                           and i.inhrelid = r.retiring_oid and not i.inhdetachpending)
+                              then format('still a partition of %s, untouched', r.parent_table)
+                            when exists (select 1 from pg_inherits i where i.inhparent = r.parent_table
+                                           and i.inhrelid = r.retiring_oid)
+                              then format('pending the concurrent detach that pgpm armed; once it is finished it is a table of its own, left standing, and attaching it back to %s on the bounds it had serves its rows again', r.parent_table)
+                            else format('no longer a partition of %s (the detach that pgpm armed reached it); it is left standing, and attaching it back on the bounds it had serves its rows again', r.parent_table) end));
+      v_n := v_n + 1;
+      continue;
+    end if;
     if r.pending is false then
       -- attached: a retirement under way, retire()'s to finish. One an older install dispatched (the job armed with
       -- its detach, which pg_cron has yet to run) gets its record here, or the detach would land on a mark with none
@@ -4253,10 +4297,12 @@ begin
     -- Resolved to an OID, not merely counted (#407). This is both the "is it still attached?" test it
     -- has always been AND the value recorded in retiring_oid below, which is what the check at the top
     -- of every later call compares against -- so the identity being retired is pinned once, here,
-    -- read out of pg_inherits and therefore a partition OF THIS PARENT by construction.
+    -- read out of pg_inherits and therefore a partition OF THIS PARENT by construction. And it is v_rel,
+    -- the relation the identity check vouched for and the lock holds, never a partition found by relname
+    -- (#1365): a namesake in another schema, listed first, was recorded and its detach dispatched.
     select i.inhrelid into v_child
-      from pg_inherits i join pg_class c on c.oid = i.inhrelid
-     where i.inhparent = p_parent and c.relname = p_child;
+      from pg_inherits i
+     where i.inhparent = p_parent and i.inhrelid = v_rel;
 
     if v_child is not null then
       -- ONE DETACH IN FLIGHT AT A TIME, database-wide. There is a single standing cron job, so a
@@ -4279,8 +4325,9 @@ begin
            and not (p.parent_table = p_parent and p.child_name = p_child)
            and (p.retiring_at, p.parent_table::text, p.child_name)
              < (coalesce(r.retiring_at, 'infinity'::timestamptz), p_parent::text, p_child)
-           and exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid
-                        where i.inhparent = p.parent_table and c.relname = p.child_name))
+           and exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid   -- #1365: its anchor's
+                        where i.inhparent = p.parent_table and c.relname = p.child_name
+                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, i.inhrelid)))
       then
         return false;
       end if;

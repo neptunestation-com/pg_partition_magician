@@ -2252,7 +2252,11 @@ MUTATIONS = {
         [("update pgpm.part p set child_oid = i.inhrelid\n"
           "  from pg_inherits i join pg_class c on c.oid = i.inhrelid\n"
           " where i.inhparent = p.parent_table and c.relname = p.child_name\n"
-          "   and p.attached and p.child_oid is null;\n", "", 1)],
+          "   and p.attached and p.child_oid is null\n"
+          "   and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p.parent_table)\n"
+          "        or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid\n"
+          "                        where i2.inhparent = p.parent_table and c2.relname = p.child_name and i2.inhrelid <> i.inhrelid));\n",
+          "", 1)],
     ),
     "upgrade_monolith_oid_backfill_noop": (
         "bench/upgrade_in_place.sh",
@@ -5653,7 +5657,9 @@ $$;''',
        join pg_class c on c.oid = i.inhrelid
        join pg_namespace n on n.oid = c.relnamespace
       where i.inhparent = p_parent and c.relname = p_child
-      limit 1),
+        and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p_parent)
+             or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid
+                             where i2.inhparent = p_parent and c2.relname = p_child and i2.inhrelid <> i.inhrelid))),
     (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
 """, """  select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 """, 1)],
@@ -15286,6 +15292,53 @@ MUTATIONS["scratch_owner_follow_unverified"] = (
     "ACCESS EXCLUSIVE behind a reader, and a schema renamed during that wait hands a namesake, a table pgpm was never "
     "handed, to the parent's owner. One clause. tests/345 part O catches it.",
     [("      perform pgpm._effect_or_raise((select c.relowner from pg_class c where c.oid = r.oid) = v_want, r.oid,\n                                    format('%s, handing a scratch relation to %I,', p_what, v_want_n));\n", "", 1)],
+)
+
+# Issue #1365: bench/retire_referenced_by_anchor.sh runs tests/355. retire()'s referenced path, and its
+# one-detach-in-flight check, read a partition out of pg_inherits by relname alone; each now reads the anchor's.
+MUTATIONS["retire_referenced_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "Issue #1365: retire()'s referenced path picks the partition it retires out of pg_inherits by relname, not as "
+    "the relation the identity check vouched for, the pre-fix shape: an operator's namesake in another schema, "
+    "listed first, is recorded as retiring_oid and its detach dispatched, and every later retire() of the aged cell "
+    "refuses as fail_retain_identity. One clause. tests/355 part A catches it.",
+    [("     where i.inhparent = p_parent and i.inhrelid = v_rel;\n",
+      "     where i.inhparent = p_parent and (select c.relname from pg_class c where c.oid = i.inhrelid) = p_child;\n", 1)],
+)
+MUTATIONS["retire_yield_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "Issue #1365, the sibling in the same function: the one-detach-in-flight check asks whether an older mark's "
+    "partition is still a partition of its parent by relname alone, so a namesake in another schema attached to that "
+    "parent, after the marked partition was dropped by hand, holds every referenced retirement in the database off, "
+    "silently. One clause, the anchor. tests/355 part B catches it.",
+    [("\n                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, i.inhrelid)))\n",
+      "))\n", 1)],
+)
+
+# PR #1392 verification (V-01, V-02): the same relname-alone choice in the upgrade's paths. One clause each.
+MUTATIONS["disown_namesake_mark_kept"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 V-01: the install pass that repairs old retirement marks logs a mark an older retire() recorded on a "
+    "namesake in another schema, and disarms the job of its detach, but does not clear it, so every later retire() "
+    "of the cell still refuses as fail_retain_identity. One statement, the clearing. tests/355 part C catches it.",
+    [("      v_other_q := case when v_other_rel is null then 'a relation that no longer exists'\n                        else format('%I.%I', v_other_nsp, v_other_rel) end;\n      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null\n       where parent_table = r.parent_table and child_name = r.child_name;\n",
+      "      v_other_q := case when v_other_rel is null then 'a relation that no longer exists'\n                        else format('%I.%I', v_other_nsp, v_other_rel) end;\n", 1)],
+)
+MUTATIONS["child_oid_backfill_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 V-02: the #421 child_oid backfill adopts the first partition of the parent that carries the row's name, "
+    "in any schema, the pre-fix shape: an operator's namesake listed first becomes the row's anchor, and retire()'s "
+    "one-step DROP takes it, rows and all. One clause. tests/355 part D catches it.",
+    [('   and p.attached and p.child_oid is null\n   and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p.parent_table)\n        or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid\n                        where i2.inhparent = p.parent_table and c2.relname = p.child_name and i2.inhrelid <> i.inhrelid));\n',
+      '   and p.attached and p.child_oid is null;\n', 1)],
+)
+MUTATIONS["child_nsp_fallback_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392: _child_nsp's fallback for an unanchored row takes the schema of the first partition of the parent that "
+    "carries the name (limit 1, no order), the pre-fix shape: a namesake in another schema that comes first is what "
+    "retire()'s one-step DROP takes. One clause. tests/355 part E catches it.",
+    [('      where i.inhparent = p_parent and c.relname = p_child\n        and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p_parent)\n             or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid\n                             where i2.inhparent = p_parent and c2.relname = p_child and i2.inhrelid <> i.inhrelid))),\n',
+      '      where i.inhparent = p_parent and c.relname = p_child\n      limit 1),\n', 1)],
 )
 
 def main() -> int:
