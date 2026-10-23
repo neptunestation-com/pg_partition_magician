@@ -16504,6 +16504,15 @@ MUTATIONS["fix_phase_guard_db_sorts_empty_key"] = (
 )
 MUTATION_SRC["fix_phase_guard_db_sorts_empty_key"] = ".claude/skills/fix-phase/SKILL.md"
 
+MUTATIONS["screenshot_chrome_reset"] = (
+    "bench/screenshot_chrome_override.sh",
+    "Pre-#1373 scripts/screenshot.sh: CHROME is set to the empty string before the browser search, so the CHROME= "
+    "its own refusal tells the operator to pass is discarded, the search finds nothing (or another browser) and "
+    "the same refusal comes back. One clause, the assignment.",
+    [('CHROME="${CHROME:-}"\n', 'CHROME=""\n', 1)],
+)
+MUTATION_SRC["screenshot_chrome_reset"] = "scripts/screenshot.sh"
+
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
         for name, e in late_survivors().items():
