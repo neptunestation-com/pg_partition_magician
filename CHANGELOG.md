@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **`scripts/screenshot.sh` uses the browser `CHROME=` names** (#1373). Its refusal told the operator to pass
+  the browser's path via `CHROME=...`, and it set `CHROME` empty before its search on every run, so the path
+  passed was discarded and the same refusal came back. A `CHROME` naming an executable is now the browser used,
+  ahead of the search, and one naming no executable is refused by name. `bench/screenshot_chrome_override.sh`
+  runs the script with stand-in browsers, the remedy typed as the refusal gives it. Mutation
+  `screenshot_chrome_reset`.
+
 - **The fix-phase skill's command for the highest guard database gives the highest** (#1372). It sorted
   `pgpm_perfNNN` on field 3 of a split on `f`, which has no field 3, so sort compared whole lines lexically and
   printed `pgpm_perf99` where the highest was `pgpm_perf406`: a coordinator following it assigned fixers databases
