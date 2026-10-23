@@ -4253,10 +4253,12 @@ begin
     -- Resolved to an OID, not merely counted (#407). This is both the "is it still attached?" test it
     -- has always been AND the value recorded in retiring_oid below, which is what the check at the top
     -- of every later call compares against -- so the identity being retired is pinned once, here,
-    -- read out of pg_inherits and therefore a partition OF THIS PARENT by construction.
+    -- read out of pg_inherits and therefore a partition OF THIS PARENT by construction. And it is v_rel,
+    -- the relation the identity check vouched for and the lock holds, never a partition found by relname
+    -- (#1365): a namesake in another schema, listed first, was recorded and its detach dispatched.
     select i.inhrelid into v_child
-      from pg_inherits i join pg_class c on c.oid = i.inhrelid
-     where i.inhparent = p_parent and c.relname = p_child;
+      from pg_inherits i
+     where i.inhparent = p_parent and i.inhrelid = v_rel;
 
     if v_child is not null then
       -- ONE DETACH IN FLIGHT AT A TIME, database-wide. There is a single standing cron job, so a
@@ -4279,8 +4281,9 @@ begin
            and not (p.parent_table = p_parent and p.child_name = p_child)
            and (p.retiring_at, p.parent_table::text, p.child_name)
              < (coalesce(r.retiring_at, 'infinity'::timestamptz), p_parent::text, p_child)
-           and exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid
-                        where i.inhparent = p.parent_table and c.relname = p.child_name))
+           and exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid   -- #1365: its anchor's
+                        where i.inhparent = p.parent_table and c.relname = p.child_name
+                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, i.inhrelid)))
       then
         return false;
       end if;

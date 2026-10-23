@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`retire()` retires the partition `pgpm.part` anchors, not a namesake in another schema** (#1365). Its
+  referenced path picked the partition to retire out of `pg_inherits` by relname alone, so an operator's
+  partition of the same parent under the same name in another schema could be the one recorded as `retiring_oid`
+  and whose detach was dispatched; every later `retire()` of the aged cell then refused it as
+  `fail_retain_identity`, wedging retention while the operator's table was queued to leave its parent. It now
+  retires the relation its identity check vouched for and its lock holds. The one-detach-in-flight check read an
+  older mark's partition the same way, so a namesake attached after the marked partition was dropped held every
+  referenced retirement in the database off, silently; it now asks after the mark's own relation.
+  `bench/retire_referenced_by_anchor.sh` runs `tests/355` (mutations `retire_referenced_by_relname` and
+  `retire_yield_by_relname`).
+
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names
   after a wait: `regrain_cancel`'s, an earlier drop's, or the `DROP`'s own for its lock behind a reader. A schema

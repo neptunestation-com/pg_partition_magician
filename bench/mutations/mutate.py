@@ -15288,6 +15288,27 @@ MUTATIONS["scratch_owner_follow_unverified"] = (
     [("      perform pgpm._effect_or_raise((select c.relowner from pg_class c where c.oid = r.oid) = v_want, r.oid,\n                                    format('%s, handing a scratch relation to %I,', p_what, v_want_n));\n", "", 1)],
 )
 
+# Issue #1365: bench/retire_referenced_by_anchor.sh runs tests/355. retire()'s referenced path, and its
+# one-detach-in-flight check, read a partition out of pg_inherits by relname alone; each now reads the anchor's.
+MUTATIONS["retire_referenced_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "Issue #1365: retire()'s referenced path picks the partition it retires out of pg_inherits by relname, not as "
+    "the relation the identity check vouched for, the pre-fix shape: an operator's namesake in another schema, "
+    "listed first, is recorded as retiring_oid and its detach dispatched, and every later retire() of the aged cell "
+    "refuses as fail_retain_identity. One clause. tests/355 part A catches it.",
+    [("     where i.inhparent = p_parent and i.inhrelid = v_rel;\n",
+      "     where i.inhparent = p_parent and (select c.relname from pg_class c where c.oid = i.inhrelid) = p_child;\n", 1)],
+)
+MUTATIONS["retire_yield_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "Issue #1365, the sibling in the same function: the one-detach-in-flight check asks whether an older mark's "
+    "partition is still a partition of its parent by relname alone, so a namesake in another schema attached to that "
+    "parent, after the marked partition was dropped by hand, holds every referenced retirement in the database off, "
+    "silently. One clause, the anchor. tests/355 part B catches it.",
+    [("\n                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, i.inhrelid)))\n",
+      "))\n", 1)],
+)
+
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
         for name, e in late_survivors().items():
