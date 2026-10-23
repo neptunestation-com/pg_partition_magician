@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A retired chunk's offset-less bound reaches every offset a session can take** (#1363). `pgpm._native_bound_reach`
+  widened a retired ledger row's bound that names no instant (a pre-#977 `covered_hi`) only to UTC-12 for a `hi`
+  and UTC+14 for a `lo`, the zones tzdata names today. A session goes further: `SET` accepts a POSIX zone to
+  167:59:60 either side of UTC (`'XYZ167:59:60'` is UTC-168), an interval or a number of hours to just under that,
+  and tzdata's LMT reaches -15:56:08 (Asia/Manila before 1845). A `hi` such a session wrote read below its own
+  `lo`, the partition re-created over the chunk was not held, and the archive step PUT it over the retired
+  chunk's object, the only copy of the dropped rows. The reach is now 168 hours either side, PostgreSQL's limit,
+  so such a chunk can hold the week of partitions next to it until the operator writes the bound with its offset,
+  the remedy `skip_archive_retired_range` names (its text now says how wide the reach is). Test `tests/354`
+  (`tests/347` moved to fixtures a week apart); guard `bench/native_bound_reach_every_offset.sh`; mutations
+  `native_bound_reach_civil_zones` and `native_bound_reach_sixteen_hours`.
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names
   after a wait: `regrain_cancel`'s, an earlier drop's, or the `DROP`'s own for its lock behind a reader. A schema

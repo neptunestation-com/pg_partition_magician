@@ -12396,9 +12396,9 @@ MUTATIONS["mark_retired_chunks_unnamed_placed"] = (
 )
 
 # Issue #1336, the sibling of bullet 8 (PR #1351 left it): a RETIRED chunk's bound that names no instant by itself is
-# read at its widest by pgpm._native_bound_reach (a lo at UTC+14, a hi at UTC-12, under MDY and DMY), so the
-# partitions _over_retired_chunks holds, and the archive step, retain() and scripts/archive_partition_whole.sql leave
-# alone, include every one its text could reach. bench/over_retired_chunks_unnamed_widest.sh runs tests/347.
+# read at its widest by pgpm._native_bound_reach (a lo 168 hours east, a hi 168 west since #1363, under MDY and
+# DMY), so the partitions _over_retired_chunks holds, and the archive step, retain() and
+# scripts/archive_partition_whole.sql leave alone, include every one its text could reach. bench/over_retired_chunks_unnamed_widest.sh runs tests/347.
 _G1336W = "bench/over_retired_chunks_unnamed_widest.sh"
 MUTATIONS["over_retired_chunks_unnamed_grid_clock"] = (
     _G1336W,
@@ -12430,6 +12430,29 @@ MUTATIONS["over_retired_chunks_unnamed_session_zone"] = (
       "                                      extract(epoch from l.hi::timestamptz) as hi_k,\n", 1)],
 )
 
+
+# Issue #1363: a retired chunk's bound that names no instant reaches every offset a session can take, 168 hours either
+# side of UTC (a POSIX zone to 167:59:60, an interval or a number of hours to just under it), not the -12 to +14 of
+# today's civil zones. bench/native_bound_reach_every_offset.sh runs tests/354.
+_G1363 = "bench/native_bound_reach_every_offset.sh"
+MUTATIONS["native_bound_reach_civil_zones"] = (
+    _G1363,
+    "Pre-#1363 _native_bound_reach (#1354's constants): an offset-less retired hi reaches only UTC-12 and a lo only "
+    "UTC+14, so a hi a session at 'XYZ167:59:60' or in Asia/Manila's LMT wrote reads below its own lo, the partition "
+    "re-created over the chunk is not held, and the archive step PUTs it over the retired chunk's object. One "
+    "clause, the reach. tests/354 parts A to C catch it.",
+    [("  return v + case when p_latest then 604800 else -604800 end;\n",
+      "  return v + case when p_latest then 43200 else -50400 end;\n", 1)],
+)
+MUTATIONS["native_bound_reach_sixteen_hours"] = (
+    _G1363,
+    "Issue #1363's plausible-but-wrong fix: the reach is the +/-15:59:59 an offset literal is limited to, 16 hours "
+    "either side, which covers every LMT tzdata has but not a session SET to a POSIX zone or an interval past it, "
+    "so the partition over a chunk such a session wrote is archived over the retired object. One clause, the "
+    "reach. tests/354 parts A to C catch it.",
+    [("  return v + case when p_latest then 604800 else -604800 end;\n",
+      "  return v + case when p_latest then 57600 else -57600 end;\n", 1)],
+)
 
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
 # wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
