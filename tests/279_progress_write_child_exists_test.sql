@@ -11,7 +11,8 @@
 --      the filter removes the dead row, not every row.
 --   2. With the frontier's own cell dropped, write_child, write_ceiling, freeze_margin and freeze_in are all
 --      null.
---   3. With the frontier's cell DETACHED by hand instead (#956), the same: it no longer takes writes either.
+--   3. With the frontier's cell DETACHED by hand instead (#956), the same: it no longer takes writes either,
+--      and the table's row is still reported (#1378).
 -- A one-second grid, so the cell under now() is an empty forward cell obtain built, and the assertions run
 -- in one transaction, so now() (a time grid's frontier) is one instant throughout.
 create extension if not exists pgtap;
@@ -73,10 +74,13 @@ select ok(not exists (select 1 from pg_inherits i join cell279 x on x.child_oid 
   'LIVENESS: the frontier''s partition is detached, its table kept');
 select is((select retiring_at from pgpm.part p join cell279 x on x.child_oid = p.child_oid where p.attached), null,
   'LIVENESS: no retirement of pgpm''s own is in flight on it');
-select is((select write_child from pgpm.progress('public.pg279')), null,
-  'progress() does not report a hand-detached partition as the write child');
-select is((select write_ceiling from pgpm.progress('public.pg279')), null,
-  'nor its ceiling');
+-- Read as a row, not as two scalars (#1378): a scalar subquery over no row is null too, so a progress() that
+-- lost pg279 from its report would pass a null write_child; null is not array[null, ...], which is() refuses.
+select is((select array[write_child::text, write_ceiling] from pgpm.progress('public.pg279')),
+  array[null, null]::text[],
+  'progress() still reports pg279, and not a hand-detached partition as its write child');
+select is((select array[freeze_margin, freeze_in::text] from pgpm.progress('public.pg279')),
+  array[null, null]::text[], 'nor its ceiling, freeze margin or freeze_in');
 
 select * from finish();
 rollback;

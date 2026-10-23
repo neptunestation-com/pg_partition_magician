@@ -21,7 +21,7 @@
 -- really is inexact.
 create extension if not exists pgtap;
 
-select plan(40);
+select plan(41);
 
 -- Roles are cluster-wide and the database is per-file, so they are created only when absent and never
 -- dropped (see tests/72 for why a DROP ROLE here would be the worse choice).
@@ -178,10 +178,15 @@ select is(array[public.t190_step_analyzes(), public.t190_step_analyzes()], array
   'LIVENESS: (E) the step after the prepare analyzes the never-analyzed delta (the probe sees that lock)');
 select is((select reltuples from pg_class where oid = 'public.rc190_pgpm_regrain_delta'::regclass), 0::real,
   'LIVENESS: (E) the delta is analyzed and empty (reltuples = 0, which the old test read as unanalyzed)');
+-- The later steps' witness is read before them and after them (#1378): one copy not attached, which the
+-- step before them already made true, holds even when they do nothing at all. Batch 1, so each step that
+-- copies takes the next id into the in-flight copy.
+select is((select array_agg(id order by id) from public.rc190_p0000000000000000000), array[1]::bigint[],
+  'LIVENESS: (E) before the later steps the in-flight copy holds id 1 alone');
 select is(array[public.t190_step_analyzes(), public.t190_step_analyzes()], array[false, false],
   'E: later steps over the empty delta do not ANALYZE it again');
-select is((select count(*) from pgpm.part where parent_table = 'public.rc190'::regclass and not attached), 1::bigint,
-  'LIVENESS: (E) those steps were copying (the regrain is in flight, one copy started)');
+select is((select array_agg(id order by id) from public.rc190_p0000000000000000000), array[1, 2, 3]::bigint[],
+  'LIVENESS: (E) those steps were copying: each copied one more row, ids 2 and 3');
 
 -- ================================= F. a fixed step's offset, exactly =================================
 -- '1.000001 seconds' from a year-1 anchor: about 6.4e10 steps, so k * step has 17 significant digits in
