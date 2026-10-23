@@ -6585,12 +6585,14 @@ begin
 
   -- A NULL key component can never be matched by the row-constructor reconcile below, so its change would
   -- be silently lost -- the exact failure this apparatus exists to prevent. PK columns are NOT NULL, but a
-  -- reused UNIQUE key may legitimately permit nulls, so refuse rather than lose the change.
+  -- reused UNIQUE key may legitimately permit nulls, so refuse rather than lose the change. Here and below, the
+  -- key is the index's first indnkeyatts columns: its INCLUDE columns, which the parent's key carries (#766),
+  -- identify nothing.
   select string_agg(quote_ident(a.attname), ', ') into v_bad_q
     from pg_index i
     cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-   where i.indexrelid = v_keyidx and not a.attnotnull;
+   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts and not a.attnotnull;
   if v_bad_q is not null then
     raise exception 'pg_partition_magician: cannot regrain % -- its reused key has nullable column(s) (%), and a NULL key component cannot be reconciled, so a concurrent change to such a row would be lost. Add NOT NULL to those columns, then re-run.',
       p_parent, v_bad_q;
@@ -6604,7 +6606,7 @@ begin
     from pg_index i
     cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-   where i.indexrelid = v_keyidx;
+   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;
   -- the capture's bind parameters: $1..$n for one key row, $n+1..$2n for an UPDATE's second
   select string_agg('$' || g, ', ' order by g) into v_oldargs from generate_series(1, v_nkeys) g;
   select string_agg('$' || g, ', ' order by g) into v_newargs from generate_series(v_nkeys + 1, 2 * v_nkeys) g;
@@ -7563,7 +7565,7 @@ begin
     from pg_index i
     cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-   where i.indexrelid = p_keyidx;
+   where i.indexrelid = p_keyidx and k.ord <= i.indnkeyatts;
   if v_delta_reg is null then
     return format('change capture''s delta table (oid %s, recorded in pgpm.config) is gone; change capture is re-minted for the key (%s)',
                   coalesce((select regrain_delta_oid::text from pgpm.config where parent_table = p_parent), 'none'), v_want_q);
@@ -8863,7 +8865,8 @@ begin
   -- a resumed batch never re-copies a row already in the child even when the control column is non-unique.
   -- The key is whatever transmute reused: a PRIMARY KEY, or (relaxed key contract) a UNIQUE constraint.
   -- A truly KEYLESS monolith has no key to identify rows by, so a resumable copy cannot dedup -- regrain is
-  -- refused for it below ('nokey'); the coarse monolith stays a correct, queryable permanent state.
+  -- refused for it below ('nokey'); the coarse monolith stays a correct, queryable permanent state. Its KEY
+  -- columns only (#766): an INCLUDE column in the equijoin re-copied a row whose value it holds is NULL.
   select coalesce(
            (select i.indexrelid from pg_index i where i.indrelid = p_parent and i.indisprimary limit 1),
            (select con.conindid from pg_constraint con join pg_index i on i.indexrelid = con.conindid
@@ -8875,7 +8878,7 @@ begin
       from pg_index i
       cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
       join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-     where i.indexrelid = v_keyidx;
+     where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;
   end if;
   if v_pkjoin_q is null then return 'nokey'; end if;
   -- #873: the copy, the reconcile and the avg-width probe below read the SOURCE directly, under its own
@@ -10929,6 +10932,33 @@ returns text language sql stable as $$
        from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped));
 $$;
 
+-- The clause the cutover declares a carried primary key or unique constraint with on the parent (steps 8 and
+-- 9b): its whole definition, pg_get_constraintdef's (columns, NULLS NOT DISTINCT, INCLUDE, DEFERRABLE, INITIALLY
+-- DEFERRED), with the index's storage parameters, which pg_get_constraintdef leaves out, spliced in ahead of the
+-- deferral clause it ends with. Step 8 used to declare the reused key from its column list (#766): a PRIMARY KEY
+-- ... INCLUDE then matched no index of the monolith and failed the cutover with "multiple primary keys", and a
+-- UNIQUE NULLS NOT DISTINCT key was built again on the monolith under the lock, plain, on the parent and every
+-- forward partition.
+create or replace function pgpm._transmute_key_ddl(p_con oid)
+returns text language plpgsql stable as $$
+declare v_def text; v_sfx text; v_with_q text;
+begin
+  select pg_get_constraintdef(k.oid),
+         case when k.condeferrable and k.condeferred then ' DEFERRABLE INITIALLY DEFERRED'
+              when k.condeferrable then ' DEFERRABLE'
+              else '' end,
+         (select string_agg(quote_ident(o.option_name) || '=' || quote_literal(o.option_value), ', ')
+            from pg_class ic, pg_options_to_table(ic.reloptions) o where ic.oid = k.conindid)
+    into v_def, v_sfx, v_with_q
+    from pg_constraint k where k.oid = p_con;
+  if right(v_def, length(v_sfx)) is distinct from v_sfx then
+    raise exception 'pg_partition_magician: cannot carry the constraint % of %: its definition (%) does not end with its deferral clause (%), so its storage parameters cannot be placed ahead of it',
+      (select quote_ident(conname) from pg_constraint where oid = p_con),
+      (select conrelid::regclass from pg_constraint where oid = p_con), v_def, v_sfx;
+  end if;
+  return left(v_def, length(v_def) - length(v_sfx)) || coalesce(' WITH (' || v_with_q || ')', '') || v_sfx;
+end $$;
+
 -- The bare unique index transmute refuses to take as the key (#792): a live, non-partial, non-expression
 -- unique index, not the primary key and backing no constraint, whose key columns include the control
 -- column, on a table with no primary key and no unique constraint transmute would reuse instead (the
@@ -11209,14 +11239,13 @@ declare
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_poldefs text[] := '{}'; v_poldef text;   -- #897: the policies, captured as statements naming the table
   v_pub record;   -- #566: publication membership, carried (_transmute_refuse_publications refuses)
-  v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
+  v_key_def text;                 -- #731, #766: the reused key's whole definition (_transmute_key_ddl), carried onto the parent
   v_key_name name; v_key_idx oid; -- #789: the reused key's constraint name, which the parent takes, and its index
   v_replident "char"; v_ri_idx name;   -- #782: the table's replica identity, and the parent index it maps to
   v_grantors_q text;   -- #903: the grantors of the table's grants this session cannot replay them as
   v_sq record;                    -- #573: sequences the table owns through a column
-  -- #828: a carried secondary UNIQUE constraint: its name (the parent takes it), its index, its definition,
-  -- the deferral suffix that definition ends with, and its index's storage parameters
-  v_ucon_name name; v_ucon_idx oid; v_ucon_def text; v_ucon_sfx text; v_ucon_with_q text;
+  -- #828: a carried secondary UNIQUE constraint: its name (the parent takes it), its index, its definition
+  v_ucon_name name; v_ucon_idx oid; v_ucon_def text;
   v_spc name;                     -- #829: the table's tablespace, which the parent takes (null: the database default)
 begin
   -- #896: every argument with no null meaning, refused here, before anything below reads or commits. Not
@@ -12626,12 +12655,15 @@ begin
   -- 8. parent key -- adopts the monolith's kept constraint index (metadata-only, no rebuild): a PRIMARY
   -- KEY when the reused key was the PK, a UNIQUE constraint when it was a unique constraint.
   --
-  -- With the key's deferrability (#731). A bare ADD PRIMARY KEY / ADD UNIQUE is immediate, and it still
-  -- adopted a DEFERRABLE monolith key, so the monolith kept its deferred check while every forward
-  -- partition got an immediate clone of the parent's: a key swap inside one statement, which the table
-  -- accepted before, failed with a duplicate key once its rows were past the monolith. The flags are
-  -- read off the monolith's own constraint here, under the cutover's lock (p_parent is the monolith's oid
-  -- by now), and the adopted index is the same one either way. The %s carries keywords only.
+  -- With the key's whole definition (#731, #766): _transmute_key_ddl's, read off the monolith's own
+  -- constraint here, under the cutover's lock (p_parent is the monolith's oid by now). Declared from its
+  -- column list, the key lost its deferrability (every forward partition's clone was immediate, so a key
+  -- swap inside one statement failed with a duplicate key past the monolith), its INCLUDE columns (the
+  -- parent's key matched no index of the monolith, and ADD PRIMARY KEY died with "multiple primary keys"
+  -- after phases 1 and 2 had committed, on every retry) and NULLS NOT DISTINCT (a second unique index was
+  -- built on the monolith under the lock, and every forward partition took a duplicate the table refused).
+  -- Declared on ONLY the parent, with the monolith's index attached under it, as 9b carries a unique
+  -- constraint: a definition the index does not match fails the ATTACH rather than building another.
   --
   -- Under the table's own constraint name (#789). Declared anonymously, the parent's key took an
   -- auto-name (t_pkey came back as t_pkey1, since the monolith's index still held t_pkey, and a named
@@ -12642,24 +12674,18 @@ begin
   -- pgpm_key_<its index oid>: whole at any key length, where <name>_pgpm cannot fit beside a 59 to 63
   -- byte name (from_hypertable hands such keys to this cutover), and recognisable by identity, which is
   -- how untransmute knows to hand the original name back. _transmute_carried_indexes refused it up front
-  -- if taken. Name, index and flags are read together, off the monolith's constraint, under the lock.
-  select c.conname, c.conindid,
-         case when c.condeferrable and c.condeferred then ' deferrable initially deferred'
-              when c.condeferrable then ' deferrable'
-              else '' end
-    into v_key_name, v_key_idx, v_key_defer
+  -- if taken. Name, index and definition are read together, off the monolith's constraint, under the lock.
+  select c.conname, c.conindid, pgpm._transmute_key_ddl(c.oid)
+    into v_key_name, v_key_idx, v_key_def
     from pg_constraint c
    where c.conrelid = p_parent
      and ((v_add_pk and c.contype = 'p') or (v_add_uniq and c.contype = 'u' and c.conindid = v_reuse_idx));
   if v_add_pk or v_add_uniq then
     execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_name, 'pgpm_key_' || v_key_idx);
-  end if;
-  if v_add_pk then
-    execute format('alter table %s add constraint %I primary key (%s)%s', v_parent::text, v_key_name,
-                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
-  elsif v_add_uniq then
-    execute format('alter table %s add constraint %I unique (%s)%s', v_parent::text, v_key_name,
-                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
+    execute format('alter table only %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);
+    execute format('alter index %s attach partition %s',
+                   (select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.conname = v_key_name),
+                   v_key_idx::regclass::text);
   end if;
 
   -- 8b. advance each identity sequence to the original sequence's own next value (no re-issue of ids it
@@ -12683,30 +12709,17 @@ begin
       -- immediate on the parent and on every forward partition, so a one-statement swap the table accepted
       -- before failed with a duplicate key past the monolith. The monolith's copy makes way under
       -- pgpm_key_<its index oid> (refused up front if taken; untransmute hands the name back), the parent
-      -- takes the name with the original definition (columns, NULLS NOT DISTINCT, INCLUDE, DEFERRABLE,
-      -- INITIALLY DEFERRED: pg_get_constraintdef's), on ONLY the parent, and the monolith's own index is
-      -- attached under it by name, so the adoption is exact and nothing is rebuilt. pg_get_constraintdef
-      -- leaves out the index's storage parameters, so they are spliced back in ahead of the deferral clause
-      -- it ends with, which comes from the same two flags. Read under the cutover's lock.
-      select k.conname, k.conindid, pg_get_constraintdef(k.oid),
-             case when k.condeferrable and k.condeferred then ' DEFERRABLE INITIALLY DEFERRED'
-                  when k.condeferrable then ' DEFERRABLE'
-                  else '' end,
-             (select string_agg(quote_ident(o.option_name) || '=' || quote_literal(o.option_value), ', ')
-                from pg_class ic, pg_options_to_table(ic.reloptions) o where ic.oid = k.conindid)
-        into v_ucon_name, v_ucon_idx, v_ucon_def, v_ucon_sfx, v_ucon_with_q
+      -- takes the name with the original definition (_transmute_key_ddl's, as step 8's key), on ONLY the
+      -- parent, and the monolith's own index is attached under it by name, so the adoption is exact and
+      -- nothing is rebuilt. Read under the cutover's lock.
+      select k.conname, k.conindid, pgpm._transmute_key_ddl(k.oid)
+        into v_ucon_name, v_ucon_idx, v_ucon_def
         from pg_constraint k
        where k.conrelid = v_monreg and k.contype = 'u'
          and k.conindid = to_regclass(format('%I.%I', v_nsp, v_old))::oid;
       if found then
-        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then
-          raise exception 'pg_partition_magician: cannot carry the unique constraint % of %: its definition (%) does not end with its deferral clause (%), so its storage parameters cannot be placed ahead of it',
-            quote_ident(v_ucon_name), p_parent, v_ucon_def, v_ucon_sfx;
-        end if;
         execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_ucon_name, 'pgpm_key_' || v_ucon_idx);
-        execute format('alter table only %s add constraint %I %s%s%s', v_parent::text, v_ucon_name,
-                       left(v_ucon_def, length(v_ucon_def) - length(v_ucon_sfx)),
-                       coalesce(' WITH (' || v_ucon_with_q || ')', ''), v_ucon_sfx);
+        execute format('alter table only %s add constraint %I %s', v_parent::text, v_ucon_name, v_ucon_def);
         execute format('alter index %I.%I attach partition %I.%I', v_nsp, v_ucon_name, v_nsp, 'pgpm_key_' || v_ucon_idx);
         continue;
       end if;
