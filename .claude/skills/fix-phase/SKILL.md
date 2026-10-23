@@ -22,7 +22,7 @@ Parallel fixers collide on three things unless you hand them out:
 - **Test file numbers.** `ls tests/ | grep -oE '^[0-9]+' | sort -n | tail -1` gives the highest; assign
   the next N, one per issue (two for an issue that needs a core and an archive file; archive tests
   number separately under `tests/archive/db/`). Write them down before spawning.
-- **Guard database names.** `grep -oE 'pgpm_perf[0-9]+' test.sh | sort -t f -k3 -n | tail -1` gives the
+- **Guard database names.** `grep -oE 'pgpm_perf[0-9]+' test.sh | sort -t f -k2,2n | tail -1` gives the
   highest `pgpm_perfNN`; assign one per GUARD the fixer will write, not one per issue (#601 needed five
   for four issues and fell back to a scratch name), and say in the brief which is for which.
 - **Scratch.** `$WORK/fix/<issue>/` per fixer; nothing shared.

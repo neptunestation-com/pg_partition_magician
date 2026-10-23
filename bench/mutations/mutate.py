@@ -15326,6 +15326,17 @@ MUTATIONS["scratch_owner_follow_unverified"] = (
     [("      perform pgpm._effect_or_raise((select c.relowner from pg_class c where c.oid = r.oid) = v_want, r.oid,\n                                    format('%s, handing a scratch relation to %I,', p_what, v_want_n));\n", "", 1)],
 )
 
+# pass 13 G16 (#1372, #1373, #1389, #1383, #1384, #1385): the review loop's tooling and the bench meta-guards.
+MUTATIONS["fix_phase_guard_db_sorts_empty_key"] = (
+    "bench/fix_phase_assign_commands.sh",
+    "Pre-#1372 fix-phase skill: the command for the highest guard database sorts on field 3 of names split on `f`, "
+    "and `pgpm_perfNNN` has one `f`, so every key is empty and sort compares whole lines lexically: it prints "
+    "pgpm_perf99 where the highest is in the four hundreds, and the coordinator assigns databases test.sh uses. "
+    "One clause, the key.",
+    [("sort -t f -k2,2n | tail -1", "sort -t f -k3 -n | tail -1", 1)],
+)
+MUTATION_SRC["fix_phase_guard_db_sorts_empty_key"] = ".claude/skills/fix-phase/SKILL.md"
+
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
         for name, e in late_survivors().items():
