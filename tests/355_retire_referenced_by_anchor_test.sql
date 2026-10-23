@@ -18,13 +18,30 @@
 --   PART B  the sibling, the one-detach-in-flight check: a mark whose partition was dropped by hand while a
 --           namesake in another schema is attached to its parent does not hold off another parent's referenced
 --           retirement, which marks its own partition and dispatches its detach.
+--   PART C  the upgrade's half: a mark an older retire() recorded on the namesake (retiring_oid and the dispatch
+--           record its oid, the job armed with its detach, every retire() refused fail_retain_identity) is cleared
+--           by the re-run install.sql (retain_disown naming that oid), the job disarmed, and the cell's retirement
+--           starts over on the anchored partition, never refused again; the namesake stays attached with its row.
+--   PART D  the #421 backfill of an unanchored row (an install older than child_oid), the namesake listed first:
+--           the row is anchored to the partition in the parent's schema, and retire()'s one-step DROP takes that
+--           partition, the namesake standing with its row.
+--   PART E  _child_nsp for an unanchored row, the namesake listed first: the parent's schema, and retire()'s
+--           one-step DROP takes the partition there, never the namesake.
 --
 -- ASYMMETRIC FIXTURES. A's cell [100, 200) holds ids 101 and 102, the operator's table one row (5005); B's dropped
--- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303).
+-- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303). C's cell
+-- holds 121 and 122, its namesake 8008; D's cell 131 and 132, its namesake 9009; E's cell 141 and 142, its namesake
+-- 9505.
+--
+-- install.sql is re-run with \ir, relative to this file; the psql variable `install` overrides the path.
+\if :{?install}
+\else
+\set install ../pgpm_core/install.sql
+\endif
 -- retire() is a function, not a committing procedure; no throws_* here.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(21);
+select plan(42);
 
 -- pg_cron's job table, stood in for (as tests/171 and tests/194 do): the dispatch has to be real for the armed
 -- command to be read and run
@@ -150,5 +167,136 @@ select is((select string_agg(action, ',' order by id) from pgpm.log where parent
   'retain_detach', 'logged once, retain_detach');
 select is((select string_agg(id::text, ',' order by id) from public.rb355 where id >= 7000), '7007',
   'B1''s namesake keeps its row and its place');
+
+-- fixture: no mark of this part outlives it, and the job idles
+update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+ where parent_table in ('public.rb355'::regclass, 'public.rc355'::regclass);
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
+
+-- ============================ PART C: an older retire()'s mark on the namesake, at the upgrade ============================
+create table public.rcc355 (id bigint primary key, payload text);
+insert into public.rcc355 values (121, 'a'), (122, 'b');
+call pgpm.transmute('public.rcc355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
+insert into public.rcc355 values (600, 'frontier');
+create table public.rcc355_ref (id bigint primary key, f_id bigint references public.rcc355 (id));
+insert into public.rcc355_ref values (1, 600);
+select child_name as cc_cell, child_oid as cc_cell_oid from pgpm.part
+ where parent_table = 'public.rcc355'::regclass and lo = '100' \gset
+create schema rcc355_ops;
+create table rcc355_ops.:"cc_cell" (id bigint primary key, payload text);
+insert into rcc355_ops.:"cc_cell" values (8008, 'operator');
+alter table public.rcc355 attach partition rcc355_ops.:"cc_cell" for values from (8000) to (8100);
+select to_regclass(format('rcc355_ops.%I', :'cc_cell'))::oid as cc_ops_oid \gset
+select is(pgpm.retire('public.rcc355', :'cc_cell'), false, 'LIVENESS: C''s retirement is under way');
+-- fixture: the mark as a retire() older than this fix wrote it, the namesake recorded and its detach armed
+update pgpm.part set retiring_oid = :cc_ops_oid, detach_dispatched_oid = :cc_ops_oid
+ where parent_table = 'public.rcc355'::regclass and child_name = :'cc_cell';
+update cron.job set command = pgpm._detach_cmd('public.rcc355', 'rcc355_ops', :'cc_cell') where jobname = 'pgpm_detach';
+select is(pgpm.retire('public.rcc355', :'cc_cell'), false, 'LIVENESS: C''s cell is refused before the upgrade');
+select ok(exists (select 1 from pgpm.log where parent_table = 'public.rcc355'::regclass and lo = '100'
+                   and action = 'fail_retain_identity')
+          and (select command from cron.job where jobname = 'pgpm_detach')
+              = pgpm._detach_cmd('public.rcc355', 'rcc355_ops', :'cc_cell'),
+  'LIVENESS: refused as fail_retain_identity, the job still armed with the namesake''s detach');
+
+-- ============================ PART D: the #421 backfill, the namesake listed first ============================
+create table public.rd355_dummy (id int) partition by range (id);
+create table public.rd355_d1 partition of public.rd355_dummy for values from (0) to (10);
+create table public.rd355_d2 partition of public.rd355_dummy for values from (10) to (20);
+create table public.rd355 (id bigint primary key, payload text);
+insert into public.rd355 values (131, 'a'), (132, 'b');
+call pgpm.transmute('public.rd355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
+insert into public.rd355 values (600, 'frontier');
+select child_name as d_cell, child_oid as d_cell_oid from pgpm.part
+ where parent_table = 'public.rd355'::regclass and lo = '100' \gset
+drop table public.rd355_dummy;
+vacuum pg_inherits;
+create schema rd355_ops;
+create table rd355_ops.:"d_cell" (id bigint primary key, payload text);
+insert into rd355_ops.:"d_cell" values (9009, 'operator');
+alter table public.rd355 attach partition rd355_ops.:"d_cell" for values from (9000) to (9100);
+select to_regclass(format('rd355_ops.%I', :'d_cell'))::oid as d_ops_oid \gset
+-- fixture: the row as an install older than child_oid left it
+update pgpm.part set child_oid = null where parent_table = 'public.rd355'::regclass and child_name = :'d_cell';
+select ok((select i.inhrelid from pg_inherits i join pg_class c on c.oid = i.inhrelid
+            where i.inhparent = 'public.rd355'::regclass and c.relname = :'d_cell' limit 1) = :d_ops_oid
+          and exists (select 1 from pg_inherits where inhparent = 'public.rd355'::regclass and inhrelid = :d_cell_oid),
+  'LIVENESS: D''s two relations named the cell are partitions of the parent, the operator''s listed first by name');
+
+-- the upgrade, over C's and D's states
+select coalesce(max(id), 0) as log_mark from pgpm.log \gset
+\ir :install
+set client_min_messages = warning;
+
+select ok((select retiring_at is null and retiring_oid is null and detach_dispatched_oid is null from pgpm.part
+            where parent_table = 'public.rcc355'::regclass and child_name = :'cc_cell'),
+  'C: the upgrade clears the mark that names the namesake');
+select ok((select count(*) = 1 and bool_and(strpos(method, format('recorded oid %s', :cc_ops_oid)) > 0) from pgpm.log
+            where parent_table = 'public.rcc355'::regclass and lo = '100' and action = 'retain_disown' and id > :log_mark),
+  'C: logged once, retain_disown, naming the namesake''s oid');
+select is((select command from cron.job where jobname = 'pgpm_detach'), 'select 1',
+  'C: the job no longer holds the namesake''s detach');
+select is(pgpm.retire('public.rcc355', :'cc_cell'), false, 'C: retire() starts the retirement over');
+select is((select retiring_oid from pgpm.part where parent_table = 'public.rcc355'::regclass and child_name = :'cc_cell'),
+  :'cc_cell_oid'::oid, 'C: on the anchored partition');
+select is((select command from cron.job where jobname = 'pgpm_detach'),
+  format('alter table public.rcc355 detach partition public.%I concurrently', :'cc_cell'),
+  'C: and arms the job with its detach');
+select is(pgpm.retire('public.rcc355', :'cc_cell'), false, 'C: a second call');
+select is((select string_agg(action, ',' order by id) from pgpm.log
+            where parent_table = 'public.rcc355'::regclass and lo = '100' and id > :log_mark
+              and action in ('retain_detach', 'fail_retain_detach', 'fail_retain_identity', 'retain_disown')),
+  'retain_disown,retain_detach,retain_detach', 'C: after the upgrade, never refused on identity');
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rcc355'::regclass and inhrelid = :cc_ops_oid
+                   and not inhdetachpending)
+          and (select string_agg(id::text, ',' order by id) from public.rcc355 where id >= 8000) = '8008',
+  'C: the namesake is still a partition, serving its row');
+-- fixture: C's mark does not outlive it
+update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+ where parent_table = 'public.rcc355'::regclass;
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
+
+select is((select child_oid from pgpm.part where parent_table = 'public.rd355'::regclass and child_name = :'d_cell'),
+  :'d_cell_oid'::oid, 'D: the upgrade anchors the row to the partition in the parent''s schema');
+select is(pgpm.retire('public.rd355', :'d_cell'), true, 'D: retire() of the aged cell completes');
+select ok(not exists (select 1 from pg_class where oid = :d_cell_oid), 'D: the anchored partition is the one dropped');
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rd355'::regclass and inhrelid = :d_ops_oid)
+          and (select string_agg(id::text, ',' order by id) from public.rd355 where id < 600 or id >= 9000) = '9009',
+  'D: the namesake stands with its row, and the cell''s two rows are gone');
+
+-- ============================ PART E: _child_nsp for an unanchored row ============================
+-- The operator's schema is created before the parent's, so the namesake comes first both in pg_inherits (the freed
+-- heap slots) and in pg_class's (relname, relnamespace) index, whichever way a plan reaches it.
+create schema re355_ops;
+create schema re355_own;
+create table re355_own.re355_dummy (id int) partition by range (id);
+create table re355_own.re355_d1 partition of re355_own.re355_dummy for values from (0) to (10);
+create table re355_own.re355_d2 partition of re355_own.re355_dummy for values from (10) to (20);
+create table re355_own.re355 (id bigint primary key, payload text);
+insert into re355_own.re355 values (141, 'a'), (142, 'b');
+call pgpm.transmute('re355_own.re355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
+insert into re355_own.re355 values (600, 'frontier');
+select child_name as e_cell, child_oid as e_cell_oid from pgpm.part
+ where parent_table = 're355_own.re355'::regclass and lo = '100' \gset
+drop table re355_own.re355_dummy;
+vacuum pg_inherits;
+create table re355_ops.:"e_cell" (id bigint primary key, payload text);
+insert into re355_ops.:"e_cell" values (9505, 'operator');
+alter table re355_own.re355 attach partition re355_ops.:"e_cell" for values from (9500) to (9600);
+select to_regclass(format('re355_ops.%I', :'e_cell'))::oid as e_ops_oid \gset
+-- fixture: an unanchored row, as the backfill leaves one it could not resolve
+update pgpm.part set child_oid = null where parent_table = 're355_own.re355'::regclass and child_name = :'e_cell';
+select ok((select n.nspname from pg_inherits i join pg_class c on c.oid = i.inhrelid
+             join pg_namespace n on n.oid = c.relnamespace
+            where i.inhparent = 're355_own.re355'::regclass and c.relname = :'e_cell' limit 1) = 're355_ops'
+          and exists (select 1 from pg_inherits where inhparent = 're355_own.re355'::regclass and inhrelid = :e_cell_oid),
+  'LIVENESS: E''s two relations named the cell are partitions of the parent, the operator''s schema first by name');
+select is(pgpm._child_nsp('re355_own.re355', :'e_cell'), 're355_own'::name,
+  'E: the unanchored row resolves in the parent''s schema');
+select is(pgpm.retire('re355_own.re355', :'e_cell'), true, 'E: retire() of the aged cell completes');
+select ok(not exists (select 1 from pg_class where oid = :e_cell_oid)
+          and exists (select 1 from pg_inherits where inhparent = 're355_own.re355'::regclass and inhrelid = :e_ops_oid)
+          and (select string_agg(id::text, ',' order by id) from re355_own.re355 where id < 600 or id >= 9500) = '9505',
+  'E: the partition in the parent''s schema is the one dropped; the namesake stands with its row');
 
 select * from finish();

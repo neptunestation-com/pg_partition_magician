@@ -10,15 +10,22 @@
 # referenced retirement off. The file is the acceptance test; this wrapper exists so the mutations have a guard
 # the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# TWO mutations are required to fail against it (bench/mutations/mutate.py):
-#   retire_referenced_by_relname -- the referenced path resolves its partition by relname again, the pre-fix
-#                                   shape: the namesake is recorded and detached (part A).
-#   retire_yield_by_relname      -- the in-flight check reads another mark's partition by relname again: the
-#                                   namesake of a dropped partition holds the other parent's retirement off (part B).
+# FIVE mutations are required to fail against it (bench/mutations/mutate.py):
+#   retire_referenced_by_relname  -- the referenced path resolves its partition by relname again, the pre-fix
+#                                    shape: the namesake is recorded and detached (part A).
+#   retire_yield_by_relname       -- the in-flight check reads another mark's partition by relname again: the
+#                                    namesake of a dropped partition holds the other parent's retirement off (part B).
+#   disown_namesake_mark_kept     -- the install pass leaves an older retire()'s mark on the namesake in place, so
+#                                    the cell is still refused on identity after the upgrade (part C).
+#   child_oid_backfill_by_relname -- the #421 backfill adopts the first namesake in any schema, and retire() drops
+#                                    the operator's table as the cell's (part D).
+#   child_nsp_fallback_by_relname -- _child_nsp's fallback takes the first namesake's schema for an unanchored row,
+#                                    and retire() drops the operator's table (part E).
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
-# catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree
-# mounted somewhere other than /repo.
+# catalog). The file re-runs install.sql through the psql variable `install`, set here to the copy under test.
+# TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted somewhere
+# other than /repo.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
 TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/355_retire_referenced_by_anchor_test.sql}"
@@ -37,7 +44,7 @@ if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/n
 fi
 
 if [ "$fail" = 0 ]; then
-  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
+  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB --set install=$INSTALL $TEST_FILE" 2>&1)
   rc=$?
   echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
   # the count is asserted separately: a run that never reached the database must not read as a catch
