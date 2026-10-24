@@ -69,7 +69,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-INVERTED="bench/hypertable_catchup_identity.sh bench/archive_fn_s3_readback.sh bench/tests_fail_on_defect.sh"
+INVERTED="bench/hypertable_catchup_identity.sh bench/archive_fn_s3_readback.sh bench/tests_fail_on_defect.sh
+          bench/tests_identity_not_count.sh"
 TIMESCALE=""
 for f in "$ROOT"/bench/*.sh; do
   grep -q '^ *# >>> pgTAP verdict' "$f" && TIMESCALE+="bench/$(basename "$f") "

@@ -62,9 +62,13 @@ delete from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass;
 update pgpm.config set archive_batch = null where parent_table = 'public.ab93'::regclass;
 call pgpm.maintain('public.ab93');
 
+-- which partitions, each once (#1374): three ledger rows are also three chunks of one partition
 select is(
-  (select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
-  3, 'archive_batch = null restores fan-out across every eligible partition in one tick');
+  (select array_agg(l.child_name order by l.lo::numeric) from pgpm.archive_ledger l
+    where l.parent_table = 'public.ab93'::regclass),
+  (select array_agg(p.child_name order by p.lo::numeric) from pgpm.part p
+    where p.parent_table = 'public.ab93'::regclass and p.lo::numeric in (0, 6000, 7000)),
+  'archive_batch = null restores fan-out across every eligible partition in one tick');
 
 delete from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass;
 

@@ -124,7 +124,10 @@ select pgpm.set_regrain('public.fz_id', null);
 -- ================================ (E) the argument ================================
 select is((select count(*)::int from pgpm.progress('public.fz_id')), 1,
   'progress(p_parent) returns exactly that table''s row');
-select is((select count(*)::int from pgpm.progress()), (select count(*)::int from pgpm.config),
+-- by identity (#1374): the parents progress() names, each once, are the parents config holds; a count
+-- would accept a progress() that lists one table twice and another not at all
+select is((select array_agg(parent::oid order by parent::oid) from pgpm.progress()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
   'progress() with no argument returns one row per managed table');
 create table public.fz_unmanaged (id int);
 select throws_like($$ select * from pgpm.progress('public.fz_unmanaged') $$, '%is not managed%',
@@ -144,7 +147,8 @@ select is(
      and not exists (select 1 from pg_class c where c.oid = :gone_oid)),
   1, 'LIVENESS: the dropped parent''s config row is still there, pointing at an oid with no relation');
 
-select is((select count(*)::int from pgpm.progress()), (select count(*)::int from pgpm.config),
+select is((select array_agg(parent::oid order by parent::oid) from pgpm.progress()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
   'progress() still returns a row for EVERY managed table with a dead parent among them');
 select is((select parent_missing from pgpm.progress() where parent::oid = :gone_oid), true,
   'the dead parent is flagged parent_missing');

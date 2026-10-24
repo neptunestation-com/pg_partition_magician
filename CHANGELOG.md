@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- **Core tests name the rows, parents and constraint they say survive** (#1374). Twenty-three assertions in
+  `tests/51`, `52`, `67`, `69`, `70`, `74`, `79`, `80`, `88`, `91`, `93`, `105`, `108`, `115`, `121` and `295`
+  asserted conservation by a count: `count(*) = N`, a count compared with a snapshot's, `status()` and
+  `progress()` compared with config by row count, the archive's fan-out by ledger rows. A lost row beside a stray
+  one, a report listing one table twice and another not at all, or three chunks of two partitions satisfies
+  each, and `tests/51` counted one UNIQUE where the claim is `uq_rt_key UNIQUE (ts, id)`. Each now names what it
+  claims: the rows lost and the rows never written (both none), every row as the snapshot took it, the parents
+  `status()` or `progress()` reports against config's, each once, the partitions the ledger credits, or the
+  constraint by name and key. The fixtures of `tests/51`, `67`, `69`, `70`, `74`, `79`, `80`, `115` and `121`,
+  whose rows all carried one payload, now give each row its own, and `tests/52`'s random values are now a
+  function of the row. `bench/tests_identity_not_count.sh` plants each site's wrong state right before its
+  assertion and requires the file to fail against it (23 mutations, one per site, from
+  `t51_unique_constraint_by_count` to `t295_history_rows_by_count` and `t93_fan_out_by_ledger_rows`). Now that a
+  wrapper runs them, `tests/108` and `121` spell their premises at the head (`LIVENESS: (a)`, `fixture:`), where
+  `bench/discriminate.sh`'s `starved()` reads them. A test change only.
+
+- **`tests/338` names every row the restored tables keep** (#1375). '(A) the restored table keeps its rows, 1 to
+  120' and its (B) and (D) siblings looked at ids 1, N and N + 1 only, so a table that lost its middle rows
+  passed; `tests/261` and `319` ('every row reads as inserted after the swap') and `tests/108` ('the rest
+  remain') looked at a handful of ids the same way. Each now compares every row by id and payload.
+  `bench/tests_identity_not_count.sh` judges each with a row between the sampled ids lost (mutations
+  `t338_restored_rows_endpoints_a`, `_b`, `t338_uninstalled_rows_endpoints_d`, `t261_rows_after_swap_sampled_a`,
+  `_b`, `t319_rows_after_swap_sampled` and `t108_rows_after_regrain_sampled`). A test change only.
+
 - **`bench/throws_pinned.sh` probes every `throws_*`, whatever its statement** (#1235). The guard probed only a
   statement that called a pgpm procedure by a name it could read, so an unpinned `throws_ok(..., NULL, desc)`
   around a test's own helper that calls `pgpm.transmute` (the `pg_temp.mk` and `mk_archive_table` shape), around

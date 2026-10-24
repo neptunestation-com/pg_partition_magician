@@ -11,7 +11,8 @@ insert into public.tt_search (id, body) values
   (pgpm._ts_to_text_time(now() - interval '13 months', 'c', 8, 36, 'ms'), 'oldest'),
   (pgpm._ts_to_text_time(now() - interval '11 months', 'c', 8, 36, 'ms'), 'newest');
 
-create temporary table _before_tt as select count(*) as n from public.tt_search;
+-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_tt as select * from public.tt_search;
 
 -- LIVENESS WITNESS: the drought is really present. The frontier and forward-partition checks below are
 -- of the form "obtain still reaches past now()", which would also pass against a fixture that was never
@@ -50,8 +51,9 @@ select is(
 );
 
 select is(
-  (select count(*) from public.tt_search)::bigint,
-  (select n from _before_tt)::bigint, 'row count conserved across the text_time migration'
+  (select array_agg(r::text order by r::text collate "C") from public.tt_search r),
+  (select array_agg(b::text order by b::text collate "C") from _before_tt b),
+  'row count conserved across the text_time migration, and every row as it was'
 );
 
 select pgpm.resume('public.tt_search');

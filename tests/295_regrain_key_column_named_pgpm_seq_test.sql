@@ -137,9 +137,16 @@ select ok(:'upd_x0' <> '' and pgpm_test295.fine_xmin('public.ps295', 20, 2) is d
   'LIVENESS: the reconcile rewrote (20, 2) in the fine child: its row there is no longer the one the copy wrote');
 select is(pgpm_test295.fine_xmin('public.ps295', 20, 1000), coalesce(nullif(:'twin_x0', ''), 'the copy wrote no twin'),
   'and it left the twin (20, 1000) in the fine child as the copy wrote it: the reconcile keys on the whole key, never on id alone');
+-- by the whole key (#1374): the key is (id, pgpm_seq), so ids repeat, and a count of 241 accepts a lost row
+-- beside a stray twin
 select is(
-  (select count(*)::int from public.ps295 where id >= 100 and id < 3000), 241,
-  'and the rest of the history is intact (ids 100 to 2500)');
+  (select array_agg(coalesce('lost ' || e.id || ':' || e.pgpm_seq, 'stray ' || t.id || ':' || t.pgpm_seq)
+                    order by coalesce(e.id, t.id), coalesce(e.pgpm_seq, t.pgpm_seq))
+     from (select * from public.ps295 where id >= 100 and id < 3000) t
+     full join (select g * 10::bigint as id, g::bigint as pgpm_seq, 'x' as payload from generate_series(10, 250) g) e
+       on e.id = t.id and e.pgpm_seq = t.pgpm_seq and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'and the rest of the history is intact (ids 100 to 2500)');
 
 -- ======================= B. key (id, pgpm_seq, pgpm_seq_1) =======================
 create table public.pq295 (id bigint, pgpm_seq bigint, pgpm_seq_1 bigint, payload text,
