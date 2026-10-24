@@ -345,32 +345,36 @@ def test_range_keyless_archived(conn):
     # A genuinely keyless parent is archived, not refused (#597): every column is read from one
     # snapshot numbered once, so rows tied on the control column keep their own values in every
     # column. The tie is in the fixture on purpose; its order in the file is whichever the snapshot
-    # gave it, so both sides are compared in (ts, val) order.
+    # gave it, so both sides are compared in (ts, tag) order. The tied rows differ in TWO columns
+    # besides the control, tag and n, each in its own order: with one, a writer that read each column
+    # in its own order (the #462 misalignment) wrote the same rows a correct one does, and this passed
+    # (#1388; tests/archive/db/21 builds its tie the same way).
     run(conn, "drop table if exists t_range_keyless")
     run(
         conn,
         """
         create table t_range_keyless (
           ts  timestamptz not null,
-          val text not null
+          tag text not null,
+          n   int4 not null
         ) partition by range (ts)
         """,
     )
     run(conn, "create table t_range_keyless_p1 partition of t_range_keyless "
               "for values from ('2026-01-01') to ('2026-02-01')")
-    run(conn, "insert into t_range_keyless (ts, val) values "
-              "('2026-01-10', 'b'), ('2026-01-10', 'a'), ('2026-01-20', 'c')")
+    run(conn, "insert into t_range_keyless (ts, tag, n) values "
+              "('2026-01-10', 'b', 1), ('2026-01-10', 'a', 2), ('2026-01-20', 'c', 3)")
     conn.commit()
     raw = to_parquet_range_bytes(conn, "t_range_keyless", "ts", "2026-01-01", "2026-02-01")
     arrow_rows, duck_rows = read_with_both_readers(raw)
 
-    def by_ts_val(rows):
-        return sorted(rows, key=lambda r: (_norm(r["ts"]), r["val"]))
+    def by_ts_tag(rows):
+        return sorted(rows, key=lambda r: (_norm(r["ts"]), r["tag"]))
 
     expected = expected_rows(conn, "t_range_keyless", "ts", "2026-01-01", "2026-02-01",
-                              ["ts", "val"], ["ts", "val"])
-    check("genuinely keyless table archived, tied rows intact", expected,
-          by_ts_val(arrow_rows), by_ts_val(duck_rows))
+                              ["ts", "tag"], ["ts", "tag", "n"])
+    check("genuinely keyless table archived, tied rows intact in both other columns", expected,
+          by_ts_tag(arrow_rows), by_ts_tag(duck_rows))
 
 
 def test_range_pruning_skips_untouched_partition(conn):

@@ -15118,6 +15118,97 @@ MUTATIONS["archive_extres_parquet_by_prefix"] = (
       "                    order by lo::numeric)\n", 1)],
 )
 MUTATION_SRC["archive_extres_parquet_by_prefix"] = "tests/archive/db/44_archive_extension_resolution_test.sql"
+# pass 13 G13 (#1376): four more archive test files that judged a Parquet object by less than identity, each back
+# to the shape that passed. Judged by bench/archive_fn_s3_readback.sh, each file against DROP LAST (the strategy
+# PUTs every row of the chunk but the last, while recording them all).
+MUTATIONS["archive_schema_zone_parquet_by_size"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/26 Part B: the t26a Parquet object is judged by being larger than the 3-row t26b "
+    "file, so an object holding 10 (or 19) of t26a's 20 rows at t26a's key passes. One site, the Part B "
+    "assertion, back to its size comparison.",
+    [("""select is((select string_agg(f.tbl || ':' || coalesce((t26.object(f.tbl::regclass, :'p' || f.tbl || '_0.parquet') = f.file)::text, 'no object'),
+                             ', ' order by f.tbl) from t26_pq_file f),
+          't26a.pq:true, t26b.pq:true',
+  'each object is byte for byte the Parquet file of its own chunk: t26a''s 20 rows, not the 3-row file that used to share its key');
+""", """select ok(t26.bytes('t26a.pq', :'p' || 't26a.pq_0.parquet') > t26.bytes('t26b.pq', :'p' || 't26b.pq_0.parquet'),
+  'the t26a object is the larger, 20-row file, not the 3-row file that used to share its key');
+""", 1)],
+)
+MUTATION_SRC["archive_schema_zone_parquet_by_size"] = "tests/archive/db/26_archive_key_schema_zone_test.sql"
+MUTATIONS["archive_recorded_chunk_rerun_by_length"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/42: the CONTROL after the documented Parquet re-run asks only octet_length > 0, "
+    "and the F5-03 check compares with that capture, so a re-run that left 35 (or 69) of the chunk's 70 rows "
+    "at its key passes. One site, the CONTROL's predicate.",
+    [("""select ok((select b from t42_pq_rerun) = archive._pq_to_parquet_range('t42.pq', 'id', '0', '100',
+                                            (select compress from archive.config where parent_table = 't42.pq'::regclass)),
+""", """select ok((select octet_length(b) > 0 from t42_pq_rerun),
+""", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_rerun_by_length"] = "tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql"
+MUTATIONS["archive_recorded_rows_rerun_by_length"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/48: the CONTROL after the Parquet re-runs asks only octet_length > 0, and the "
+    "later identity checks compare with that capture, so a re-run that left 35 (or 69) of the chunk's 70 rows "
+    "at its key, the only copy after retire(), passes. One site, the CONTROL's predicate.",
+    [("""select ok((select b from t48_pq_rerun) = archive._pq_to_parquet_range('t48.pq', 'id', '0', '100',
+                                            (select compress from archive.config where parent_table = 't48.pq'::regclass)),
+""", """select ok((select octet_length(b) > 0 from t48_pq_rerun),
+""", 1)],
+)
+MUTATION_SRC["archive_recorded_rows_rerun_by_length"] = "tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql"
+MUTATIONS["archive_direct_bounds_parquet_by_status"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/54 Part B: the Parquet object at the 2 January key is judged by its GET status "
+    "alone, so an object holding id 1 without id 2 passes. One site, Part B's object assertion.",
+    [("""select ok(t54.object('t54.pq', :'p' || 't54.pq_2024010200000000.parquet')
+          = archive._pq_to_parquet_range('t54.pq', 'ts', '2024-01-02 00:00:00+00', '2024-01-03 00:00:00+00',
+                                         (select compress from archive.config where parent_table = 't54.pq'::regclass)),
+""", """select ok(t54.status('t54.pq', 'GET', :'p' || 't54.pq_2024010200000000.parquet') = 200,
+""", 1)],
+)
+MUTATION_SRC["archive_direct_bounds_parquet_by_status"] = "tests/archive/db/54_archive_direct_call_bounds_session_test.sql"
+# pass 13 G13 (#1388): the independent-reader checks of the Parquet writer, each site back to the shape that passed
+# a wrong file. Judged by bench/verify_parquet_tests_see_rows.sh, which runs each test function against a writer
+# that adds a row (or misaligns a tie) with no database or reader behind it.
+MUTATIONS["verify_parquet_timestamptz_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_timestamptz: the rows are compared one by one over the expected "
+    "list and the counts never, so a file holding a spurious extra row passes. One site, the count check.",
+    [('    ok = same_count("timestamptz", expected, arrow_rows, duck_rows)\n', '    ok = True\n', 1)],
+)
+MUTATION_SRC["verify_parquet_timestamptz_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_uuid_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_uuid: as test_timestamptz, a file holding a spurious extra row "
+    "passes. One site, the count check.",
+    [('    ok = same_count("uuid", expected, arrow_rows, duck_rows)\n', '    ok = True\n', 1)],
+)
+MUTATION_SRC["verify_parquet_uuid_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_uuid_nullable_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_uuid_nullable: as test_timestamptz, a file holding a spurious "
+    "extra row passes. One site, the count check.",
+    [('    ok = same_count("uuid nullable", expected, arrow_rows, duck_rows)\n', '    ok = True\n', 1)],
+)
+MUTATION_SRC["verify_parquet_uuid_nullable_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_naive_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_timestamp_naive (the sibling of F8-05's three): its rows are "
+    "compared over the expected wall clocks only, so a file holding a spurious extra row passes. One site, the "
+    "count check.",
+    [('    if not same_count("timestamp naive", expected_ts, arrow_rows, duck_rows):\n        ok = False\n', '', 1)],
+)
+MUTATION_SRC["verify_parquet_naive_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_range_keyless_one_column"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet_range.py test_range_keyless_archived: the rows tied on ts differ in one "
+    "column alone, so a writer that reads each column in its own order (the #462 misalignment) writes the rows a "
+    "correct one does and passes. One site, the tied row's n made the same as its twin's.",
+    [("""              "('2026-01-10', 'b', 1), ('2026-01-10', 'a', 2), ('2026-01-20', 'c', 3)")\n""",
+      """              "('2026-01-10', 'b', 1), ('2026-01-10', 'a', 1), ('2026-01-20', 'c', 3)")\n""", 1)],
+)
+MUTATION_SRC["verify_parquet_range_keyless_one_column"] = "scripts/verify_parquet_range.py"
 # #1283 (pass 12 G25): five timescale files asked for leftover pgpm.scratch records by casting the table's name
 # to regclass after the cutover, when it names the migrated table, not the hypertable the records are keyed by.
 # Judged by bench/hypertable_tests_scratch_by_hypertable_oid.sh, each the check's pre-fix query under its

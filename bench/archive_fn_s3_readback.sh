@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Prove that the archive test files which read their objects back from MinIO (tests/archive/db/08, 16 and 44)
-# each FAIL against a transport that uploads the wrong bytes under the chunk's key, by putting that transport in
-# and running the file.
+# Prove that the archive test files which read their objects back from MinIO (tests/archive/db/08, 16, 26, 42,
+# 44, 48 and 54) each FAIL against a transport that uploads the wrong bytes under the chunk's key, by putting
+# that transport in and running the file.
 #
 # WHY THIS GUARD EXISTS (issues #1093 and #1284). Each file's header promises that the objects it wrote are read
 # back and checked, not the ledger's bookkeeping trusted, and each checked something weaker than identity:
@@ -18,6 +18,20 @@
 #                        the file of its ledger row's range.
 #   tests/archive/db/44  (#1284) checked its two Parquet tick objects by the PAR1 prefix, so the PAR1-only upload
 #                        above passed. Each is now compared byte for byte with the file of its ledger row's range.
+#   tests/archive/db/26  (#1376) Part B judged the t26a Parquet object by being larger than t26b's 3-row file, so
+#                        an object holding 10 of t26a's 20 rows passed. Each of the two objects is now compared
+#                        byte for byte with the file of its own chunk, taken before the tick retires the rows.
+#   tests/archive/db/42, (#1376) the CONTROL after the documented Parquet re-run asked only octet_length > 0, and
+#   tests/archive/db/48  the later "still holds its bytes" checks compare with that capture, so a re-run that
+#                        left 35 of the chunk's 70 rows at the key passed every line. The re-run's object is now
+#                        compared byte for byte with the file of the chunk's 70 rows, still in the table then.
+#   tests/archive/db/54  (#1376) Part B asked only that a Parquet object sits at the 2 January key, while the
+#                        header promises each object judged by its rows. It is now compared byte for byte with
+#                        the file of the 2 January rows.
+# What these files compare with is the module's own encoder (archive._pq_to_parquet_range), so they judge the
+# TRANSPORT: the object at the chunk's key is the file of that chunk. An encoder that dropped a row would agree
+# with itself byte for byte; that the encoder's file holds its rows is scripts/verify_parquet*.py's, read back
+# with pyarrow and DuckDB and compared row for row and by count (bench/verify_parquet_tests_see_rows.sh).
 #
 # HOW. Each run in a fresh <db> in <container> (the archive track's image: pgsql-http, pgcrypto and pgtap, with
 # MinIO reachable as minio:9000), holding tests/archive/fixtures.sql, the core and pgpm_archive:
@@ -29,7 +43,10 @@
 #               ID ONE    archive._encode_upload_ndjson_single writes "id":1 on every line in place of the row's
 #                         own id, line count, rows_archived and digest unchanged (tests/archive/db/08);
 #               TOP SLICE archive._encode_upload_parquet encodes only the top 5% of the chunk's [lo, hi), so the
-#                         object at the chunk's key holds 500 of [-10000, 0)'s 1000 rows (tests/archive/db/16).
+#                         object at the chunk's key holds 500 of [-10000, 0)'s 1000 rows (tests/archive/db/16);
+#               DROP LAST archive._encode_upload_parquet PUTs the file of [lo, the range's last control value),
+#                         every row but the last, while it records the whole read's rows and digest, so its
+#                         re-runs are admitted (tests/archive/db/26, 42, 48 and 54).
 #             A file whose only failures are LIVENESS:, GUARD: or fixture: premises did not catch the defect
 #             (#1176): that is bench/discriminate.sh's starved() rule, read out of that script by the
 #             defect-verdict block below. A file that reached no assertion failed on its fixture, so that line is
@@ -39,7 +56,9 @@
 #             PAR1 under PAR1; a8's monolith object names ids 1..5000 clean and one id under ID ONE; negkp's
 #             [-10000, 0) is ledgered as 1000 rows with the object at its key the chunk's file clean, and as 500
 #             rows with another object under TOP SLICE; p44's two objects are more than 4 bytes each clean and 4
-#             bytes each under PAR1, against 1200 and 5 rows ledgered either way.
+#             bytes each under PAR1, against 1200 and 5 rows ledgered either way; under DROP LAST each judged
+#             object (t26a.pq's, t42.pq's and t48.pq's [0, ...) chunk, t54.pq's 2 January one) is smaller than
+#             the clean run left at the same key, with the same row count ledgered.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py), each a file's pre-fix shape:
 #   archive_fn_parquet_readback_trusted -- tests/archive/db/08's Parquet read-back helper answers from the key
@@ -49,9 +68,13 @@
 #   archive_key_parquet_readback_by_presence -- tests/archive/db/16's Parquet read-back helper asks only that an
 #                                          object is there, not that it is the chunk's file
 #   archive_extres_parquet_by_prefix    -- tests/archive/db/44's tick objects back to the PAR1 prefix check
+#   archive_schema_zone_parquet_by_size -- tests/archive/db/26 Part B back to the size comparison (#1376)
+#   archive_recorded_chunk_rerun_by_length -- tests/archive/db/42's re-run CONTROL back to octet_length > 0 (#1376)
+#   archive_recorded_rows_rerun_by_length  -- tests/archive/db/48's re-run CONTROL back to octet_length > 0 (#1376)
+#   archive_direct_bounds_parquet_by_status -- tests/archive/db/54 Part B back to the GET status (#1376)
 #
 # Usage: archive_fn_s3_readback.sh <container> <db> [test file]
-# With no third argument it judges all three files. With one it judges THAT file in place of the one it stands
+# With no third argument it judges all seven files. With one it judges THAT file in place of the one it stands
 # for, recognised by its file name or, for a mutant bench/discriminate.sh built (<mutation>.sql), by the
 # mutation's MUTATION_SRC; a /repo/... path is mapped to this checkout. Every install and the file reach the
 # container over stdin, so a file outside the mounted tree works too. run_archive creates the bucket before any
@@ -72,8 +95,13 @@ trap cleanup EXIT
 T08="tests/archive/db/08_archive_fn_s3_test.sql"
 T16="tests/archive/db/16_archive_object_key_identity_test.sql"
 T44="tests/archive/db/44_archive_extension_resolution_test.sql"
+T26="tests/archive/db/26_archive_key_schema_zone_test.sql"
+T42="tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql"
+T48="tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql"
+T54="tests/archive/db/54_archive_direct_call_bounds_session_test.sql"
 F08="$ROOT/$T08"; F16="$ROOT/$T16"; F44="$ROOT/$T44"
-SEL=" 08 16 44 "
+F26="$ROOT/$T26"; F42="$ROOT/$T42"; F48="$ROOT/$T48"; F54="$ROOT/$T54"
+SEL=" 08 16 44 26 42 48 54 "
 if [ -n "$ONLY" ]; then
   ONLY="${ONLY/#\/repo\//$ROOT/}"
   if [ ! -f "$ONLY" ]; then say FAIL "GUARD: the test file to judge exists" "$ONLY"; exit 1; fi
@@ -89,6 +117,10 @@ PY
     "$(basename "$T08")":*|*:"$T08") SEL=" 08 "; F08="$ONLY" ;;
     "$(basename "$T16")":*|*:"$T16") SEL=" 16 "; F16="$ONLY" ;;
     "$(basename "$T44")":*|*:"$T44") SEL=" 44 "; F44="$ONLY" ;;
+    "$(basename "$T26")":*|*:"$T26") SEL=" 26 "; F26="$ONLY" ;;
+    "$(basename "$T42")":*|*:"$T42") SEL=" 42 "; F42="$ONLY" ;;
+    "$(basename "$T48")":*|*:"$T48") SEL=" 48 "; F48="$ONLY" ;;
+    "$(basename "$T54")":*|*:"$T54") SEL=" 54 "; F54="$ONLY" ;;
     *) say FAIL "GUARD: the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
   esac
 fi
@@ -158,6 +190,21 @@ if sel 16 && plant parquet_top_slice "$PQ_RANGE" \
   planted+="parquet_top_slice "
 elif sel 16; then
   say FAIL "fixture: planted the defect: the Parquet strategy encodes the top 5%" "pgpm_archive/install.sql moved; fix the pattern"; fail=1
+fi
+# DROP LAST: the Parquet strategy PUTs the file of [lo, the range's last control value), every row but the last,
+# after the refusal judged the whole read: the ledger and the key's claim record every row, so a re-run of the
+# chunk is still admitted, and only the object at the key says otherwise. v_etag is free until the PUT returns.
+DROP_LAST="  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_parquet', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows, v_rows_digest);
+  execute format('select max(%1\$I)::text from %2\$s where %1\$I >= %3\$L and %1\$I < %4\$L',
+                 pcfg.control_column, p_parent, v_lo_lit, v_hi_lit) into v_etag;
+  v_payload := archive._pq_to_parquet_range(p_parent, pcfg.control_column, v_lo_lit, v_etag, p_compress);
+  v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
+                                            'application/vnd.apache.parquet', v_payload, v_key_id, v_secret);
+"
+if { sel 26 || sel 42 || sel 48 || sel 54; } && plant parquet_drop_last "$PAR1_PUT" "$DROP_LAST"; then
+  planted+="parquet_drop_last "
+elif sel 26 || sel 42 || sel 48 || sel 54; then
+  say FAIL "fixture: planted the defect: the Parquet PUT drops the range's last row" "pgpm_archive/install.sql moved; fix the pattern"; fail=1
 fi
 is_planted() { [[ "$planted" == *" $1 "* ]]; }
 
@@ -295,6 +342,49 @@ if sel 44; then
   q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
   q -d postgres -q -c "drop role if exists t44_low" </dev/null >/dev/null 2>&1
 fi
+
+# ---- tests/archive/db/26, 42, 48 and 54: a Parquet object holding all but the last row of its chunk ---------
+# drop_last <n> <test> <file> <sql>: CONTROL on the clean module, DEFECT under DROP LAST. <sql> reads the run's
+# database for "<rows recorded>|<bytes of the object at the chunk's key>"; the LIVENESS is that DROP LAST left
+# the same rows recorded and a smaller object at that key than the clean run did, so the defect was planted and
+# reached the object the file judges.
+drop_last() {
+  local n="$1" tf="$2" f="$3" sql="$4" clean="" got=""
+  sel "$n" || return 0
+  if fresh "$ROOT/pgpm_archive/install.sql"; then
+    judge "CONTROL: $tf passes on the clean module" pass "$f"
+    clean=$(q -d "$DB" -tAq -c "$sql" </dev/null 2>&1 | tail -1)
+    if [[ "$clean" =~ ^[^|]+\|([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -gt 4 ]; then say PASS "LIVENESS: clean, $n's object is a whole file" "$clean"
+    else say FAIL "LIVENESS: clean, $n's object is a whole file" "got ${clean:-nothing}"; fail=1; clean=""; fi
+  else
+    say FAIL "fixture: CONTROL: the extensions, fixtures, core and module loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+  fi
+  is_planted parquet_drop_last || return 0
+  if fresh "$work/parquet_drop_last.sql"; then
+    judge "DEFECT: $tf fails when the Parquet object drops the last row" fail "$f"
+    got=$(q -d "$DB" -tAq -c "$sql" </dev/null 2>&1 | tail -1)
+    if [ -n "$clean" ] && [[ "$got" =~ ^([^|]+)\|([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" = "${clean%%|*}" ] \
+       && [ "${BASH_REMATCH[2]}" -lt "${clean##*|}" ]; then
+      say PASS "LIVENESS: DROP LAST, the same rows recorded, a smaller object" "$got (clean $clean)"
+    else
+      say FAIL "LIVENESS: DROP LAST, the same rows recorded, a smaller object" "got ${got:-nothing}, clean ${clean:-unread}"; fail=1
+    fi
+  else
+    say FAIL "fixture: DEFECT: the extensions, fixtures, core and module loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+  fi
+}
+ledger_object() {
+  printf '%s' "select l.rows_archived || '|' || $GET_BYTES from pgpm.archive_ledger l
+                 where l.parent_table = '$1'::regclass and l.lo = '0'"
+}
+drop_last 26 "$T26" "$F26" "$(ledger_object t26a.pq)"
+drop_last 42 "$T42" "$F42" "$(ledger_object t42.pq)"
+drop_last 48 "$T48" "$F48" "$(ledger_object t48.pq)"
+# t54.pq's direct call records no ledger row; its object is the one at the 2 January key
+drop_last 54 "$T54" "$F54" "select 'direct|' || octet_length(text_to_bytea((archive.s3_signed_request('GET', 'http://minio:9000',
+                                'archive-test-bucket', 'us-east-1', current_database() || '/t54/t54.pq_2024010200000000.parquet', '',
+                                'text/plain', '', 'minioadmin', 'minioadmin')).content))"
+q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
 
 if [ "$fail" = 0 ]; then say PASS "every judged archive test file fails against its defect" "${SEL# }"
 else say FAIL "every judged archive test file fails against its defect" "${SEL# }"; fi
