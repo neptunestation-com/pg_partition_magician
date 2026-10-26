@@ -1607,7 +1607,9 @@ already took out of the parent, which has no range left, is not vouched for eith
 disarmed if it still holds that relation's detach, and `retain_disown` logged naming the relation's oid and where
 it stands now (still a partition and untouched, pending the detach, or no partition, when attaching it back on
 the bounds it had serves its rows again). The table is left standing either way, and the partition's retirement
-starts over on the next `retire`. The same upgrade anchors a row an install older than `pgpm.part.child_oid` left without
+starts over on the next `retire`. When `retire` starts a retirement on a row without a recorded oid, the partition
+it marks carries the row's range, and the row records that partition's oid from then on, so its own detach
+landing never reads as someone else's. The same upgrade anchors a row an install older than `pgpm.part.child_oid` left without
 one only to the partition of the parent that carries both its name and its range, in whatever schema, the range
 compared as values of the control column's type however the catalog spells them; a table of the same name
 attached over another range is never adopted. A row whose own partition is gone stays unanchored, and `retire`

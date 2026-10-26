@@ -49,13 +49,16 @@
 --   PART M  the same after pg_cron ran the armed detach: a mark on a relation the detach took out of the parent
 --           has no range left to vouch for it; cleared, and retire() does not drop the table.
 --   PART N  the mark written after the upgrade: retire() itself disowns it before honouring it.
+--   PART O  the other side of M: an unanchored row's OWN partition (attached on the row's range) retired by this
+--           retire(), its detach run by the job, is dropped by the next call (retain_drop), never disowned: retire()
+--           anchors the row when it marks it.
 --
 -- ASYMMETRIC FIXTURES. A's cell [100, 200) holds ids 101 and 102, the operator's table one row (5005); B's dropped
 -- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303). C's cell
 -- holds 121 and 122, its namesake 8008; D's cell 131 and 132, its namesake 9009; E's cell 141 and 142, its namesake
 -- 9505; F's dropped cell held 151 and 152, its namesake holds 9701 and 9702; G's namesake 9801 and 9802; H's cells
 -- hold 161 and 162 and 361; I's 171 and 172; J's 381; the operators' tables of K, L, M and N hold two rows each
--- (9811/9812, 9821/9822, 9831/9832, 9841/9842).
+-- (9811/9812, 9821/9822, 9831/9832, 9841/9842); O's cell holds 195 and 196 and its parent's frontier row 600.
 --
 -- install.sql is re-run with \ir, relative to this file; the psql variable `install` overrides the path.
 \if :{?install}
@@ -65,7 +68,7 @@
 -- retire() is a function, not a committing procedure; no throws_* here.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(80);
+select plan(89);
 
 -- pg_cron's job table, stood in for (as tests/171 and tests/194 do): the dispatch has to be real for the armed
 -- command to be read and run
@@ -577,5 +580,41 @@ select ok(exists (select 1 from pg_inherits where inhparent = 'public.rn355'::re
                            and action in ('retain_detach', 'retain_drop') and id > :n_mark),
   'N: the operator''s table is still a partition with both its rows, nothing detached or dropped');
 update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
+
+-- ============================ PART O: an unanchored row's own retirement completes ============================
+create table public.ro355 (id bigint primary key, payload text);
+insert into public.ro355 values (195, 'a'), (196, 'b');
+call pgpm.transmute('public.ro355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
+insert into public.ro355 values (600, 'frontier');
+create table public.ro355_ref (id bigint primary key, f_id bigint references public.ro355 (id));
+insert into public.ro355_ref values (1, 600);
+select child_name as o_cell, child_oid as o_cell_oid from pgpm.part
+ where parent_table = 'public.ro355'::regclass and lo = '100' \gset
+-- fixture: the row unanchored, as one whose partition was out of the parent when the upgrade ran and was attached
+-- back on its own bounds since
+update pgpm.part set child_oid = null where parent_table = 'public.ro355'::regclass and child_name = :'o_cell';
+select coalesce(max(id), 0) as o_mark from pgpm.log \gset
+select ok((select child_oid is null from pgpm.part where parent_table = 'public.ro355'::regclass and child_name = :'o_cell')
+          and exists (select 1 from pg_inherits where inhparent = 'public.ro355'::regclass and inhrelid = :o_cell_oid),
+  'LIVENESS: O''s row is unanchored and its own partition is attached on its range');
+select is(pgpm.retire('public.ro355', :'o_cell'), false, 'LIVENESS: O: retire() takes the referenced path');
+select is((select command from cron.job where jobname = 'pgpm_detach'),
+  format('alter table public.ro355 detach partition public.%I concurrently', :'o_cell'),
+  'LIVENESS: O: the job is armed with the partition''s own detach');
+select is((select child_oid from pgpm.part where parent_table = 'public.ro355'::regclass and child_name = :'o_cell'),
+  :'o_cell_oid'::oid, 'O: the mark anchored the row to the partition it retires');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
+select ok(not exists (select 1 from pg_inherits where inhrelid = :o_cell_oid),
+  'LIVENESS: O: the dispatched detach landed');
+select is(pgpm.retire('public.ro355', :'o_cell'), true, 'O: the next retire() completes the retirement');
+select ok(not exists (select 1 from pg_class where oid = :o_cell_oid)
+          and not exists (select 1 from pgpm.part where parent_table = 'public.ro355'::regclass and child_name = :'o_cell'),
+  'O: the partition and its row are gone');
+select is((select string_agg(action, ',' order by id) from pgpm.log
+            where parent_table = 'public.ro355'::regclass and lo = '100' and id > :o_mark
+              and action in ('retain_detach', 'retain_drop', 'retain_disown', 'fail_retain_drop', 'fail_retain_identity')),
+  'retain_detach,retain_drop', 'O: retain_detach then retain_drop, never disowned or refused');
+select is((select string_agg(id::text, ',' order by id) from public.ro355), '600',
+  'O: the table keeps its frontier row and retention took the cell''s two');
 
 select * from finish();

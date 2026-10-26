@@ -3882,7 +3882,8 @@ $$;
 -- vouch for it, so a mark with the record of that dispatch (detach_dispatched_oid) on such a relation is cleared
 -- too, the safe side: the table is left standing, which the method says, where honouring the record drops it. One
 -- without the record is the #705 pass's and retire()'s to disown, as before. Every partition this release's
--- upgrade can match by its range is anchored by it, so this reaches only marks an older retire() wrote. On a
+-- upgrade can match by its range is anchored by it, and retire() anchors an unanchored row when it marks it, so
+-- this reaches only marks an older retire() wrote. On a
 -- foreign mark the job is disarmed if it still holds that relation's detach, the mark cleared, and one
 -- retain_disown row logged. Run for every mark by every install (_disown_unvouched_retirements), and by retire()
 -- before it honours an unanchored row's mark (an anchored one is refused by its identity check).
@@ -4505,8 +4506,13 @@ begin
       -- retiring_oid is coalesced for the same reason and records the same instant: it is the object
       -- the FIRST dispatch chose, and a retry that refreshed it would simply adopt whatever holds the
       -- name now -- which is precisely the substitution the check above exists to catch.
+      -- AND AN UNANCHORED ROW IS ANCHORED HERE (#1365). Its v_child passed _unanchored_stranger, so it is a partition
+      -- of the parent carrying the row's range, the #421 backfill's own rule; once its detach lands it has no bound
+      -- left to say so, and _disown_foreign_mark would disown pgpm's own retirement of it. With the anchor the mark is
+      -- judged by child_oid, as every anchored row's is.
       update pgpm.part set retiring_at = coalesce(retiring_at, clock_timestamp()),
-                           retiring_oid = coalesce(retiring_oid, v_child::oid)
+                           retiring_oid = coalesce(retiring_oid, v_child::oid),
+                           child_oid = coalesce(child_oid, v_child::oid)
        where parent_table = p_parent and child_name = p_child;
 
       v_reason := pgpm._dispatch_detach(p_parent, v_child);

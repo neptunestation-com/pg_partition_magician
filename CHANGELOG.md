@@ -14,7 +14,8 @@
   a mark on a row without a recorded oid) clears a mark recorded on another relation than the partition's (on such
   a row, one that is no partition of the parent over the row's range; logged `retain_disown`, the job disarmed if it still held
   that relation's detach), so the cell is no longer refused for good and the operator's table is never detached
-  or dropped through it; the `child_oid` backfill of a row older than the anchor,
+  or dropped through it, and `retire()` records the oid of an unanchored row's partition when it marks it, so its
+  own retirement completes; the `child_oid` backfill of a row older than the anchor,
   and `_child_nsp` for an unanchored row, take only the partition carrying the row's range as well as its name
   (`pgpm._part_bound_is`, comparing the bounds as values of the control column's type, quoted or bare), where
   they took whichever namesake came first, or the only one, and `retire()` then dropped the operator's table,
@@ -25,7 +26,7 @@
   `retire_yield_by_relname`, `disown_namesake_mark_kept`, `child_oid_backfill_by_relname`,
   `child_nsp_fallback_by_relname`, `part_bound_raw_quoted_only`, `retire_unanchored_stranger_unchecked`,
   `write_block_unanchored_stranger_unchecked`, `foreign_mark_range_unchecked`, `foreign_mark_detached_vouched`,
-  `retire_foreign_mark_unchecked` and `disown_pass_reached_by_name`).
+  `retire_foreign_mark_unchecked`, `disown_pass_reached_by_name` and `retire_mark_leaves_unanchored`).
 
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names

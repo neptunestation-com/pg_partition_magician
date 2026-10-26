@@ -10,7 +10,7 @@
 # referenced retirement off. The file is the acceptance test; this wrapper exists so the mutations have a guard
 # the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# TWELVE mutations are required to fail against it (bench/mutations/mutate.py):
+# THIRTEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   retire_referenced_by_relname  -- the referenced path resolves its partition by relname again, the pre-fix
 #                                    shape: the namesake is recorded and detached (part A).
 #   retire_yield_by_relname       -- the in-flight check reads another mark's partition by relname again: the
@@ -32,6 +32,8 @@
 #   retire_foreign_mark_unchecked -- retire() honours a mark no install has judged (part N).
 #   disown_pass_reached_by_name   -- the install pass reaches a mark only through the row's name, so one whose name
 #                                    resolves to nothing keeps its armed detach (part L).
+#   retire_mark_leaves_unanchored -- retire() marks an unanchored row's own partition without anchoring the row, and
+#                                    its own retirement is disowned once the detach lands (part O).
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). The file re-runs install.sql through the psql variable `install`, set here to the copy under test.

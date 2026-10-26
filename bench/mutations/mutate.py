@@ -15406,6 +15406,17 @@ MUTATIONS["disown_pass_reached_by_name"] = (
       "  for r in select p.parent_table, p.child_name from pgpm.part p\n             join pg_class c on c.oid = coalesce(p.child_oid, to_regclass(format('%I.%I',\n                                  pgpm._child_nsp(p.parent_table, p.child_name), p.child_name))::oid)\n            where p.retiring_at is not null loop\n", 1)],
 )
 
+# PR #1392 round 5: retire() anchors an unanchored row when it marks it, so its own retirement is judged by child_oid.
+MUTATIONS["retire_mark_leaves_unanchored"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 5 (V-01): retire() marks an unanchored row's own partition without anchoring the row, so once "
+    "the dispatched detach lands the partition has no bound left to vouch for it, _disown_foreign_mark disowns pgpm's "
+    "own retirement, and every later retire() refuses the table as detached by hand: retention of the cell wedged. "
+    "One clause. tests/355 part O catches it.",
+    [('                           retiring_oid = coalesce(retiring_oid, v_child::oid),\n                           child_oid = coalesce(child_oid, v_child::oid)\n',
+      '                           retiring_oid = coalesce(retiring_oid, v_child::oid)\n', 1)],
+)
+
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
         for name, e in late_survivors().items():
