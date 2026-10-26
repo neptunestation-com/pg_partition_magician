@@ -10,9 +10,11 @@
   retires the relation its identity check vouched for and its lock holds. The one-detach-in-flight check read an
   older mark's partition the same way, so a namesake attached after the marked partition was dropped held every
   referenced retirement in the database off, silently; it now asks after the mark's own relation. The upgrade
-  repairs what an older install left by the same choice: a run of `install.sql` clears a mark recorded on another
-  relation than the partition's (logged `retain_disown`, the job disarmed if it still held that relation's
-  detach), so the cell is no longer refused for good; the `child_oid` backfill of a row older than the anchor,
+  repairs what an older install left by the same choice: a run of `install.sql`, and `retire()` before it honours a
+  mark, clear a mark recorded on another relation than the partition's (on a row without a recorded oid, one that
+  is no partition of the parent over the row's range; logged `retain_disown`, the job disarmed if it still held
+  that relation's detach), so the cell is no longer refused for good and the operator's table is never detached
+  or dropped through it; the `child_oid` backfill of a row older than the anchor,
   and `_child_nsp` for an unanchored row, take only the partition carrying the row's range as well as its name
   (`pgpm._part_bound_is`, comparing the bounds as values of the control column's type, quoted or bare), where
   they took whichever namesake came first, or the only one, and `retire()` then dropped the operator's table,
@@ -21,8 +23,9 @@
   non-negative bounds) where it refused it.
   `bench/retire_referenced_by_anchor.sh` runs `tests/355` (mutations `retire_referenced_by_relname`,
   `retire_yield_by_relname`, `disown_namesake_mark_kept`, `child_oid_backfill_by_relname`,
-  `child_nsp_fallback_by_relname`, `part_bound_raw_quoted_only`, `retire_unanchored_stranger_unchecked` and
-  `write_block_unanchored_stranger_unchecked`).
+  `child_nsp_fallback_by_relname`, `part_bound_raw_quoted_only`, `retire_unanchored_stranger_unchecked`,
+  `write_block_unanchored_stranger_unchecked`, `foreign_mark_range_unchecked`, `foreign_mark_detached_vouched`,
+  `retire_foreign_mark_unchecked` and `disown_pass_reached_by_name`).
 
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names

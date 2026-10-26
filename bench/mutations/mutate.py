@@ -15317,11 +15317,12 @@ MUTATIONS["retire_yield_by_relname"] = (
 # PR #1392 verification (V-01, V-02): the same relname-alone choice in the upgrade's paths. One clause each.
 MUTATIONS["disown_namesake_mark_kept"] = (
     "bench/retire_referenced_by_anchor.sh",
-    "PR #1392 V-01: the install pass that repairs old retirement marks logs a mark an older retire() recorded on a "
-    "namesake in another schema, and disarms the job of its detach, but does not clear it, so every later retire() "
-    "of the cell still refuses as fail_retain_identity. One statement, the clearing. tests/355 part C catches it.",
-    [("      v_other_q := case when v_other_rel is null then 'a relation that no longer exists'\n                        else format('%I.%I', v_other_nsp, v_other_rel) end;\n      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null\n       where parent_table = r.parent_table and child_name = r.child_name;\n",
-      "      v_other_q := case when v_other_rel is null then 'a relation that no longer exists'\n                        else format('%I.%I', v_other_nsp, v_other_rel) end;\n", 1)],
+    "PR #1392 V-01: pgpm._disown_foreign_mark logs a mark an older retire() recorded on another relation than the "
+    "row's, and disarms the job of its detach, but does not clear it, so the mark is honoured: every later retire() "
+    "of an anchored cell refuses as fail_retain_identity, and an unanchored one detaches the operator's table. One "
+    "statement, the clearing. tests/355 parts C, K, L, M and N catch it.",
+    [("  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null\n   where parent_table = p_parent and child_name = p_child;\n",
+      "  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n", 1)],
 )
 MUTATIONS["child_oid_backfill_by_relname"] = (
     "bench/retire_referenced_by_anchor.sh",
@@ -15368,6 +15369,40 @@ MUTATIONS["write_block_unanchored_stranger_unchecked"] = (
     "refused. One clause. tests/355 part G catches it.",
     [("  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then\n",
       "  elsif false and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then\n", 1)],
+)
+
+# PR #1392 round 4: an unanchored row's mark judged by the relation it marks, over the marks themselves. One clause each.
+MUTATIONS["foreign_mark_range_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4 (P1-02, P1-03): an unanchored row's mark on a partition of the parent is honoured without "
+    "asking whether its bound is the row's range, so the mark an older retire() wrote on an operator's table is kept "
+    "and its detach and drop go ahead. One clause, the range. tests/355 parts K, L and N catch it.",
+    [('              else not (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                        and pgpm._part_bound_is(p_parent, m, r.lo, r.hi)) end\n',
+      '              else not exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m) end\n', 1)],
+)
+MUTATIONS["foreign_mark_detached_vouched"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4: an unanchored row's mark on a relation that is no partition of the parent any more is "
+    "honoured, though a detached relation has no range left to vouch for it: the operator's table an older retire() "
+    "marked, detached by the job it armed, is dropped as the cell's. One clause. tests/355 part M catches it.",
+    [('              else not (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                        and pgpm._part_bound_is(p_parent, m, r.lo, r.hi)) end\n',
+      '              else exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                        and not pgpm._part_bound_is(p_parent, m, r.lo, r.hi) end\n', 1)],
+)
+MUTATIONS["retire_foreign_mark_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4: retire() honours a mark without judging the relation it marks, so a mark no install has "
+    "judged yet (written by an older retire() after the last install run) detaches and drops the operator's table. "
+    "One clause. tests/355 part N catches it.",
+    [('  if r.retiring_at is not null and pgpm._disown_foreign_mark(p_parent, p_child) then\n',
+      '  if false and pgpm._disown_foreign_mark(p_parent, p_child) then\n', 1)],
+)
+MUTATIONS["disown_pass_reached_by_name"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4 (P1-03): the install pass reaches a mark only through what the row's name resolves to, so a "
+    "mark on an unanchored row whose name resolves to nothing is never judged and the job stays armed with the "
+    "operator's detach. One clause, the join. tests/355 part L catches it.",
+    [('  for r in select p.parent_table, p.child_name from pgpm.part p where p.retiring_at is not null loop\n',
+      "  for r in select p.parent_table, p.child_name from pgpm.part p\n             join pg_class c on c.oid = coalesce(p.child_oid, to_regclass(format('%I.%I',\n                                  pgpm._child_nsp(p.parent_table, p.child_name), p.child_name))::oid)\n            where p.retiring_at is not null loop\n", 1)],
 )
 
 def main() -> int:

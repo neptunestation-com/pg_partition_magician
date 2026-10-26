@@ -3873,6 +3873,58 @@ exception when others then
 end;
 $$;
 
+-- _disown_foreign_mark: clear the retirement mark of one pgpm.part row when the relation it marks is not the row's
+-- (#1365), and say whether it did. A mark records the relation its retirement chose (retiring_oid, and
+-- detach_dispatched_oid once its detach is armed). On an anchored row that is the row's child_oid and nothing else.
+-- An unanchored row (no child_oid) records nothing to compare, and its range is all that vouches for a relation:
+-- the marked relation must be a partition of the parent, attached or pending, whose bound is the row's
+-- [lo, hi) (_part_bound_is). A relation the mark's detach has already taken out of the parent has no bound left
+-- to vouch for it, so such a mark is cleared too, the safe side: the table is left standing, which the method
+-- says, where honouring the mark drops it. Every partition this release's upgrade can match by its range is
+-- anchored by it, so this reaches only marks an older retire() wrote. On a foreign mark the job is disarmed if
+-- it still holds that relation's detach, the mark cleared, and one retain_disown row logged. Run for every mark by
+-- every install (_disown_unvouched_retirements) and by retire() before it honours a mark.
+create or replace function pgpm._disown_foreign_mark(p_parent regclass, p_child name)
+returns boolean language plpgsql as $$
+declare r record; v_m oid; v_nsp name; v_rel name; v_other_q text;
+begin
+  select p.lo, p.hi, p.child_oid, p.retiring_oid, p.detach_dispatched_oid into r
+    from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child and p.retiring_at is not null;
+  if not found then return false; end if;
+  select m into v_m
+    from unnest(array[r.retiring_oid, r.detach_dispatched_oid]) m
+   where m is not null
+     and case when r.child_oid is not null then m <> r.child_oid
+              else not (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)
+                        and pgpm._part_bound_is(p_parent, m, r.lo, r.hi)) end
+   limit 1;
+  if v_m is null then return false; end if;
+  select n.nspname, c.relname into v_nsp, v_rel
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_m;
+  if v_rel is not null then
+    perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, v_rel));
+  end if;
+  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;
+  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+   where parent_table = p_parent and child_name = p_child;
+  insert into pgpm.log (parent_table, action, lo, hi, method)
+    values (p_parent, 'retain_disown', r.lo, r.hi,
+            format('the retirement mark of %s''s partition %I over [%s, %s) recorded oid %s, %s, which is not the partition this row records (%s), as a pgpm older than this release could choose it by its name alone; the mark is cleared, the pgpm_detach job disarmed if it still held that relation''s detach, and the retirement starts over. %s is %s',
+                   p_parent, p_child, r.lo, r.hi, v_m, v_other_q,
+                   case when r.child_oid is not null then format('oid %s', r.child_oid)
+                        else 'no oid; only a partition of the parent carrying this row''s range is this row''s' end,
+                   v_other_q,
+                   case when v_rel is null then 'gone'
+                        when exists (select 1 from pg_inherits i where i.inhparent = p_parent
+                                       and i.inhrelid = v_m and not i.inhdetachpending)
+                          then format('still a partition of %s, untouched', p_parent)
+                        when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v_m)
+                          then format('pending the concurrent detach that pgpm armed; once it is finished it is a table of its own, left standing, and attaching it back to %s on the bounds it had serves its rows again', p_parent)
+                        else format('no partition of %s (if the detach that pgpm armed reached it, it is left standing, and attaching it back on the bounds it had serves its rows again)', p_parent) end));
+  return true;
+end;
+$$;
+
 -- _disown_unvouched_retirements: disown every retirement mark that vouches for no detach of pgpm's (#705), by the rule
 -- retire(), _detach_reap and _retain_recall apply one partition at a time, over every row at once: a mark on a
 -- relation that is pending a concurrent detach under its parent, or no longer a partition of it at all, without the
@@ -3892,16 +3944,22 @@ $$;
 -- install that has the record the pass changes nothing retire() would not.
 --
 -- A MARK ON ANOTHER RELATION THAN THE ROW'S (#1365). A retire() older than #1365 chose the partition to retire by
--- relname alone, and could record a namesake in another schema as retiring_oid and arm the job with its detach;
--- every later retire() then refused the cell (fail_retain_identity) and its conditional disarm, rendered from the
--- partition's own schema, never matched. Such a mark vouches for no retirement of this row's: the job is disarmed
--- if it still holds that relation's detach, the mark cleared (logged retain_disown, with where that relation stands
--- now), and the cell's retirement starts over on the partition the row records.
+-- relname alone, and could record a namesake (in another schema, or under an unanchored row's name in the parent's
+-- own) as retiring_oid and arm the job with its detach. Every mark is judged by the relation it MARKS, first, over
+-- the marks themselves, so a row whose name resolves to nothing is reached too (pgpm._disown_foreign_mark says
+-- which marks vouch for nothing, and does the rest): the job is disarmed if it still holds that relation's detach,
+-- the mark cleared and logged retain_disown with where that relation stands now, and the cell's retirement starts
+-- over. The loop below then sees only marks on the row's own relation.
 create or replace function pgpm._disown_unvouched_retirements()
 returns int language plpgsql as $$
-declare r record; v_n int := 0; v_why_q text; v_other_q text; v_other_nsp name; v_other_rel name;
+declare r record; v_n int := 0; v_why_q text;
 begin
-  for r in select p.parent_table, p.child_name, n.nspname, c.oid as rel, p.retiring_oid, p.lo, p.hi,
+  for r in select p.parent_table, p.child_name from pgpm.part p where p.retiring_at is not null loop
+    if pgpm._disown_foreign_mark(r.parent_table, r.child_name) then   -- #1365, over the marks themselves
+      v_n := v_n + 1;
+    end if;
+  end loop;
+  for r in select p.parent_table, p.child_name, n.nspname, c.oid as rel,
                   (select i.inhdetachpending from pg_inherits i
                     where i.inhparent = p.parent_table and i.inhrelid = c.oid) as pending
              from pgpm.part p
@@ -3910,31 +3968,6 @@ begin
              join pg_namespace n on n.oid = c.relnamespace
             where p.retiring_at is not null and c.relname = p.child_name
   loop
-    if r.retiring_oid <> r.rel then   -- #1365: an older retire()'s namesake
-      select n2.nspname, c2.relname into v_other_nsp, v_other_rel
-        from pg_class c2 join pg_namespace n2 on n2.oid = c2.relnamespace where c2.oid = r.retiring_oid;
-      if v_other_rel is not null then
-        perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent_table, v_other_nsp, v_other_rel));
-      end if;
-      v_other_q := case when v_other_rel is null then 'a relation that no longer exists'
-                        else format('%I.%I', v_other_nsp, v_other_rel) end;
-      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
-       where parent_table = r.parent_table and child_name = r.child_name;
-      insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (r.parent_table, 'retain_disown', r.lo, r.hi,
-                format('the retirement mark of %I.%I (oid %s) recorded oid %s, %s, which a pgpm older than this release chose by its name alone; the mark is cleared, the pgpm_detach job disarmed if it still held that relation''s detach, and the retirement of %I.%I starts over. %s is %s',
-                       r.nspname, r.child_name, r.rel, r.retiring_oid, v_other_q, r.nspname, r.child_name, v_other_q,
-                       case when v_other_rel is null then 'gone'
-                            when exists (select 1 from pg_inherits i where i.inhparent = r.parent_table
-                                           and i.inhrelid = r.retiring_oid and not i.inhdetachpending)
-                              then format('still a partition of %s, untouched', r.parent_table)
-                            when exists (select 1 from pg_inherits i where i.inhparent = r.parent_table
-                                           and i.inhrelid = r.retiring_oid)
-                              then format('pending the concurrent detach that pgpm armed; once it is finished it is a table of its own, left standing, and attaching it back to %s on the bounds it had serves its rows again', r.parent_table)
-                            else format('no longer a partition of %s (the detach that pgpm armed reached it); it is left standing, and attaching it back on the bounds it had serves its rows again', r.parent_table) end));
-      v_n := v_n + 1;
-      continue;
-    end if;
     if r.pending is false then
       -- attached: a retirement under way, retire()'s to finish. One an older install dispatched (the job armed with
       -- its detach, which pg_cron has yet to run) gets its record here, or the detach would land on a mark with none
@@ -4154,6 +4187,11 @@ begin
   end if;
 
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
+
+  -- #1365: a mark on a relation that is not this row's is disowned before anything honours it
+  if r.retiring_at is not null and pgpm._disown_foreign_mark(p_parent, p_child) then
+    return false;
+  end if;
 
   -- IDENTITY, BEFORE ANY SIDE EFFECT (issues #407 and #428). Everything from here down acts on
   -- p_child by NAME -- installing the write block, deleting crossing keys, re-pointing the cron job,

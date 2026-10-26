@@ -10,13 +10,13 @@
 # referenced retirement off. The file is the acceptance test; this wrapper exists so the mutations have a guard
 # the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# EIGHT mutations are required to fail against it (bench/mutations/mutate.py):
+# TWELVE mutations are required to fail against it (bench/mutations/mutate.py):
 #   retire_referenced_by_relname  -- the referenced path resolves its partition by relname again, the pre-fix
 #                                    shape: the namesake is recorded and detached (part A).
 #   retire_yield_by_relname       -- the in-flight check reads another mark's partition by relname again: the
 #                                    namesake of a dropped partition holds the other parent's retirement off (part B).
-#   disown_namesake_mark_kept     -- the install pass leaves an older retire()'s mark on the namesake in place, so
-#                                    the cell is still refused on identity after the upgrade (part C).
+#   disown_namesake_mark_kept     -- an older retire()'s mark on another relation than the row's is logged but not
+#                                    cleared, so it is still honoured (parts C, K, L, M and N).
 #   child_oid_backfill_by_relname -- the #421 backfill adopts a namesake without asking for the row's range, and
 #                                    retire() drops the operator's table as the cell's (parts D and F).
 #   child_nsp_fallback_by_relname -- _child_nsp's fallback takes a namesake's schema for an unanchored row without
@@ -27,6 +27,11 @@
 #   retire_unanchored_stranger_unchecked -- retire() does not compare an unanchored row's relation by its range,
 #                                    and drops the operator's table in the parent's own schema (part G).
 #   write_block_unanchored_stranger_unchecked -- the write block goes on that table (part G).
+#   foreign_mark_range_unchecked  -- an unanchored row's mark on a partition is honoured whatever its range (K, L, N).
+#   foreign_mark_detached_vouched -- an unanchored row's mark on a relation no longer a partition is honoured (M).
+#   retire_foreign_mark_unchecked -- retire() honours a mark no install has judged (part N).
+#   disown_pass_reached_by_name   -- the install pass reaches a mark only through the row's name, so one whose name
+#                                    resolves to nothing keeps its armed detach (part L).
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). The file re-runs install.sql through the psql variable `install`, set here to the copy under test.

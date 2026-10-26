@@ -1597,14 +1597,17 @@ the upgrade, whose dispatched detach is still armed on the
 job, is given its record instead (an adopted operator's detach is never attached), and every retirement dispatched
 after the upgrade carries its record from the start.
 
-**A mark on another relation than the partition's is cleared too, on every run of `install.sql`.** A `retire`
-older than this release chose the partition to retire by its name alone, so where a table of the same name in
-another schema was also a partition of the parent it could record that table as the one retiring and arm the
-job with its detach; every later `retire` of the partition then refused as `fail_retain_identity`. The run
-disarms the job if it still holds that table's detach, clears the mark, and logs `retain_disown` naming the
-table's oid and where it stands now (still a partition and untouched, pending the detach, or detached by it,
-when attaching it back on the bounds it had serves its rows again). The partition's retirement then starts over
-on the next `retire`. The same upgrade anchors a row an install older than `pgpm.part.child_oid` left without
+**A mark on another relation than the partition's is cleared too, on every run of `install.sql` and by
+`retire` before it honours one.** A `retire` older than this release chose the partition to retire by its name
+alone, so where a table of the same name was also a partition of the parent it could record that table as the
+one retiring and arm the job with its detach. A mark is judged by the relation it records: on a row with a
+recorded oid it must be that oid; on a row without one (an install older than the anchor) it must be a partition
+of the parent, attached or pending, whose bound is the row's range, so a relation the mark's detach already took
+out of the parent, which has no range left, is not vouched for either. A mark that fails is cleared, the job
+disarmed if it still holds that relation's detach, and `retain_disown` logged naming the relation's oid and where
+it stands now (still a partition and untouched, pending the detach, or no partition, when attaching it back on
+the bounds it had serves its rows again). The table is left standing either way, and the partition's retirement
+starts over on the next `retire`. The same upgrade anchors a row an install older than `pgpm.part.child_oid` left without
 one only to the partition of the parent that carries both its name and its range, in whatever schema, the range
 compared as values of the control column's type however the catalog spells them; a table of the same name
 attached over another range is never adopted. A row whose own partition is gone stays unanchored, and `retire`
