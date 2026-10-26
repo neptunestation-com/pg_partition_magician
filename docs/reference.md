@@ -1597,13 +1597,13 @@ the upgrade, whose dispatched detach is still armed on the
 job, is given its record instead (an adopted operator's detach is never attached), and every retirement dispatched
 after the upgrade carries its record from the start.
 
-**A mark on another relation than the partition's is cleared too, on every run of `install.sql` and by
-`retire` before it honours one.** A `retire` older than this release chose the partition to retire by its name
+**A mark on another relation than the partition's is cleared too, on every run of `install.sql`, and for a row
+without a recorded oid by `retire` before it honours one.** A `retire` older than this release chose the partition to retire by its name
 alone, so where a table of the same name was also a partition of the parent it could record that table as the
 one retiring and arm the job with its detach. A mark is judged by the relation it records: on a row with a
-recorded oid it must be that oid; on a row without one (an install older than the anchor) it must be a partition
-of the parent, attached or pending, whose bound is the row's range, so a relation the mark's detach already took
-out of the parent, which has no range left, is not vouched for either. A mark that fails is cleared, the job
+recorded oid it must be that oid; on a row without one (an install older than the anchor) a partition of the
+parent, attached or pending, must have the row's range for its bound, and a relation the mark's recorded detach
+already took out of the parent, which has no range left, is not vouched for either. A mark that fails is cleared, the job
 disarmed if it still holds that relation's detach, and `retain_disown` logged naming the relation's oid and where
 it stands now (still a partition and untouched, pending the detach, or no partition, when attaching it back on
 the bounds it had serves its rows again). The table is left standing either way, and the partition's retirement

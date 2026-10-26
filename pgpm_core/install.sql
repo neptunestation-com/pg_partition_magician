@@ -3877,13 +3877,15 @@ $$;
 -- (#1365), and say whether it did. A mark records the relation its retirement chose (retiring_oid, and
 -- detach_dispatched_oid once its detach is armed). On an anchored row that is the row's child_oid and nothing else.
 -- An unanchored row (no child_oid) records nothing to compare, and its range is all that vouches for a relation:
--- the marked relation must be a partition of the parent, attached or pending, whose bound is the row's
--- [lo, hi) (_part_bound_is). A relation the mark's detach has already taken out of the parent has no bound left
--- to vouch for it, so such a mark is cleared too, the safe side: the table is left standing, which the method
--- says, where honouring the mark drops it. Every partition this release's upgrade can match by its range is
--- anchored by it, so this reaches only marks an older retire() wrote. On a foreign mark the job is disarmed if
--- it still holds that relation's detach, the mark cleared, and one retain_disown row logged. Run for every mark by
--- every install (_disown_unvouched_retirements) and by retire() before it honours a mark.
+-- the marked relation, while it is a partition of the parent (attached or pending), must have the row's [lo, hi)
+-- for its bound (_part_bound_is). Once the mark's detach has taken it out of the parent it has no bound left to
+-- vouch for it, so a mark with the record of that dispatch (detach_dispatched_oid) on such a relation is cleared
+-- too, the safe side: the table is left standing, which the method says, where honouring the record drops it. One
+-- without the record is the #705 pass's and retire()'s to disown, as before. Every partition this release's
+-- upgrade can match by its range is anchored by it, so this reaches only marks an older retire() wrote. On a
+-- foreign mark the job is disarmed if it still holds that relation's detach, the mark cleared, and one
+-- retain_disown row logged. Run for every mark by every install (_disown_unvouched_retirements), and by retire()
+-- before it honours an unanchored row's mark (an anchored one is refused by its identity check).
 create or replace function pgpm._disown_foreign_mark(p_parent regclass, p_child name)
 returns boolean language plpgsql as $$
 declare r record; v_m oid; v_nsp name; v_rel name; v_other_q text;
@@ -3895,8 +3897,9 @@ begin
     from unnest(array[r.retiring_oid, r.detach_dispatched_oid]) m
    where m is not null
      and case when r.child_oid is not null then m <> r.child_oid
-              else not (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)
-                        and pgpm._part_bound_is(p_parent, m, r.lo, r.hi)) end
+              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)
+                then not pgpm._part_bound_is(p_parent, m, r.lo, r.hi)
+              else r.detach_dispatched_oid is not null end
    limit 1;
   if v_m is null then return false; end if;
   select n.nspname, c.relname into v_nsp, v_rel
@@ -4188,8 +4191,8 @@ begin
 
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
 
-  -- #1365: a mark on a relation that is not this row's is disowned before anything honours it
-  if r.retiring_at is not null and pgpm._disown_foreign_mark(p_parent, p_child) then
+  -- #1365: an unanchored row's mark on a relation that is not the row's is disowned before anything honours it
+  if r.retiring_at is not null and r.child_oid is null and pgpm._disown_foreign_mark(p_parent, p_child) then
     return false;
   end if;
 

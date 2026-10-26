@@ -10,9 +10,9 @@
   retires the relation its identity check vouched for and its lock holds. The one-detach-in-flight check read an
   older mark's partition the same way, so a namesake attached after the marked partition was dropped held every
   referenced retirement in the database off, silently; it now asks after the mark's own relation. The upgrade
-  repairs what an older install left by the same choice: a run of `install.sql`, and `retire()` before it honours a
-  mark, clear a mark recorded on another relation than the partition's (on a row without a recorded oid, one that
-  is no partition of the parent over the row's range; logged `retain_disown`, the job disarmed if it still held
+  repairs what an older install left by the same choice: a run of `install.sql` (and `retire()`, before it honours
+  a mark on a row without a recorded oid) clears a mark recorded on another relation than the partition's (on such
+  a row, one that is no partition of the parent over the row's range; logged `retain_disown`, the job disarmed if it still held
   that relation's detach), so the cell is no longer refused for good and the operator's table is never detached
   or dropped through it; the `child_oid` backfill of a row older than the anchor,
   and `_child_nsp` for an unanchored row, take only the partition carrying the row's range as well as its name

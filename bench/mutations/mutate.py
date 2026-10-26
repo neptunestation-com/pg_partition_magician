@@ -15377,24 +15377,25 @@ MUTATIONS["foreign_mark_range_unchecked"] = (
     "PR #1392 round 4 (P1-02, P1-03): an unanchored row's mark on a partition of the parent is honoured without "
     "asking whether its bound is the row's range, so the mark an older retire() wrote on an operator's table is kept "
     "and its detach and drop go ahead. One clause, the range. tests/355 parts K, L and N catch it.",
-    [('              else not (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                        and pgpm._part_bound_is(p_parent, m, r.lo, r.hi)) end\n',
-      '              else not exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m) end\n', 1)],
+    [('              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then not pgpm._part_bound_is(p_parent, m, r.lo, r.hi)\n              else r.detach_dispatched_oid is not null end\n',
+      '              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then false\n              else r.detach_dispatched_oid is not null end\n', 1)],
 )
 MUTATIONS["foreign_mark_detached_vouched"] = (
     "bench/retire_referenced_by_anchor.sh",
-    "PR #1392 round 4: an unanchored row's mark on a relation that is no partition of the parent any more is "
-    "honoured, though a detached relation has no range left to vouch for it: the operator's table an older retire() "
-    "marked, detached by the job it armed, is dropped as the cell's. One clause. tests/355 part M catches it.",
-    [('              else not (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                        and pgpm._part_bound_is(p_parent, m, r.lo, r.hi)) end\n',
-      '              else exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                        and not pgpm._part_bound_is(p_parent, m, r.lo, r.hi) end\n', 1)],
+    "PR #1392 round 4: an unanchored row's mark, with the record of its dispatch, on a relation that is no partition "
+    "of the parent any more is honoured, though a detached relation has no range left to vouch for it: the operator's "
+    "table an older retire() marked, detached by the job it armed, is dropped as the cell's. One clause. tests/355 "
+    "part M catches it.",
+    [('              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then not pgpm._part_bound_is(p_parent, m, r.lo, r.hi)\n              else r.detach_dispatched_oid is not null end\n',
+      '              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then not pgpm._part_bound_is(p_parent, m, r.lo, r.hi)\n              else false end\n', 1)],
 )
 MUTATIONS["retire_foreign_mark_unchecked"] = (
     "bench/retire_referenced_by_anchor.sh",
     "PR #1392 round 4: retire() honours a mark without judging the relation it marks, so a mark no install has "
     "judged yet (written by an older retire() after the last install run) detaches and drops the operator's table. "
     "One clause. tests/355 part N catches it.",
-    [('  if r.retiring_at is not null and pgpm._disown_foreign_mark(p_parent, p_child) then\n',
-      '  if false and pgpm._disown_foreign_mark(p_parent, p_child) then\n', 1)],
+    [('  if r.retiring_at is not null and r.child_oid is null and pgpm._disown_foreign_mark(p_parent, p_child) then\n',
+      '  if false and r.child_oid is null and pgpm._disown_foreign_mark(p_parent, p_child) then\n', 1)],
 )
 MUTATIONS["disown_pass_reached_by_name"] = (
     "bench/retire_referenced_by_anchor.sh",
