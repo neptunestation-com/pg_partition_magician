@@ -30,11 +30,20 @@
 --   PART F  an unanchored row whose own partition was dropped by hand, the SOLE partition of the parent carrying its
 --           name an operator's table in another schema over another range: neither the backfill nor _child_nsp
 --           takes it (its bound is not the row's range), and retire() drops nothing; the table keeps both rows.
+--   PART G  the same with the operator's table in the PARENT'S OWN schema, where _child_nsp's last answer leads:
+--           retire() refuses it (fail_retain_identity) and the write block is not put on it
+--           (fail_write_block_identity), compared by the row's range; the table keeps both rows and stays writable.
+--   PART H  an int4 grid, whose non-negative bounds pg_get_expr spells bare (FROM (100) TO (200)): the upgrade
+--           anchors every unanchored row of it to its own partition and backfills the monolith from them.
+--   PART I  a moved int4 parent's unanchored row: _child_nsp finds its partition in the old schema by its range,
+--           and retire() drops it.
+--   PART J  adopt_partition on an int4 grid reads the bare bound and records the partition over it.
 --
 -- ASYMMETRIC FIXTURES. A's cell [100, 200) holds ids 101 and 102, the operator's table one row (5005); B's dropped
 -- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303). C's cell
 -- holds 121 and 122, its namesake 8008; D's cell 131 and 132, its namesake 9009; E's cell 141 and 142, its namesake
--- 9505; F's dropped cell held 151 and 152, its namesake holds 9701 and 9702.
+-- 9505; F's dropped cell held 151 and 152, its namesake holds 9701 and 9702; G's namesake 9801 and 9802; H's cells
+-- hold 161 and 162 and 361; I's 171 and 172; J's 381.
 --
 -- install.sql is re-run with \ir, relative to this file; the psql variable `install` overrides the path.
 \if :{?install}
@@ -44,7 +53,7 @@
 -- retire() is a function, not a committing procedure; no throws_* here.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(47);
+select plan(63);
 
 -- pg_cron's job table, stood in for (as tests/171 and tests/194 do): the dispatch has to be real for the armed
 -- command to be read and run
@@ -247,7 +256,23 @@ select ok((select count(*) = 1 and bool_and(i.inhrelid = :f_ops_oid) from pg_inh
                 where parent_table = 'public.rf355'::regclass and child_name = :'f_cell'),
   'LIVENESS: F''s unanchored [100, 200) row has one namesake partition, the operator''s, over [9700, 9800)');
 
--- the upgrade, over C's, D's and F's states
+-- ============================ PART H: an int4 grid's bare bounds, at the upgrade ============================
+create table public.rh355 (id integer primary key, payload text);
+insert into public.rh355 values (161, 'a'), (162, 'b');
+call pgpm.transmute('public.rh355', 'id', 100, p_obtain => 4, p_paused => true);
+insert into public.rh355 values (361, 'c');
+select monolith_oid as h_mono_oid from pgpm.config where parent_table = 'public.rh355'::regclass \gset
+select string_agg(child_name || '=' || child_oid, ',' order by lo::numeric) as h_anchors from pgpm.part
+ where parent_table = 'public.rh355'::regclass and attached \gset
+-- fixture: the rows and the config as an install older than child_oid left them
+update pgpm.part set child_oid = null where parent_table = 'public.rh355'::regclass;
+update pgpm.config set monolith_oid = null where parent_table = 'public.rh355'::regclass;
+select ok((select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.oid = :h_mono_oid) = 'FOR VALUES FROM (100) TO (200)'
+          and (select count(*) >= 3 and bool_and(child_oid is null) from pgpm.part
+                where parent_table = 'public.rh355'::regclass and attached),
+  'LIVENESS: H''s monolith renders its bound bare, and every attached row is unanchored');
+
+-- the upgrade, over C's, D's, F's and H's states
 select coalesce(max(id), 0) as log_mark from pgpm.log \gset
 \ir :install
 set client_min_messages = warning;
@@ -297,6 +322,12 @@ select ok(exists (select 1 from pg_inherits where inhparent = 'public.rf355'::re
           and (select string_agg(id::text, ',' order by id) from public.rf355 where id >= 9700) = '9701,9702',
   'F: the operator''s table stands, a partition with both its rows');
 
+select is((select string_agg(child_name || '=' || child_oid, ',' order by lo::numeric) from pgpm.part
+            where parent_table = 'public.rh355'::regclass and attached),
+  :'h_anchors', 'H: the upgrade anchors every row of the int4 grid to its own partition');
+select is((select monolith_oid from pgpm.config where parent_table = 'public.rh355'::regclass), :'h_mono_oid'::oid,
+  'H: and backfills the monolith from them');
+
 -- ============================ PART E: _child_nsp for an unanchored row ============================
 -- The operator's schema is created before the parent's, so the namesake comes first both in pg_inherits (the freed
 -- heap slots) and in pg_class's (relname, relnamespace) index, whichever way a plan reaches it.
@@ -331,5 +362,73 @@ select ok(not exists (select 1 from pg_class where oid = :e_cell_oid)
           and exists (select 1 from pg_inherits where inhparent = 're355_own.re355'::regclass and inhrelid = :e_ops_oid)
           and (select string_agg(id::text, ',' order by id) from re355_own.re355 where id < 600 or id >= 9500) = '9505',
   'E: the partition in the parent''s schema is the one dropped; the namesake stands with its row');
+
+-- ============================ PART G: the namesake in the parent's own schema ============================
+create table public.rg355 (id bigint primary key, payload text);
+insert into public.rg355 values (181, 'a'), (182, 'b');
+call pgpm.transmute('public.rg355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
+insert into public.rg355 values (600, 'frontier');
+select child_name as g_cell from pgpm.part where parent_table = 'public.rg355'::regclass and lo = '100' \gset
+-- fixture: an unanchored row, its partition dropped by hand, the operator's own table created under the name in the
+-- parent's schema and attached over another range
+update pgpm.part set child_oid = null where parent_table = 'public.rg355'::regclass and child_name = :'g_cell';
+drop table public.:"g_cell";
+create table public.:"g_cell" (id bigint primary key, payload text);
+insert into public.:"g_cell" values (9801, 'operator'), (9802, 'operator');
+alter table public.rg355 attach partition public.:"g_cell" for values from (9800) to (9900);
+select to_regclass(format('public.%I', :'g_cell'))::oid as g_ops_oid \gset
+select ok(pgpm._child_nsp('public.rg355', :'g_cell') = 'public'
+          and exists (select 1 from pg_inherits where inhparent = 'public.rg355'::regclass and inhrelid = :g_ops_oid),
+  'LIVENESS: G''s unanchored row resolves to the parent''s schema, where the name is the operator''s partition');
+select pgpm._install_write_block('public.rg355', :'g_cell');
+select ok(not exists (select 1 from pg_trigger where tgrelid = :g_ops_oid and tgname = 'pgpm_write_block')
+          and exists (select 1 from pgpm.log where parent_table = 'public.rg355'::regclass and lo = '100'
+                       and action = 'fail_write_block_identity'),
+  'G: the write block is not put on the operator''s table (fail_write_block_identity)');
+select is(pgpm.retire('public.rg355', :'g_cell'), false, 'G: retire() of the aged cell drops nothing');
+select ok(exists (select 1 from pgpm.log where parent_table = 'public.rg355'::regclass and lo = '100'
+                   and action = 'fail_retain_identity'),
+  'G: refused as fail_retain_identity');
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rg355'::regclass and inhrelid = :g_ops_oid)
+          and (select string_agg(id::text, ',' order by id) from public.rg355 where id >= 9800) = '9801,9802',
+  'G: the operator''s table stands, a partition with both its rows');
+select lives_ok($$insert into public.rg355 values (9803, 'written')$$, 'G: and takes writes');
+
+-- ============================ PART I: a moved int4 parent's unanchored row ============================
+create schema ri355_old;
+create schema ri355_new;
+create table ri355_old.ri355 (id integer primary key, payload text);
+insert into ri355_old.ri355 values (171, 'a'), (172, 'b');
+call pgpm.transmute('ri355_old.ri355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
+insert into ri355_old.ri355 values (600, 'frontier');
+select child_name as i_cell, child_oid as i_cell_oid from pgpm.part
+ where parent_table = 'ri355_old.ri355'::regclass and lo = '100' \gset
+update pgpm.part set child_oid = null where parent_table = 'ri355_old.ri355'::regclass and child_name = :'i_cell';
+alter table ri355_old.ri355 set schema ri355_new;
+select ok((select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.oid = :i_cell_oid) = 'FOR VALUES FROM (100) TO (200)'
+          and exists (select 1 from pg_inherits where inhparent = 'ri355_new.ri355'::regclass and inhrelid = :i_cell_oid),
+  'LIVENESS: I''s unanchored cell, bound bare, is a partition of the moved parent, left in the old schema');
+select is(pgpm._child_nsp('ri355_new.ri355', :'i_cell'), 'ri355_old'::name,
+  'I: _child_nsp finds it in its own schema by its range');
+select is(pgpm.retire('ri355_new.ri355', :'i_cell'), true, 'I: retire() of the aged cell completes');
+select ok(not exists (select 1 from pg_class where oid = :i_cell_oid)
+          and (select string_agg(id::text, ',' order by id) from ri355_new.ri355) = '600',
+  'I: the cell and its two rows are gone, the frontier row kept');
+
+-- ============================ PART J: adopt_partition over a bare bound ============================
+create table public.rj355 (id integer primary key, payload text);
+insert into public.rj355 values (101, 'a');
+call pgpm.transmute('public.rj355', 'id', 100, p_obtain => 4, p_paused => true);
+insert into public.rj355 values (381, 'c');
+select child_name as j_cell, child_oid as j_cell_oid from pgpm.part
+ where parent_table = 'public.rj355'::regclass and lo = '300' \gset
+delete from pgpm.part where parent_table = 'public.rj355'::regclass and lo = '300';
+select ok((select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.oid = :j_cell_oid) = 'FOR VALUES FROM (300) TO (400)',
+  'LIVENESS: J''s partition renders its bound bare, and pgpm.part has no row for it');
+select lives_ok(format('select pgpm.adopt_partition(%L, %L)', 'public.rj355', 'public.' || :'j_cell'),
+  'J: adopt_partition accepts it');
+select is((select format('%s|%s|%s', lo, hi, child_oid = :j_cell_oid) from pgpm.part
+            where parent_table = 'public.rj355'::regclass and child_name = :'j_cell'),
+  '300|400|t', 'J: and records it over its bounds, by its oid');
 
 select * from finish();

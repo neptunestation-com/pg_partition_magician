@@ -137,6 +137,12 @@ WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid into r
                        v_nsp, p_child, v_now::oid::text, r.child_oid));
       return;
     end if;
+  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then
+    insert into pgpm.log (parent_table, action, lo, hi, method)   -- #1365: a row with no anchor, by its range
+      values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
+              format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
+                     v_nsp, p_child, p_parent, r.lo, r.hi));
+    return;
   end if;
 
 """
@@ -15334,6 +15340,34 @@ MUTATIONS["child_nsp_fallback_by_relname"] = (
     "F catch it.",
     [('      where p.parent_table = p_parent and p.child_name = p_child\n        and pgpm._part_bound_is(p_parent, i.inhrelid, p.lo, p.hi)\n      limit 1),\n',
       '      where p.parent_table = p_parent and p.child_name = p_child\n      limit 1),\n', 1)],
+)
+
+# PR #1392 round 3: a bound read by its value whatever its spelling, and an unanchored row compared by its range where
+# it is dropped or write-blocked. One clause each.
+MUTATIONS["part_bound_raw_quoted_only"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 3 (P1-02, P1-03): pgpm._part_bound_raw reads a bound only in its quoted spelling, and "
+    "pg_get_expr writes a non-negative int4 bound bare, FROM (100) TO (200): on an int4 grid the upgrade anchors no "
+    "unanchored row and backfills no monolith, a moved parent's unanchored row is not found in its own schema, and "
+    "adopt_partition refuses the bound. One clause, the bare reading. tests/355 parts H, I and J catch it.",
+    [("              then array[coalesce(replace(m[1], '''''', ''''), m[2]), coalesce(replace(m[3], '''''', ''''), m[4])] end\n",
+      "              then array[replace(m[1], '''''', ''''), replace(m[3], '''''', '''')] end\n", 1)],
+)
+MUTATIONS["retire_unanchored_stranger_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 3 (V-01): retire() does not compare an unanchored row's relation by its range, so an operator's "
+    "table under the row's name in the parent's own schema, attached over another range, is what its one-step DROP "
+    "takes, rows and all. One clause. tests/355 part G catches it.",
+    [('  if r.retiring_oid is null and r.child_oid is null and pgpm._unanchored_stranger(p_parent, v_now, r.lo, r.hi) then\n',
+      '  if r.retiring_oid is null and r.child_oid is null and false then\n', 1)],
+)
+MUTATIONS["write_block_unanchored_stranger_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 3: _install_write_block does not compare an unanchored row's relation by its range, so the write "
+    "block goes on an operator's table under the row's name, attached over another range, and its writes are "
+    "refused. One clause. tests/355 part G catches it.",
+    [("  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then\n",
+      "  elsif false and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then\n", 1)],
 )
 
 def main() -> int:

@@ -3647,31 +3647,65 @@ exception when others then
 end;
 $$;
 
--- _part_bound_is: whether partition p_rel's bound is the range [p_lo, p_hi) of p_parent's grid (#1365). An unanchored
--- pgpm.part row (no child_oid: an install older than #421, or one its backfill could not resolve) has nothing but its
--- name and its range to tell its partition from a table of the operator's under the same name in another schema,
--- attached over another range, and the name alone took that table, which retire() then dropped as the cell's. Two
--- partitions of one parent never share a range, so a partition carrying the row's name AND its range is the row's,
--- in whatever schema (a moved parent's stay where they were, #727). The bound is read as adopt_partition reads it,
--- through the grid's own decoding, under an ISO DateStyle so a timestamp bound renders in a form that parses back;
--- anything it cannot read is not the row's.
+-- _part_bound_raw: a range partition's two bounds as the text of their values, {lo, hi}, or null for any other bound
+-- (DEFAULT, MINVALUE, MAXVALUE, a list or hash bound, no such relation). pg_get_expr is the only reader of a bound,
+-- and it spells one literal two ways: quoted ('100', '2026-01-01 00:00:00+00', '-5') or, for a non-negative integer
+-- or a numeric of some columns, bare (100). Both are read here, and the value is left for the caller to cast through
+-- the column's own type, so no spelling decides a comparison (#1365). Rendered under an ISO DateStyle, so a
+-- timestamp bound is in a form that parses back under any session's settings.
+create or replace function pgpm._part_bound_raw(p_rel oid)
+returns text[] language sql stable set datestyle = 'ISO, YMD' as $$
+  select case when m is not null
+              then array[coalesce(replace(m[1], '''''', ''''), m[2]), coalesce(replace(m[3], '''''', ''''), m[4])] end
+    from (select regexp_match(pg_get_expr(c.relpartbound, c.oid),
+                   '^FOR VALUES FROM \((?:''((?:[^'']|'''')*)''|(-?[0-9][0-9.eE+-]*))\) TO \((?:''((?:[^'']|'''')*)''|(-?[0-9][0-9.eE+-]*))\)$') as m
+            from pg_class c where c.oid = p_rel) b;
+$$;
+
+-- _part_bound_is: whether partition p_rel's bound is the range [p_lo, p_hi) of p_parent's grid (#1365), compared as
+-- VALUES of the control column's type: each bound cast through it, against the row's lo and hi encoded the way the
+-- grid writes them (as adopt_partition checks a bound). An unanchored pgpm.part row (no child_oid: an install older
+-- than #421, or one its backfill could not resolve) has nothing but its name and its range to tell its partition from
+-- a table of the operator's under the same name, attached over another range, and the name alone took that table,
+-- which retire() then dropped as the cell's. Two partitions of one parent never share a range, so a partition
+-- carrying the row's name AND its range is the row's, in whatever schema (a moved parent's stay where they were,
+-- #727). Anything it cannot read is not the row's.
 create or replace function pgpm._part_bound_is(p_parent regclass, p_rel oid, p_lo text, p_hi text)
 returns boolean language plpgsql stable set datestyle = 'ISO, YMD' as $$
-declare cfg pgpm.config; v_m text[];
+declare cfg pgpm.config; v_raw text[]; v_coltype text; v_same boolean;
 begin
-  select regexp_match(pg_get_expr(c.relpartbound, c.oid),
-                      '^FOR VALUES FROM \(''((?:[^'']|'''')*)''\) TO \(''((?:[^'']|'''')*)''\)$')
-    into v_m from pg_class c where c.oid = p_rel;
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
-  if v_m is null or cfg.parent_table is null then return false; end if;
-  return coalesce(pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, replace(v_m[1], '''''', '''')))
-                    = pgpm._native_text(cfg.control_kind, p_lo)
-              and pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, replace(v_m[2], '''''', '''')))
-                    = pgpm._native_text(cfg.control_kind, p_hi), false);
+  v_raw := pgpm._part_bound_raw(p_rel);
+  if v_raw is null or cfg.parent_table is null then return false; end if;
+  select format_type(a.atttypid, a.atttypmod) into v_coltype
+    from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;
+  execute format('select %L::%s = %L::%s and %L::%s = %L::%s',
+                 v_raw[1], v_coltype,
+                 pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                              cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits,
+                              cfg.text_time_epoch, cfg.partition_tz), v_coltype,
+                 v_raw[2], v_coltype,
+                 pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                              cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits,
+                              cfg.text_time_epoch, cfg.partition_tz), v_coltype)
+    into v_same;
+  return coalesce(v_same, false);
 exception when others then
   return false;
 end;
+$$;
+
+-- _unanchored_stranger: whether p_rel, the relation an UNANCHORED row's name resolved to, is a partition of p_parent
+-- over another range than the row's [p_lo, p_hi), i.e. a table of someone else's (#1365). The row records no oid to
+-- compare, so its range is what it is compared by: every step that acts on what an anchored row's name resolves to
+-- refuses a relation that is not its child_oid, and the ones that drop or block refuse this for an unanchored row.
+-- A relation that is no partition of the parent is not judged here (the steps report it as they always have).
+create or replace function pgpm._unanchored_stranger(p_parent regclass, p_rel oid, p_lo text, p_hi text)
+returns boolean language sql stable as $$
+  select p_rel is not null
+     and exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_rel)
+     and not pgpm._part_bound_is(p_parent, p_rel, p_lo, p_hi);
 $$;
 
 -- The #421 backfill of an ATTACHED row (see the one for a not-yet-attached regrain child, near the top): resolved
@@ -4177,6 +4211,15 @@ begin
                        v_nsp, p_child, coalesce(v_now::oid::text, 'nothing'), v_why));
       return false;
     end if;
+  end if;
+  -- #1365: a row with no anchor is compared by its range (_unanchored_stranger)
+  v_now := to_regclass(format('%I.%I', v_nsp, p_child));
+  if r.retiring_oid is null and r.child_oid is null and pgpm._unanchored_stranger(p_parent, v_now, r.lo, r.hi) then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_retain_identity', r.lo, r.hi,
+              format('%I.%I is oid %s, a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to detach or drop it',
+                     v_nsp, p_child, v_now::oid, p_parent, r.lo, r.hi));
+    return false;
   end if;
 
   -- THE LOCK FIRST, THEN THE QUESTION (#705 bullet 3). Both refusals below read the catalog, and they are only
@@ -4804,6 +4847,12 @@ begin
                        v_nsp, p_child, v_now::oid::text, r.child_oid));
       return;
     end if;
+  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then
+    insert into pgpm.log (parent_table, action, lo, hi, method)   -- #1365: a row with no anchor, by its range
+      values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
+              format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
+                     v_nsp, p_child, p_parent, r.lo, r.hi));
+    return;
   end if;
 
   v_child := format('%I.%I', v_nsp, p_child)::regclass;
@@ -15399,15 +15448,15 @@ begin
       p_child, quote_ident(v_tracked), p_parent;
   end if;
 
-  -- the catalog's bounds, as pgpm's native grid values: every range bound renders quoted, so a bound that is
-  -- not 'v' to 'v' is a DEFAULT, MINVALUE or MAXVALUE one
-  v_m := regexp_match(v_bound, '^FOR VALUES FROM \(''((?:[^'']|'''')*)''\) TO \(''((?:[^'']|'''')*)''\)$');
+  -- the catalog's bounds, as pgpm's native grid values, read quoted or bare (#1365: a non-negative integer bound
+  -- renders bare); a bound that is no range of two values is a DEFAULT, MINVALUE or MAXVALUE one
+  v_m := pgpm._part_bound_raw(p_child::oid);
   if v_m is null then
     raise exception 'pg_partition_magician: cannot adopt %: its bounds (%) are not a range from one value to another, which pgpm''s grid cannot express',
       p_child, v_bound;
   end if;
-  v_lo_raw := replace(v_m[1], '''''', '''');
-  v_hi_raw := replace(v_m[2], '''''', '''');
+  v_lo_raw := v_m[1];
+  v_hi_raw := v_m[2];
   select format_type(a.atttypid, a.atttypmod) into v_coltype
     from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;
   begin

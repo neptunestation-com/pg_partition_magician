@@ -14,11 +14,15 @@
   relation than the partition's (logged `retain_disown`, the job disarmed if it still held that relation's
   detach), so the cell is no longer refused for good; the `child_oid` backfill of a row older than the anchor,
   and `_child_nsp` for an unanchored row, take only the partition carrying the row's range as well as its name
-  (`pgpm._part_bound_is`), where they took whichever namesake came first, or the only one, and `retire()` then
-  dropped the operator's table, rows and all.
+  (`pgpm._part_bound_is`, comparing the bounds as values of the control column's type, quoted or bare), where
+  they took whichever namesake came first, or the only one, and `retire()` then dropped the operator's table,
+  rows and all; `retire()` and the write block refuse an unanchored row's name when it denotes a partition over
+  another range, in the parent's own schema too. `adopt_partition` reads a bare bound (an `integer` column's
+  non-negative bounds) where it refused it.
   `bench/retire_referenced_by_anchor.sh` runs `tests/355` (mutations `retire_referenced_by_relname`,
-  `retire_yield_by_relname`, `disown_namesake_mark_kept`, `child_oid_backfill_by_relname` and
-  `child_nsp_fallback_by_relname`).
+  `retire_yield_by_relname`, `disown_namesake_mark_kept`, `child_oid_backfill_by_relname`,
+  `child_nsp_fallback_by_relname`, `part_bound_raw_quoted_only`, `retire_unanchored_stranger_unchecked` and
+  `write_block_unanchored_stranger_unchecked`).
 
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names

@@ -1605,9 +1605,11 @@ disarms the job if it still holds that table's detach, clears the mark, and logs
 table's oid and where it stands now (still a partition and untouched, pending the detach, or detached by it,
 when attaching it back on the bounds it had serves its rows again). The partition's retirement then starts over
 on the next `retire`. The same upgrade anchors a row an install older than `pgpm.part.child_oid` left without
-one only to the partition of the parent that carries both its name and its range, in whatever schema; a table of
-the same name attached over another range is never adopted, and a row whose own partition is gone stays
-unanchored, refused rather than resolved to such a table.
+one only to the partition of the parent that carries both its name and its range, in whatever schema, the range
+compared as values of the control column's type however the catalog spells them; a table of the same name
+attached over another range is never adopted. A row whose own partition is gone stays unanchored, and `retire`
+and the write block refuse such a table wherever it is, the parent's own schema included (`fail_retain_identity`,
+`fail_write_block_identity`): it is a partition of the parent over another range than the row's.
 
 `retire` takes `SHARE UPDATE EXCLUSIVE` on the partition before it asks whether it is attached, detached or
 pending, and asks the catalog as of that lock, so a detach that starts while `retire` is in flight cannot set

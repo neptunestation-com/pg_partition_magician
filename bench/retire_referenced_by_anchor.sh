@@ -10,7 +10,7 @@
 # referenced retirement off. The file is the acceptance test; this wrapper exists so the mutations have a guard
 # the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# FIVE mutations are required to fail against it (bench/mutations/mutate.py):
+# EIGHT mutations are required to fail against it (bench/mutations/mutate.py):
 #   retire_referenced_by_relname  -- the referenced path resolves its partition by relname again, the pre-fix
 #                                    shape: the namesake is recorded and detached (part A).
 #   retire_yield_by_relname       -- the in-flight check reads another mark's partition by relname again: the
@@ -21,6 +21,12 @@
 #                                    retire() drops the operator's table as the cell's (parts D and F).
 #   child_nsp_fallback_by_relname -- _child_nsp's fallback takes a namesake's schema for an unanchored row without
 #                                    asking for the row's range, and retire() drops the operator's table (E and F).
+#   part_bound_raw_quoted_only    -- a bound is read only in its quoted spelling, so an int4 grid's bare bounds
+#                                    match nothing: no anchor at the upgrade, a moved parent's row not found, and
+#                                    adopt_partition refuses (parts H, I and J).
+#   retire_unanchored_stranger_unchecked -- retire() does not compare an unanchored row's relation by its range,
+#                                    and drops the operator's table in the parent's own schema (part G).
+#   write_block_unanchored_stranger_unchecked -- the write block goes on that table (part G).
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). The file re-runs install.sql through the psql variable `install`, set here to the copy under test.
