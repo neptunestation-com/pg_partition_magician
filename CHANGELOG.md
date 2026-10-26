@@ -20,15 +20,6 @@
   `bench/native_bound_reach_every_offset.sh`; mutations `native_bound_reach_civil_zones`,
   `native_bound_reach_sixteen_hours`, `native_bound_reach_dst_hour`, `ts_text_unreadable_offset`,
   `native_named_any_offset` and `native_bound_reach_unreadable_offset_widened`.
-  and UTC+14 for a `lo`, the zones tzdata names today. A session goes further: `SET` accepts a POSIX zone to
-  167:59:60 either side of UTC (`'XYZ167:59:60'` is UTC-168), an interval or a number of hours to just under that,
-  and tzdata's LMT reaches -15:56:08 (Asia/Manila before 1845). A `hi` such a session wrote read below its own
-  `lo`, the partition re-created over the chunk was not held, and the archive step PUT it over the retired
-  chunk's object, the only copy of the dropped rows. The reach is now 168 hours either side, PostgreSQL's limit,
-  so such a chunk can hold the week of partitions next to it until the operator writes the bound with its offset,
-  the remedy `skip_archive_retired_range` names (its text now says how wide the reach is). Test `tests/354`
-  (`tests/347` moved to fixtures a week apart); guard `bench/native_bound_reach_every_offset.sh`; mutations
-  `native_bound_reach_civil_zones` and `native_bound_reach_sixteen_hours`.
 - **Four more archive tests judge a Parquet object by identity** (#1376). `tests/archive/db/26` Part B judged the
   t26a object by being larger than t26b's 3-row file, so an object holding 10 of t26a's 20 rows passed;
   `tests/archive/db/42` and `tests/archive/db/48` asked only `octet_length > 0` of the object the documented
