@@ -35,9 +35,17 @@ if [ ! -f "$S" ]; then bad "fixture: the script under test exists" "$S"; exit 1;
 
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/decoy"
-for tool in dirname python3 mktemp rm seq sleep cat; do
+for tool in dirname mktemp rm seq sleep cat; do
   p=$(command -v "$tool") && ln -s "$p" "$T/bin/$tool"
 done
+# python3 by the interpreter itself, not by `command -v`: a pyenv or asdf shim on PATH is a script that needs
+# bash, its own PATH and HOME, none of which the isolated run below gives it, so linking the shim would fail the
+# script's server and PNG check for a reason that has nothing to do with CHROME.
+if py=$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))' 2>/dev/null) && [ -x "$py" ]; then
+  ln -s "$py" "$T/bin/python3"
+else
+  bad "fixture: the real python3 interpreter was resolved" "${py:-python3 did not run}"; exit 1
+fi
 browser() { # <path> <tag>: a stand-in browser that records <tag> and writes a PNG header to --screenshot=
   cat > "$1" <<FAKE
 #!/bin/bash
