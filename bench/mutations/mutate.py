@@ -2400,8 +2400,8 @@ MUTATIONS = {
         "final delete, and gone unapplied. The fine child keeps the pre-change row and the swap "
         "attaches it. tests/124 fails against this on id 150000 reading 'orig' after a clean swap, on "
         "the witness that T1's capture survived the tick, and on the tick's consumed-row count.",
-        [("  execute format('delete from %I.%I k where %s', v_dnsp, v_delta, v_batch) using v_seqs, v_rows;\n",
-          "  execute format('delete from %I.%I where %I <= %s and %s', v_dnsp, v_delta, v_seq,\n"
+        [("  execute format('delete from %s k where %s', v_dreg::text, v_batch) using v_seqs, v_rows;\n",
+          "  execute format('delete from %s where %I <= %s and %s', v_dreg::text, v_seq,\n"
           "                 (select max(s) from unnest(v_seqs) s), v_elig);\n", 1)],
     ),
     "set_archive_fn_no_return_type_check": (
@@ -2477,8 +2477,8 @@ begin
      where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
        and convalidated
   loop
-    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
-    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+    execute format('alter table %s add constraint %I %s not valid', v_copy::text, r.conname, r.def);
+    execute format('alter table %s validate constraint %I', v_copy::text, r.conname);
   end loop;
 """, "", 1),
          ("     where k.contype = 'f' and k.conparentid = 0\n",
@@ -8684,10 +8684,10 @@ select ok(
         "the role that ran the regrain, and the swap attaches it so. One site. tests/256 catches it on the "
         "regrain's two fine children. Since #949 the child is minted owner-only at its creation too, so both "
         "resets go (the creation-time one is owned like the parent instead, as before #949).",
-        [("      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875\n",
+        [("      perform pgpm._acl_reset(v_copy, true);   -- #875\n",
           "", 1),
-         ("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);\n",
-          "      perform pgpm._own_like_parent(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- MUTANT\n", 1)],
+         ("      perform pgpm._scratch_mint(p_parent, v_copy);\n",
+          "      perform pgpm._own_like_parent(p_parent, v_copy);\n", 1)],
     ),
     "transmute_incoming_gate_accepts_not_valid": (
         "bench/incoming_not_valid_refused.sh",
@@ -8840,7 +8840,7 @@ select ok(
         "Pre-#949 regrain_step: a fine child keeps the creating role's default privileges from its CREATE until "
         "its sub-range's last short batch, so between ticks a role they name reads every row copied so far, "
         "past the parent's row security. tests/267 stage A catches it.",
-        [("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);\n", "", 1)],
+        [("      perform pgpm._scratch_mint(p_parent, v_copy);\n", "", 1)],
     ),
     "scratch_regrain_owner_not_followed": (
         "bench/scratch_relations.sh",
@@ -14054,14 +14054,14 @@ MUTATIONS["regrain_copy_validates_not_valid_check"] = (
     [("""  for r in
     select c.conname
       from pg_constraint k
-      join pg_constraint c on c.conrelid = format('%I.%I', p_nsp, p_name)::regclass and c.contype = k.contype
+      join pg_constraint c on c.conrelid = v_copy and c.contype = k.contype
      where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
        and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
        and case when k.contype = 'c' then c.conname = k.conname
                 else (select a.attname from pg_attribute a where a.attrelid = k.conrelid and a.attnum = k.conkey[1])
                    = (select a.attname from pg_attribute a where a.attrelid = c.conrelid and a.attnum = c.conkey[1]) end
   loop
-    execute format('alter table %I.%I drop constraint %I', p_nsp, p_name, r.conname);
+    execute format('alter table %s drop constraint %I', v_copy::text, r.conname);
   end loop;
 """, "", 1)],
 )
@@ -16092,7 +16092,7 @@ MUTATIONS["delete_checked_unverified"] = (
 MUTATIONS["truncate_checked_unverified"] = (
     "bench/retire_locks_by_oid.sh",
     "pgpm._truncate_checked does not look at the delta's relfilenode: regrain_cancel's TRUNCATE (and the swap's) empties a namesake a schema rename put under the name while it waited behind a captured write, with the schemas swapped back or not, and returns as if it had emptied its own delta (P2-02). One clause. tests/345 parts L and L2 catch it.",
-    [("  perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn\n    or (pg_relation_size(p_rel) = 0\n        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),\n    p_rel, p_what);\n", '', 1)],
+    [("  perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn\n    or (pg_relation_size(p_rel) = 0 and v_held),\n    p_rel, p_what);\n", '', 1)],
 )
 MUTATIONS["write_block_create_unverified"] = (
     "bench/retire_locks_by_oid.sh",
@@ -16420,6 +16420,78 @@ MUTATIONS["hypertable_drain_appends_step_source_unlocked"] = (
 )
 MUTATION_SRC["hypertable_drain_appends_step_source_unlocked"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_appends_step_source_unlocked"] = "timescale"
+
+# #1362 and #1358 (pass 13, the regrain family of the by-name-after-a-wait class): each statement regrain_step and
+# its reconcile make on a relation pgpm identified by oid locks that oid first, in the statement's own mode, and names
+# it under the lock; the copy's making hands it back by the oid its CREATE made. bench/regrain_swap_detach_by_oid.sh
+# runs tests/349 and bench/regrain_copy_by_oid.sh runs tests/350. One mutation per site.
+MUTATIONS["regrain_swap_detach_unlocked"] = (
+    "bench/regrain_swap_detach_by_oid.sh",
+    "Issue #1362: regrain_step's swap DETACHes the source with no lock by oid on the parent or the source first. The "
+    "DETACH waits for ACCESS EXCLUSIVE on the parent behind a reader and resolves both names again once granted, so a "
+    "schema renamed aside with a namesake partitioned table and partition committed during the wait has the stranger's "
+    "partition detached from the stranger's table, while the swap goes on by oid and reports success. The two locks "
+    "before the DETACH. tests/349 parts A (the stranger's partition detached) and C (the DETACH fails on the "
+    "stranger's partition) catch it.",
+    [("  perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));\n"
+      "  perform pgpm._lock_oid_or_raise(v_child, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));\n",
+      "", 1)],
+)
+MUTATIONS["regrain_copy_batch_unlocked"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358: regrain_step's copy batch INSERTs with no lock by oid on the copy or the source first, so the "
+    "INSERT waits for its locks by name and resolves the names again once granted: a schema renamed aside during the "
+    "wait sends the batch from a namesake source or into a namesake copy, and the short batch advances the cursor "
+    "past rows the copy pgpm recorded never got, which the swap then drops with the source. The two locks before "
+    "the INSERT. tests/350 parts A (the namesake copy filled, the cursor past [0, 500), ids lost at the swap) and B "
+    "(the namesake's stale rows copied and served) catch it.",
+    [("    perform pgpm._lock_oid_or_raise(v_copy, 'row exclusive', true, format('regrain_step(%s), copying a batch,', p_parent));\n"
+      "    perform pgpm._lock_oid_or_raise(v_child, 'access share', true, format('regrain_step(%s), copying a batch,', p_parent));\n",
+      "", 1)],
+)
+MUTATIONS["regrain_copy_make_returns_by_name"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358, where a copy is made: _regrain_copy_make hands the copy back by its name once its statements have "
+    "run, not by the oid its CREATE made. An outgoing key's ADD waits for its referenced table behind a writer, and a "
+    "schema renamed aside during that wait makes the name denote a namesake, which the caller then mints (its grants "
+    "revoked), constrains with the bound CHECK, anchors in pgpm.part and fills with the batch. One clause, the return. "
+    "tests/350 part C catches it.",
+    [("  return v_copy;\nend;\n", "  return format('%I.%I', p_nsp, p_name)::regclass;\nend;\n", 1)],
+)
+MUTATIONS["regrain_reconcile_delta_unlocked"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358, the reconcile's delta: _regrain_reconcile reads and consumes the capture delta with no lock by oid on "
+    "it first, so the batch's read waits for the delta behind a holder and resolves its name again once granted: a "
+    "schema renamed aside during the wait makes it read a namesake's rows as the batch, and the delta pgpm recorded "
+    "is not reconciled that tick. One clause, the lock. tests/350 part D catches it.",
+    [("  perform pgpm._lock_oid_or_raise(v_dreg, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));\n",
+      "", 1)],
+)
+
+MUTATIONS["truncate_checked_inplace_by_catalog_write"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358 (pass 13's F4 hypothesis, built): pgpm._truncate_checked accepts an unchanged relfilenode when the "
+    "relation is empty and this transaction wrote its pg_class row, as it does for a delta it created; but a GRANT "
+    "writes that row too, and the swap tick grants a new writer of the table INSERT on the delta (#496). A "
+    "never-written delta (no page to empty) under that grant passes while the TRUNCATE, waiting behind a reader, "
+    "empties a namesake a schema swap put under its name, and the swap commits. One clause, what the in-place branch "
+    "asks. tests/350 part E catches it.",
+    [("    or (pg_relation_size(p_rel) = 0 and v_held),\n",
+      "    or (pg_relation_size(p_rel) = 0\n"
+      "        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n"
+      "                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),\n", 1)],
+)
+MUTATIONS["truncate_checked_inplace_by_creation"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "PR #1400 review (codex): pgpm._truncate_checked accepts an in-place TRUNCATE only for a relation this transaction "
+    "created. PostgreSQL also truncates in place a relation whose file this transaction already replaced, so two "
+    "regrain_cancel calls in one transaction, on a delta an earlier one created, refused the second as a TRUNCATE "
+    "that reached another relation. One clause, what the in-place branch asks. tests/350 part E2 catches it.",
+    [("    or (pg_relation_size(p_rel) = 0 and v_held),\n",
+      "    or (pg_relation_size(p_rel) = 0\n"
+      "        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n"
+      "                            + (select a.xmin::text::bigint from pg_attribute a where a.attrelid = p_rel and a.attnum = -1))::text::xid8) = 'in progress'),\n", 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
