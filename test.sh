@@ -1371,6 +1371,8 @@ run_perf() {
     "bench/verify_parquet_tests_see_rows.sh pgpm_perf427"
     "bench/fix_phase_assign_commands.sh pgpm_perf433"
     "bench/screenshot_chrome_override.sh pgpm_perf434"
+    "bench/schema_swap_leftovers.sh pgpm_perf439"
+    "bench/by_name_after_wait_lint.sh pgpm_perf440"
   )
   local selected=()
   local n=${#guards[@]} idx
@@ -1647,6 +1649,10 @@ lint_job_archive_object_keys() {
   python3 scripts/check_archive_child_by_oid.py --selftest
   python3 scripts/check_archive_child_by_oid.py
 }
+lint_job_by_name_statements() {
+  python3 scripts/check_by_name_after_wait.py --selftest
+  python3 scripts/check_by_name_after_wait.py
+}
 lint_job_minifier() {
   python3 scripts/minify_sql.py --selftest
   PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
@@ -1703,6 +1709,7 @@ run_lint() {
     living-docs
     quoted-splices
     archive-object-keys
+    by-name-statements
     minifier
     core-growth
     track-filters

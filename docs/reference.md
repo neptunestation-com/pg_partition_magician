@@ -1775,6 +1775,18 @@ was renamed drains the relations pgpm recorded where they went, and never reads 
 left to drain. The regrain swap's `DETACH` locks the table and the source by OID the same way, and a new regrain
 copy is found by the OID its `CREATE` made, never by its name after a wait.
 
+The same holds for the rest: the frontier read every `obtain`, `extend_to`, `progress` and id-grid retention horizon
+shares, the `CREATE TABLE ... PARTITION OF` of a new partition (made beside the table, in the schema it has under
+the lock) and `_detach_reap`'s `FINALIZE` of an abandoned detach all lock by OID first. A change of owner of a new
+partition, a regrain copy or a capture function must show on the object pgpm identified, and the `DROP FUNCTION` of a
+regrain capture function (by a new regrain's prepare, or by `untransmute`) must have removed the function pgpm
+recorded; otherwise the call refuses, rolled back. A regrain's prepare mints its capture function with a plain
+`CREATE`, so a function another session committed under that name while the prepare waited is refused
+(`function ... already exists with same argument types`) and the tick rolls back, rather than having its body
+replaced; drop or rename that function and the next tick prepares again. Every statement of the four install files
+that names a relation or a function pgpm identified is held to one of these, or says why it need not be, by a lint
+CI runs (`scripts/check_by_name_after_wait.py`).
+
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already
 has stay where they were, and the ones pgpm creates afterwards go in the parent's new schema. The

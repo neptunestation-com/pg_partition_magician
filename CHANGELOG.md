@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **Every statement on a relation or function pgpm identified reaches it, or refuses** (the schema-swap class:
+  #1358, #1362, #1366 and the statements their fixes did not own). A statement that names a table or function pgpm
+  identified by oid renders the name before it waits for its lock and resolves it again once granted, and a schema
+  renamed aside during the wait, with a namesake committed in its place, is what it reached. `_frontier_native`'s
+  read (the frontier of `obtain`, `extend_to`, `progress` and an id grid's retention horizon), `_create_partition`'s
+  `CREATE TABLE ... PARTITION OF` and `_detach_reap`'s `FINALIZE` now lock by oid first and name the relation under
+  the lock; `_own_like_parent`, `_scratch_mint_fn` and `_scratch_owner_follow`'s function branch check the new owner
+  on the oid; the regrain capture function's `DROP` (by the prepare and by `untransmute`) goes through
+  `pgpm._drop_fn_by_oid`, which checks the oid is gone; and the prepare mints the capture function with a plain
+  `CREATE`, so a function committed under its name during the prepare's waits is refused instead of replaced. The
+  class is closed in the text by `scripts/check_by_name_after_wait.py` (the `By-name statements` lint job): every
+  such statement in the four install files is locked by oid before it, checked by its effect after it, or carries a
+  `-- by-name-ok:` reason. `tests/359` and `tests/360` are the acceptance tests; `bench/schema_swap_leftovers.sh`
+  runs them against `frontier_native_unlocked`, `create_partition_parent_unlocked`, `detach_reap_finalize_unlocked`,
+  `own_like_parent_unchecked`, `scratch_mint_fn_unchecked`, `scratch_owner_follow_fn_unchecked`,
+  `capture_fn_create_or_replace` and `drop_fn_by_oid_unchecked`, and `bench/by_name_after_wait_lint.sh` judges the
+  lint against four mutants of it.
+
 - **`bench/guards_run_on_clean_code.sh` credits only the tracks `test.sh` runs** (#1385). It counted a guard as
   run against the unmodified code when any `run_<track>()` body named it, though `test.sh` runs a track only by
   calling its function, so a guard whose only call sat in a `run_*` function nothing called (run against its
