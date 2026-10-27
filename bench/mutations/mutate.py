@@ -7285,9 +7285,7 @@ select ok(
         "nothing of the parent's replica identity, which PostgreSQL does not give it either, so the parent "
         "is right and every forward partition has the default. tests/207's forward-partition assertions in "
         "parts A to D catch it.",
-        [("  perform pgpm._replica_identity_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,\n"
-          "                                             format('%I.%I', p_nsp, p_name)::regclass);   -- #782\n",
-          "", 1)],
+        [("  perform pgpm._replica_identity_like_parent(v_parent, v_child);   -- #782\n", "", 1)],
     ),
     "regrain_swap_replica_identity_dropped": (
         "bench/cutover_replica_identity.sh",
@@ -8675,8 +8673,7 @@ select ok(
         "transmute's forward grid mints keeps the maintaining role's ALTER DEFAULT PRIVILEGES, so a role revoked "
         "on the table reads it by naming it. One site. tests/256 catches it on the transmute, obtain and "
         "extend_to partitions.",
-        [("  perform pgpm._acl_reset(format('%I.%I', p_nsp, p_name)::regclass, true);   -- #875: the owner's alone\n",
-          "", 1)],
+        [("  perform pgpm._acl_reset(v_child, true);   -- #875: the owner's alone\n", "", 1)],
     ),
     "regrain_fine_child_acl_unreset": (
         "bench/acl_grantor_owner_partitions.sh",
@@ -10807,7 +10804,7 @@ MUTATION_SRC['forget_missing_survivors_by_count'] = 'tests/79_status_survives_dr
 # the other). HELD is the code as it stands (#1057: the delta written only under a lock that pins it to the
 # name used); UNLOCKED is #1051's and #1037's (the to_regclass check, then a static insert that resolves the
 # name again after any wait); STATIC is pre-#1051 and pre-#1037 (the insert by the minted name alone).
-CAPTURE_HELD_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+CAPTURE_HELD_CORE = """  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
     declare
       d regclass;
       n text;
@@ -10868,7 +10865,7 @@ CAPTURE_HELD_CORE = """  execute format('create or replace function %I.%I() retu
     format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
     format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
 """
-CAPTURE_UNLOCKED_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+CAPTURE_UNLOCKED_CORE = """  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
     declare
       d regclass;
     begin
@@ -10906,7 +10903,7 @@ CAPTURE_UNLOCKED_CORE = """  execute format('create or replace function %I.%I() 
     v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
     v_nsp, v_delta, v_keycols_q, v_newvals_q);
 """
-CAPTURE_STATIC_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+CAPTURE_STATIC_CORE = """  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
     begin
       if tg_op = ''DELETE'' then
         insert into %I.%I (%s) values (%s); return old;
@@ -16592,6 +16589,119 @@ MUTATIONS["upgrade_create_body_column_no_backfill"] = (
       "  obtain_note      text,\n", 1)],
 )
 
+# The schema-swap class as one lever (the pass-13 record): the statements the per-family fixes (#1399, #1400, #1402)
+# did not own, each locked by oid first or checked by its effect after. bench/schema_swap_leftovers.sh runs tests/359
+# and tests/360 against the mutant; one mutation per clause.
+MUTATIONS["frontier_native_unlocked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_frontier_native reads the parent by a name rendered before the read waits for ACCESS SHARE behind a holder of "
+    "ACCESS EXCLUSIVE, with no lock by oid first, so a schema swapped during the wait makes a namesake's maximum the "
+    "frontier (obtain's, extend_to's, progress's, and an id grid's retention horizon). One clause, the lock. tests/359 "
+    "part A catches it.",
+    [("  perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'reading the write frontier');\n", "", 1)],
+)
+MUTATIONS["create_partition_parent_unlocked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_create_partition does not lock the parent by oid before its CREATE TABLE ... PARTITION OF, so the CREATE waits "
+    "for ACCESS EXCLUSIVE by the parent's name and, after a schema swap during the wait, reaches the namesake parent "
+    "(its effect check then refuses the tick, and the managed table goes without the partition). One clause, the "
+    "lock. tests/359 part B catches it.",
+    [("  perform pgpm._lock_oid_or_raise(v_parent, 'access exclusive', true, 'obtain, creating a partition,');\n", "", 1)],
+)
+MUTATIONS["detach_reap_finalize_unlocked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_detach_reap's FINALIZE takes no lock by oid first, so it waits for ACCESS EXCLUSIVE on the partition by name "
+    "and, after a schema swap during the wait, reaches the namesakes: the abandoned detach it identified is left "
+    "pending and fail_detach_reap logged. One clause, the locks. tests/359 part F catches it.",
+    [("      perform pgpm._lock_oid_or_raise(r.parent, 'share update exclusive', true, '_detach_reap');\n"
+      "      perform pgpm._lock_oid_or_raise(r.child_oid::regclass, 'access exclusive', true, '_detach_reap');\n", "", 1)],
+)
+MUTATIONS["own_like_parent_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_own_like_parent's ALTER TABLE ... OWNER is not checked by its effect on the child's oid, so a schema swapped "
+    "while it waits behind the child's readers hands the namesake table to the parent's owner. One clause, the "
+    "effect check. tests/360 part C catches it.",
+    [("    perform pgpm._effect_or_raise((select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_child) = v_owner,\n"
+      "                                  p_child, 'handing a new relation to its parent''s owner');\n", "", 1)],
+)
+MUTATIONS["scratch_mint_fn_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_scratch_mint_fn's ALTER FUNCTION ... OWNER is not checked by its effect on the function's oid, so a schema "
+    "swapped while it waits for the function's lock hands the namesake function to the parent's owner. One clause, "
+    "the effect check. tests/360 part D catches it.",
+    [("    perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = p_fn) = v_owner, p_fn,\n"
+      "                                  'handing a capture function to its parent''s owner');\n", "", 1)],
+)
+MUTATIONS["scratch_owner_follow_fn_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_scratch_owner_follow's function branch does not check its ALTER FUNCTION ... OWNER by the function's oid "
+    "(F9's hypothesis), so a schema swapped while it waits for the capture function's lock hands a namesake to the "
+    "new owner. One clause, the effect check. tests/360 part E catches it.",
+    [("      perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = r.oid) = v_want, r.oid,\n"
+      "                                    format('%s, handing a scratch function to %I,', p_what, v_want_n));\n", "", 1)],
+)
+MUTATIONS["capture_fn_create_or_replace"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_regrain_capture_install mints the capture function with CREATE OR REPLACE again, under the name it found free "
+    "before its waits, so a function committed under that name during one (a namesake schema swapped in while the "
+    "previous delta's DROP waits) has its body replaced by pgpm's capture (#1357's residue). One clause, the "
+    "statement's verb. tests/360 part G catches it.",
+    [("  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$\n",
+      "  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$\n", 1)],
+)
+MUTATIONS["drop_fn_by_oid_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "pgpm._drop_fn_by_oid does not ask whether the function's oid is gone after its DROP FUNCTION, the shape "
+    "_regrain_capture_install's and untransmute's drops had: the DROP waits for the function's lock and looks the "
+    "name up again, so a schema swapped during the wait drops the operator's function and leaves pgpm's. One "
+    "clause, the effect check. tests/360 part H catches it.",
+    [("  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what);\n", "", 1)],
+)
+
+# The class's static exhaustiveness check (scripts/check_by_name_after_wait.py). bench/by_name_after_wait_lint.sh
+# judges a mutant of the checker on its own fixtures; one mutation per recogniser clause.
+MUTATIONS["by_name_lint_lock_any_object"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker counts a lock by oid on ANY relation of the unit as covering a by-name statement, so a statement "
+    "on a relation nothing locked passes beside a lock on another. One clause, the object match.",
+    [("            if any(p < st['start'] and obj in cov for p, cov in locks):\n",
+      "            if any(p < st['start'] for p, cov in locks):\n", 1)],
+)
+MUTATIONS["by_name_lint_effect_anywhere_after"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker counts an effect check anywhere after a by-name statement as covering it, so an unchecked DROP "
+    "followed by another statement and that one's check passes. One clause, the bound at the next statement.",
+    [("        effect = any(st['end'] <= p < nxt for p in effects)\n",
+      "        effect = any(st['end'] <= p for p in effects)\n", 1)],
+)
+MUTATIONS["by_name_lint_pairs_unread"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker does not read a `%I.%I` pair as an object name, so a statement naming a schema and a name read "
+    "earlier passes unjudged. One clause, the pair recogniser.",
+    [("            if x[2] == 'I' and y[2] == 'I' and fmt[x[1]:y[0]] == '.' and x[0] not in in_pair:\n",
+      "            if False:\n", 1)],
+)
+MUTATIONS["by_name_lint_mark_in_literal"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker reads a `by-name-ok:` mark in a string literal as a reason, so a statement whose own text carries "
+    "the words passes unreviewed. One clause, the comment spans.",
+    [("    for a, b in coms:                       # a mark counts only in a comment, never in a literal\n",
+      "    for a, b in coms + [(x[0], x[1]) for x in lits if x[0] != 'body']:\n", 1)],
+)
+MUTATION_SRC.update({_m: "scripts/check_by_name_after_wait.py" for _m in (
+    "by_name_lint_lock_any_object", "by_name_lint_effect_anywhere_after", "by_name_lint_pairs_unread",
+    "by_name_lint_mark_in_literal")})
+
+
+# One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two
+# lines of an anchor. See main().
+_BY_NAME_MARKS = r"(?:[ \t]*-- by-name-ok:[^\n]*\n(?:[ \t]*--   [^\n]*\n)*)*"
+
+
+def _mark_tolerant(find):
+    return re.compile(("\n" + _BY_NAME_MARKS).join(re.escape(p) for p in find.split("\n")))
+
+
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
         for name, e in late_survivors().items():
@@ -16657,6 +16767,13 @@ def main() -> int:
     for find, replace, expected in edits:
         is_re = hasattr(find, "sub")
         got = len(find.findall(text)) if is_re else text.count(find)
+        if got != expected and not is_re and "\n" in find:
+            # a `-- by-name-ok:` review mark (scripts/check_by_name_after_wait.py) is a comment between two lines of
+            # code, never code: an anchor written before a mark landed between its lines still names the same code
+            tolerant = _mark_tolerant(find)
+            if len(tolerant.findall(text)) == expected:
+                text = tolerant.sub(lambda _m, _r=replace: _r, text)
+                continue
         if got != expected:
             print(
                 f"mutate.py: {name}: pattern matched {got} time(s), expected {expected}.\n"
