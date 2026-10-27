@@ -15,17 +15,18 @@
 -- same partitions over the same chunks from every session's TimeZone, DateStyle and abbreviation set. A bound with
 -- an offset is the instant it names. A RETIRED chunk's bound that names no instant by itself was written in a
 -- session nothing recorded, so it is read at its widest (#1336; tests/347 holds the rest of that contract): its
--- wall time under MDY and under DMY, a lo at UTC+14 and a hi at UTC-12, whatever zone the text names. A
--- PARTITION's own bound with no offset (pgpm writes none, an operator's hand might) is wall time in the grid's own
--- zone, config.partition_tz; a DateStyle-shaped one reads as ISO, MDY, the style _ts_text writes every bound in; a
--- zone abbreviation (a pre-#500 render under DateStyle SQL ends in one) reads in the Default set (part I).
+-- wall time under MDY and under DMY, a lo 169 hours east and a hi 168 hours west of UTC (#1363), whatever zone
+-- the text names. A PARTITION's own bound with no offset (pgpm writes none, an operator's hand might) is wall time
+-- in the grid's own zone, config.partition_tz; a DateStyle-shaped one reads as ISO, MDY, the style _ts_text writes
+-- every bound in; a zone abbreviation (a pre-#500 render under DateStyle SQL ends in one) reads in the Default set
+-- (part I).
 --
 -- THE FIXTURE. The grid is registered in Asia/Tokyo (+09). Five retired chunks, every one of them read differently
 -- by some session below, and each check names the partitions and the chunks:
---   gone_a  [p0.lo - 6h, p0.lo - 3h)  hi offset-less: ends below p0 on Tokyo's clock, and 18 hours into it at
---                                     UTC-12, so it holds p0
+--   gone_a  [p0.lo - 6h, p0.lo - 3h)  hi offset-less: ends below p0 on Tokyo's clock, and into it at its widest,
+--                                     so it holds p0
 --   gone_b  [p0.lo - 4h, p0.lo + 3h)  hi offset-less: reaches into p0 on Tokyo's clock; not from Pacific/Kiritimati
---   gone_c  [p1.lo + 2h, p1.lo + 5h)  lo offset-less: inside p1 on Tokyo's clock; reaches into p0 at UTC+14, and
+--   gone_c  [p1.lo + 2h, p1.lo + 5h)  lo offset-less: inside p1 on Tokyo's clock; reaches into p0 at its widest, and
 --                                     is empty (lo past hi) from UTC
 --   gone_d  [11/03/2026, 11/04/2026)  both offset-less and DateStyle-shaped: 3 November (inside p1) as MDY,
 --                                     11 March (inside p0) as DMY, so at its widest it spans both
@@ -121,7 +122,7 @@ reset datestyle;
 set timezone = 'Asia/Tokyo';
 
 -- G. A UTC grid read from Tokyo: gone_u's hi, read on Tokyo's clock, ends at 18:00 UTC on 31 December, below the
--- first partition's lo; at its widest it reaches 15:00 UTC on 1 January, inside it.
+-- first partition's lo; at its widest it reaches 8 January 03:00 UTC, inside it.
 create table t334.u (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 set timezone = 'UTC';
 insert into t334.u (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;

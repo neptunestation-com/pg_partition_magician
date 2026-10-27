@@ -1479,9 +1479,21 @@ $$;
 -- IS the defect. Pinned to ISO only, not to a zone: the offset carried in the text makes the instant
 -- exact whatever zone rendered it. bench/mutations/mutate.py's datestyle_session_render removes the
 -- clause to put the defect back.
+--
+-- AN OFFSET POSTGRESQL CAN READ BACK (#1363). A session's TimeZone can sit up to 169 hours from UTC (a POSIX zone,
+-- see pgpm._native_bound_reach), but timestamptz input reads an offset only to 15:59:59: from a session at 'XYZ20'
+-- the text was '2025-12-25 05:00:00-20', which no session can cast, and a ledger hi in that shape raised out of every
+-- later archive step of the parent. So an instant whose offset in the caller's zone is 16 hours or more is
+-- rendered in UTC (pgpm._ts_text_utc): the same instant, in text every session reads. Any other is rendered as
+-- before, in the caller's zone.
+create or replace function pgpm._ts_text_utc(p_ts timestamptz)
+returns text language sql stable set datestyle = 'ISO, MDY' set timezone = 'UTC' as $$
+  select p_ts::text;
+$$;
 create or replace function pgpm._ts_text(p_ts timestamptz)
 returns text language sql stable set datestyle = 'ISO, MDY' as $$
-  select p_ts::text;
+  select case when abs(coalesce(extract(timezone from p_ts), 0)) < 57600 then p_ts::text
+              else pgpm._ts_text_utc(p_ts) end;
 $$;
 
 -- The SQL for "the greatest hi among the rows a query selects, as canonical native text" (#500): the
@@ -5136,10 +5148,13 @@ create index if not exists archive_ledger_parent_child_hi_idx on pgpm.archive_le
 -- instant per reading session: before #977 a strategy's covered_hi was stored as written ('2026-10-15 06:00:00')
 -- after a check in whatever session ran the archive step (pg_cron's, an operator's), and that session's TimeZone
 -- and DateStyle were recorded nowhere, so no reading, the caller's or the grid's, is provably the one checked.
+-- The offset must be one timestamptz input reads, to 15:59:59 (#1363): a session can be further out (a POSIX zone,
+-- to 169 hours), and its render ('2026-01-04 15:00:00-20') names no instant any session can cast, so it is
+-- treated as naming none rather than cast where nothing can read it.
 create or replace function pgpm._native_named(p_kind text, p_text text)
 returns boolean language sql immutable as $$
   select p_kind = 'id' or p_text ~ ('^(-?infinity|[0-9]{4,}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?'
-                                     || '[+-][0-9]{2}(:[0-9]{2}){0,2}( BC)?)$');
+                                     || '[+-](0[0-9]|1[0-5])(:[0-5][0-9]){0,2}( BC)?)$');
 $$;
 
 -- A native bound's position as a number (#1163): the value itself for an id kind's text, the epoch for a time
@@ -5798,19 +5813,35 @@ $$;
 -- (p_latest false), the latest for a hi. Text that names its instant (pgpm._native_named) is that instant. Any
 -- other text was written in a session whose TimeZone and DateStyle nothing recorded, so it is read as wall time
 -- under each DateStyle that parses it (MDY and DMY: every pre-#500 render carries a four-digit year), ignoring any
--- zone it names, and placed in the zone furthest along: UTC+14 for a lo, UTC-12 for a hi. Nothing narrower is
+-- zone it names, and placed at the furthest offset a session can take: 169 hours east of UTC for a lo, 168 west for a hi (#1363). Not the -12 to
+-- +14 of today's civil zones. PostgreSQL's POSIX TimeZone parser (src/timezone/localtime.c, getsecs) takes an
+-- offset to 167:59:60, so 'XYZ167:59:60' is UTC-168 and 'XYZ-167:59:60' UTC+168, and a DST name with no offset
+-- of its own is one hour east of standard, unchecked: 'XYZ-167:59:60DEF' is UTC+169 in summer. An interval or a
+-- number of hours reaches just under 168, and tzdata's LMT -15:56:08 (Asia/Manila before 1845). Nothing narrower is
 -- safe: the chunk is the record of the only copy of its rows, and a partition it does not hold is archived to its
 -- key. Text nothing parses (a strategy's covered_hi in another encoding, a named shape with month 13) could be
 -- anywhere, so it reaches as far as a bound can, -Infinity for a lo and Infinity for a hi, rather than raising out of
 -- every archive step and retain() of the parent (#1351's P1-02). The SET clauses keep the DateStyle it sets to the call.
+-- One shape names its instant but cannot be cast (#1363): _ts_text's render from a session 16 hours or more from
+-- UTC, year first with the offset that session had ('2025-12-19 10:00:00-20'), which timestamptz input refuses past
+-- 15:59:59. It is read exactly, its wall time less its offset, not widened.
 create or replace function pgpm._native_bound_reach(p_kind text, p_text text, p_tz text, p_latest boolean)
 returns numeric language plpgsql stable set datestyle = 'ISO, MDY' set timezone_abbreviations = 'Default' as $$
-declare v numeric; v_w numeric; v_ds text;
+declare v numeric; v_w numeric; v_ds text; v_m text[];
 begin
+  v_m := regexp_match(p_text, '^([0-9]{4,}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)([+-])([0-9]{2,3})'
+                              || '(?::([0-5][0-9]))?(?::([0-5][0-9]))?( BC)?$');
   if p_text is null or pgpm._native_named(p_kind, p_text) then
     begin
       return pgpm._native_bound_key(p_kind, p_text, p_tz);
     exception when data_exception then null;   -- the shape of a bound but no value: unplaceable
+    end;
+  elsif p_kind <> 'id' and v_m is not null then
+    begin
+      return extract(epoch from (v_m[1] || coalesce(v_m[6], ''))::timestamp)
+             - case when v_m[2] = '-' then -1 else 1 end
+               * (v_m[3]::int * 3600 + coalesce(v_m[4]::int, 0) * 60 + coalesce(v_m[5]::int, 0));
+    exception when data_exception then null;   -- unplaceable, as above
     end;
   else
     foreach v_ds in array array['ISO, MDY', 'ISO, DMY'] loop
@@ -5823,7 +5854,7 @@ begin
     end loop;
   end if;
   if v is null then return case when p_latest then 'Infinity' else '-Infinity' end::numeric; end if;
-  return v + case when p_latest then 43200 else -50400 end;
+  return v + case when p_latest then 604800 else -608400 end;
 end;
 $$;
 
@@ -6147,7 +6178,7 @@ begin
                          '. If they are, because %I is the relation those chunks were read from, renamed (an upgrade cannot tell that from a drop), the rows are in a live partition: once you have confirmed it holds them, delete the retired rows recorded under %s (delete from pgpm.archive_ledger where parent_table = %L::regclass and child_name = <that name> and retired_at is not null) and it archives afresh',
                          r.child_name, r.other_names, p_parent::text) else '' end,
                        case when r.unnamed is not null then format(
-                         '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach in any zone from UTC-12 to UTC+14 and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
+                         '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach at any offset a session can take (to 168 hours west of UTC and 169 east) and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
                          r.unnamed, p_parent::text) else '' end));
     end if;
   end loop;

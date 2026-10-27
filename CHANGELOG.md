@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **A retired chunk's offset-less bound reaches every offset a session can take** (#1363). `pgpm._native_bound_reach`
+  widened a retired ledger row's bound that names no instant (a pre-#977 `covered_hi`) only to UTC-12 for a `hi`
+  and UTC+14 for a `lo`, the zones tzdata names today. A session goes further: a POSIX `TimeZone` takes an offset
+  to 167:59:60 either side of UTC (`'XYZ167:59:60'` is UTC-168), a DST name with no offset of its own is an hour
+  east of that (`'XYZ-167:59:60DEF'` is UTC+169 in summer), and tzdata's LMT reaches -15:56:08 (Asia/Manila
+  before 1845). A `hi` such a session wrote read below its own `lo`, the partition re-created over the chunk was
+  not held, and the archive step PUT it over the retired chunk's object, the only copy of the dropped rows. The
+  reach is now 168 hours west for a `hi` and 169 east for a `lo`, so such a chunk can hold the week of partitions
+  next to it until the operator writes the bound with its offset, the remedy `skip_archive_retired_range` names
+  (its text now says how wide the reach is). A session that far out also renders an instant with an offset
+  `timestamptz` input refuses past 15:59:59: `pgpm._ts_text` wrote it into the ledger from an archive step run
+  there, and `pgpm._native_named` took such text for a castable bound, so every later archive step of the parent
+  raised. `pgpm._ts_text` now renders an instant 16 hours or more from UTC in the caller's zone in UTC,
+  `pgpm._native_named` names only an offset input reads, and a bound with a larger one is read as the instant it
+  names. Test `tests/354` (`tests/347` moved to fixtures a week apart); guard
+  `bench/native_bound_reach_every_offset.sh`; mutations `native_bound_reach_civil_zones`,
+  `native_bound_reach_sixteen_hours`, `native_bound_reach_dst_hour`, `ts_text_unreadable_offset`,
+  `native_named_any_offset` and `native_bound_reach_unreadable_offset_widened`.
 - **Four more archive tests judge a Parquet object by identity** (#1376). `tests/archive/db/26` Part B judged the
   t26a object by being larger than t26b's 3-row file, so an object holding 10 of t26a's 20 rows passed;
   `tests/archive/db/42` and `tests/archive/db/48` asked only `octet_length > 0` of the object the documented
