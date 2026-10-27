@@ -3091,9 +3091,10 @@ begin
   -- The parent by oid first, in the CREATE's own mode (the schema-swap class). CREATE TABLE ... PARTITION OF waits
   -- for ACCESS EXCLUSIVE on the parent behind any reader and resolves both names again once granted, so a schema
   -- renamed aside during that wait, with a namesake schema and partitioned table committed in its place, got the new
-  -- partition: the operator's table took a range of pgpm's, pgpm.part recorded it under the namesake's oid, and the
-  -- managed table had no partition for the range. Locked by oid, the parent's schema and name are read under the
-  -- lock, and the partition is made beside it there (p_nsp and p_rel are the caller's reading, before any wait).
+  -- partition: the operator's table took a range of pgpm's, and the tick then failed on its own lookups by name or,
+  -- with a table of the new partition's name in the namesake schema too, re-owned and recorded that table. Locked by
+  -- oid, the parent's schema is read under the lock, and the partition is made beside it there (p_nsp and p_rel are
+  -- the caller's reading, before any wait).
   perform pgpm._lock_oid_or_raise(v_parent, 'access exclusive', true, 'obtain, creating a partition,');
   select n.nspname into v_cnsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_parent;
   execute format('create table %I.%I partition of %s for values from (%L) to (%L)',
@@ -6989,10 +6990,10 @@ begin
   -- gets it without a repair step; one already in flight with an origin-only trigger is restarted, and its
   -- capture re-minted here, by the first tick that resumes it (#892, _regrain_capture_unarmed).
   execute format('alter table %s enable always trigger pgpm_regrain_capture', v_src::text);
-  -- the schema-swap class: CREATE TRIGGER waits for SHARE ROW EXCLUSIVE on the source behind its writers (on a
-  -- re-mint, which holds nothing of it yet) and looks the function's name up again after that wait, so a schema
-  -- swapped meanwhile hung the source's capture on a namesake function of the derived name, and the record below
-  -- named that function too. The trigger on the source, by oid, must fire the function made above, by oid.
+  -- the schema-swap class: CREATE TRIGGER waits for SHARE ROW EXCLUSIVE on the source behind its writers (when nothing
+  -- holds the source yet: a re-mint whose previous trigger is gone) and looks the function up by name after that
+  -- wait, so a schema swapped meanwhile hung the source's capture on a namesake function of the derived name, and the
+  -- record below named that function too. The trigger on the source, by oid, must fire the function made above.
   perform pgpm._effect_or_raise(exists (select 1 from pg_trigger t where t.tgrelid = v_src and t.tgname = 'pgpm_regrain_capture'
                                                  and t.tgfoid = v_fn_reg and t.tgenabled = 'A'),
                                 v_src, format('regrain_step(%s), creating the capture trigger,', p_parent));
