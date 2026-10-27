@@ -749,8 +749,8 @@ ARCHIVE_CHUNK_TIES_BLOCK = """    if not pgpm._native_gt(cfg.control_kind, v_sto
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
-      execute format('select %s from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
-                     v_cval_q, v_nsp, p_child, cfg.control_column,
+      execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',
+                     v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
                                   cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
@@ -3692,9 +3692,9 @@ $$;''',
         "_archive_fully_covered stays false and retain() never drops the aged partition. tests/125 "
         "catches it twice: the direct _next_archive_chunk call on the frozen monolith dies, and part (C) "
         "finds skip_archive rows where the ledger should cover the aged month.",
-        [("    'with w as (select t.%I as c, %s as c_text from %I.%I t where t.%I >= %L order by t.%I limit %s)\n"
+        [("    'with w as (select t.%I as c, %s as c_text from %s t where t.%I >= %L order by t.%I limit %s)\n"
           "     select (select count(*) from w), (select w.c_text from w order by w.c desc limit 1)',\n"
-          "    cfg.control_column, v_cval_q, v_nsp, p_child, cfg.control_column,\n",
+          "    cfg.control_column, v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,\n",
           "    'select count(*), max(%I)::text from (select %I from %I.%I t where t.%I >= %L order by t.%I limit %s) s',\n"
           "    cfg.control_column, cfg.control_column, v_nsp, p_child, cfg.control_column,\n", 1)],
     ),
@@ -3705,8 +3705,8 @@ $$;''',
         "budget, so a fixture whose partitions each fit one chunk never gets here and a guard would "
         "pass with the defect present; tests/125 part (C) forces the aged month through a 400-byte "
         "budget, asserts that it took several chunks, and so finds the skip_archive rows this puts back.",
-        [("    execute format('select %s from %I.%I t where t.%I > %L order by t.%I asc limit 1',\n"
-          "                   v_cval_q, v_nsp, p_child, cfg.control_column, v_probe_hi_col, cfg.control_column)\n",
+        [("    execute format('select %s from %s t where t.%I > %L order by t.%I asc limit 1',\n"
+          "                   v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column, v_probe_hi_col, cfg.control_column)\n",
           "    execute format('select min(%I)::text from %I.%I t where t.%I > %L',\n"
           "                   cfg.control_column, v_nsp, p_child, cfg.control_column, v_probe_hi_col)\n", 1)],
     ),
@@ -3764,8 +3764,8 @@ $$;''',
         "millisecond, which tests/125_uuidv7_regrain_archive never builds; tests/137's direct pick, its "
         "ledger identity (three chunks, the burst whole in the second) and its retire assertions are what "
         "catch it, through bench/archive_chunk_uuidv7_ties.sh, on PostgreSQL 17.",
-        [("      execute format('select %s from %I.%I t where t.%I >= %L order by t.%I asc limit 1',\n"
-          "                     v_cval_q, v_nsp, p_child, cfg.control_column,\n",
+        [("      execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',\n"
+          "                     v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,\n",
           "      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',\n"
           "                     cfg.control_column, v_nsp, p_child, cfg.control_column,\n", 1),
          ("                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
@@ -8043,7 +8043,7 @@ select ok(
         "only a detach of a partition the forgotten parent was retiring, so another table's dispatch, armed "
         "after the drop, is clobbered. One site, the partition-name match. tests/246 part B catches it.",
         [("                        and right(v_cmd, length(quote_ident(t.child_name)) + 14)\n"
-          "                          = '.' || quote_ident(t.child_name) || ' concurrently')\n",
+          "                          = '.' || quote_ident(t.child_name) || ' concurrently')   -- part-row-by-name: matches a detach command's text, resolves nothing\n",
           "                        )\n", 1)],
     ),
     "forget_missing_disarm_owned": (
@@ -8684,9 +8684,9 @@ select ok(
         "the role that ran the regrain, and the swap attaches it so. One site. tests/256 catches it on the "
         "regrain's two fine children. Since #949 the child is minted owner-only at its creation too, so both "
         "resets go (the creation-time one is owned like the parent instead, as before #949).",
-        [("      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875\n",
+        [("      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875; part-row-by-name: the same\n",
           "", 1),
-         ("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);\n",
+         ("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- part-row-by-name: the copy this statement group just created\n",
           "      perform pgpm._own_like_parent(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- MUTANT\n", 1)],
     ),
     "transmute_incoming_gate_accepts_not_valid": (
@@ -8840,7 +8840,7 @@ select ok(
         "Pre-#949 regrain_step: a fine child keeps the creating role's default privileges from its CREATE until "
         "its sub-range's last short batch, so between ticks a role they name reads every row copied so far, "
         "past the parent's row security. tests/267 stage A catches it.",
-        [("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);\n", "", 1)],
+        [("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- part-row-by-name: the copy this statement group just created\n", "", 1)],
     ),
     "scratch_regrain_owner_not_followed": (
         "bench/scratch_relations.sh",
@@ -15447,15 +15447,49 @@ MUTATIONS["write_block_read_by_name"] = (
     [("     where t.tgname = 'pgpm_write_block' and t.tgrelid = pgpm._part_rel(p_parent, p_child)\n",
       "     where t.tgname = 'pgpm_write_block' and t.tgrelid = to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))\n", 1)],
 )
-MUTATIONS["part_row_lint_child_name_only"] = (
+MUTATIONS["part_row_lint_first_pair_only"] = (
     "bench/part_row_by_name_lint.sh",
-    "PR #1392 round 7: scripts/check_part_row_by_name.py recognises a child name only as `child_name`, not as the "
-    "`p_child` parameter most steps take it by, so a new by-name resolution of p_child (the shape of every site the "
-    "rounds found in retire(), the write block and regrain) passes the lint. One site, the recogniser's name pattern.",
-    [("CHILD = r'(?:\\w+\\.)?(?:child_name|p_child)\\b'\n",
-      "CHILD = r'(?:\\w+\\.)?(?:child_name)\\b'\n", 1)],
+    "PR #1392 round 8: scripts/check_part_row_by_name.py takes the child name of a `%I.%I` pair from format()'s second "
+    "argument whatever the pair's position, so a pair later in the list (_next_archive_chunk's reads, _retain_recall's "
+    "ATTACH) passes. One site, the argument the pair's second specifier takes.",
+    [('            out.append(b[3])\n',
+      '            out.append(2)\n', 1)],
 )
-MUTATION_SRC["part_row_lint_child_name_only"] = "scripts/check_part_row_by_name.py"
+MUTATION_SRC["part_row_lint_first_pair_only"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["part_row_lint_positional_unread"] = (
+    "bench/part_row_by_name_lint.sh",
+    "PR #1392 round 8: the lint reads no positional specifier (`%1$I.%2$I`), so the same resolution spelled "
+    "positionally passes. One site, the specifier pattern.",
+    [("SPEC_RE = re.compile(r'%(?:(\\d+)\\$)?-?(?:\\d+|\\*(?:\\d+\\$)?)?([sIL%])')\n",
+      "SPEC_RE = re.compile(r'%()-?(?:\\d+|\\*(?:\\d+\\$)?)?([sIL%])')\n", 1)],
+)
+MUTATION_SRC["part_row_lint_positional_unread"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["part_row_lint_locals_untracked"] = (
+    "bench/part_row_by_name_lint.sh",
+    "PR #1392 round 8: the lint knows a child name only as `child_name` or `p_child`, never a local that holds one "
+    "(`v_name := r.child_name`, `select p.child_name into v_sub_name`), so regrain_step's copy names pass unmarked. "
+    "One clause, the fixpoint over a function's assignments.",
+    [('    changed = True\n    while changed:\n',
+      '    changed = False\n    while changed:\n', 1)],
+)
+MUTATION_SRC["part_row_lint_locals_untracked"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["part_row_lint_concat_unread"] = (
+    "bench/part_row_by_name_lint.sh",
+    "PR #1392 round 8: the lint does not read a name joined by hand, `quote_ident(v_nsp) || '.' || "
+    "quote_ident(p_child)`, so a resolution spelled that way passes. One site, the rule.",
+    [('    for m in re.finditer(r"\'\\.\'\\s*\\|\\|\\s*quote_ident\\s*\\(\\s*(?:\\w+\\.)?(?:" + alts + r")\\s*\\)", unit, re.I):\n',
+      '    for m in []:\n', 1)],
+)
+MUTATION_SRC["part_row_lint_concat_unread"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["unanchored_stranger_direct_only"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 7 (V-01): _unanchored_stranger judges only DIRECT partitions of the parent, so an operator's table "
+    "under an unanchored row's name one level down (inside the operator's sub-partitioned partition, over another "
+    "range) is handed back by _part_rel, and retire()'s one-step path, which asks pg_partition_ancestors, drops it. "
+    "One clause, the other levels. tests/355 part R catches it.",
+    [('     and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_rel)\n          or exists (select 1 from pg_partition_ancestors(p_rel::regclass) a   -- #1365: at any level, as retire() asks\n                      where a.relid = p_parent::oid and a.relid <> p_rel))\n',
+      '     and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_rel))\n', 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:

@@ -31,7 +31,11 @@
   `pgpm.part` row's relation by its name now does it through one resolver, `pgpm._part_rel`, which withholds from
   an unanchored row a partition of the parent over another range (regrain's source took and dropped one); and
   `scripts/check_part_row_by_name.py` (in the `Quoted splices` lint job, with `bench/part_row_by_name_lint.sh` and
-  its mutation `part_row_lint_child_name_only`) fails any new by-name resolution outside it that does not say why.
+  its mutations `part_row_lint_first_pair_only`, `part_row_lint_positional_unread`, `part_row_lint_locals_untracked`
+  and `part_row_lint_concat_unread`) fails any new by-name resolution outside it that does not say why: a rendered
+  `<schema>.<child>` at any argument position or positional, a name joined by hand, or a local that holds a child
+  name. A stranger is judged at every level of the parent's partition tree, as `retire()` reads attachment
+  (mutation `unanchored_stranger_direct_only`).
 
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names

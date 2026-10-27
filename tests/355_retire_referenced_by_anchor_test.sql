@@ -57,6 +57,10 @@
 --           Every step resolves a row's name through pgpm._part_rel, which withholds that table.
 --   PART Q  the same state read by _is_write_blocked: the operator's table carries a pgpm_write_block enabled ALWAYS
 --           (as an older pgpm left one), and it is not the row's block; _part_rel answers null for the row.
+--   PART R  G's state one level down: the operator's table under the row's name is a partition of the operator's own
+--           sub-partitioned partition of the parent, over another range. retire() takes it for attached at any level
+--           (pg_partition_ancestors), so _part_rel must judge it at any level too: it is withheld, and retire()
+--           drops nothing.
 --
 -- ASYMMETRIC FIXTURES. A's cell [100, 200) holds ids 101 and 102, the operator's table one row (5005); B's dropped
 -- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303). C's cell
@@ -64,7 +68,7 @@
 -- 9505; F's dropped cell held 151 and 152, its namesake holds 9701 and 9702; G's namesake 9801 and 9802; H's cells
 -- hold 161 and 162 and 361; I's 171 and 172; J's 381; the operators' tables of K, L, M and N hold two rows each
 -- (9811/9812, 9821/9822, 9831/9832, 9841/9842); O's cell holds 195 and 196 and its parent's frontier row 600; P's
--- operator table holds 9851 and 9852, Q's 9861.
+-- operator table holds 9851 and 9852, Q's 9861, R's 9871 and 9872.
 --
 -- install.sql is re-run with \ir, relative to this file; the psql variable `install` overrides the path.
 \if :{?install}
@@ -74,7 +78,7 @@
 -- retire() is a function, not a committing procedure; no throws_* here.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(94);
+select plan(98);
 
 -- pg_cron's job table, stood in for (as tests/171 and tests/194 do): the dispatch has to be real for the armed
 -- command to be read and run
@@ -669,5 +673,28 @@ select ok(exists (select 1 from pg_trigger where tgrelid = to_regclass(format('p
   'LIVENESS: Q''s operator table under the row''s name carries a pgpm_write_block enabled ALWAYS');
 select is(pgpm._is_write_blocked('public.rq355', :'q_cell'), false,
   'Q: it is not the row''s block: the row''s own partition is gone');
+
+-- ============================ PART R: the stranger one level down ============================
+create table public.rr355 (id bigint primary key, payload text);
+insert into public.rr355 values (113, 'a'), (114, 'b');
+call pgpm.transmute('public.rr355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => true);
+insert into public.rr355 values (650, 'frontier');
+select child_name as r_cell from pgpm.part where parent_table = 'public.rr355'::regclass and lo = '100' and attached \gset
+update pgpm.part set child_oid = null where parent_table = 'public.rr355'::regclass and child_name = :'r_cell';
+drop table public.:"r_cell";
+create table public.rr355_ops (id bigint primary key, payload text) partition by range (id);
+alter table public.rr355 attach partition public.rr355_ops for values from (9000) to (10000);
+create table public.:"r_cell" partition of public.rr355_ops for values from (9870) to (9880);
+insert into public.rr355 values (9871, 'operator'), (9872, 'operator');
+select to_regclass(format('public.%I', :'r_cell'))::oid as r_ops_oid \gset
+select ok((select child_oid is null from pgpm.part where parent_table = 'public.rr355'::regclass and child_name = :'r_cell')
+          and not exists (select 1 from pg_inherits where inhparent = 'public.rr355'::regclass and inhrelid = :r_ops_oid)
+          and exists (select 1 from pg_partition_ancestors(:'r_ops_oid'::oid::regclass) a where a.relid = 'public.rr355'::regclass),
+  'LIVENESS: R''s unanchored row''s name denotes a partition of the parent one level down, not a direct one');
+select is(pgpm._part_rel('public.rr355', :'r_cell'), null::regclass, 'R: _part_rel withholds it from the row');
+select is(pgpm.retire('public.rr355', :'r_cell'), false, 'R: retire() of the aged cell drops nothing');
+select ok(exists (select 1 from pg_class where oid = :r_ops_oid)
+          and (select string_agg(id::text, ',' order by id) from public.rr355 where id >= 9000) = '9871,9872',
+  'R: the operator''s table stands under the parent with both its rows');
 
 select * from finish();
