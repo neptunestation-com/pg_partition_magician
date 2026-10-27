@@ -254,10 +254,9 @@ alter table public.rd355 attach partition rd355_ops.:"d_cell" for values from (9
 select to_regclass(format('rd355_ops.%I', :'d_cell'))::oid as d_ops_oid \gset
 -- fixture: the row as an install older than child_oid left it
 update pgpm.part set child_oid = null where parent_table = 'public.rd355'::regclass and child_name = :'d_cell';
-select ok((select i.inhrelid from pg_inherits i join pg_class c on c.oid = i.inhrelid
-            where i.inhparent = 'public.rd355'::regclass and c.relname = :'d_cell' limit 1) = :d_ops_oid
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rd355'::regclass and inhrelid = :d_ops_oid)
           and exists (select 1 from pg_inherits where inhparent = 'public.rd355'::regclass and inhrelid = :d_cell_oid),
-  'LIVENESS: D''s two relations named the cell are partitions of the parent, the operator''s listed first by name');
+  'LIVENESS: D''s two relations named the cell are both partitions of the parent (which one a relname alone finds first is the heap''s order; part F has the sole namesake)');
 
 -- ============================ PART F: the sole namesake, over another range ============================
 create schema rf355_ops;

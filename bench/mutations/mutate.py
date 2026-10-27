@@ -8376,9 +8376,11 @@ select ok(
         "copies stay where regrain_step made them, so the swap gate refuses every tick ('no longer names the "
         "copy', logged skip_regrain) and the run never swaps. One site, the helper the swap gate, the attach "
         "and the reconcile all ask. tests/239 S2 catches it.",
-        [("  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #872: the copy's own schema, by its recorded oid\n",
+        [("  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #872: the copy's own schema, by its recorded oid\n"
+          "  v_now := pgpm._part_rel(p_parent, p_child);\n",
           "  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
-          "   where c.oid = p_parent;   -- MUTANT: the parent's current schema\n", 1)],
+          "   where c.oid = p_parent;   -- MUTANT: the parent's current schema\n"
+          "  v_now := to_regclass(format('%I.%I', v_nsp, p_child));\n", 1)],
     ),
     "regrain_copy_branch_parent_schema": (
         "bench/recorded_identity.sh",
