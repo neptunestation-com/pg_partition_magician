@@ -112,6 +112,21 @@ locked statement, so a write outside `[lo, hi)` is rejected for that span (`p_bo
 the top), and a conversion that dies between transactions leaves the `CHECK` behind. See
 [`transmute_abort`](#transmute_abort).
 
+Across its transactions the conversion follows the table by **oid**, not by name. A lock on a table pins its
+own name but not its schema's (`ALTER SCHEMA ... RENAME` takes no lock on the tables in it), so a statement
+that waits for a lock reaches whatever a schema renamed during the wait put under the name. Each phase
+therefore locks the table by its oid before its statement and names it under that lock: the bound and its
+`VALIDATE` reach the table wherever its schema now is, never a same-named table put in its place. The names
+the cutover makes (the staging parent, the monolith, the forward partitions) come from the table's name as
+the preflight read it, so the preflight's first lock and the cutover's first lock are taken through that
+name, and a table **renamed**, or whose schema was renamed, since then is refused, saying so: before the
+preflight's reads nothing is committed; at the cutover the claim and the validated bound stay, and running
+`transmute` again on the table's name now resumes from them. The cutover asks again whether the schema still
+has its name after each wait for another relation's lock (an incoming key's referencing table, an outgoing
+key's referenced table, a sequence, a publication) and refuses, rolled back to that resumable state, when it
+does not; and it checks by oid that the incoming keys it drops, the outgoing keys, policies and publication
+memberships it re-creates and the sequences it hands over landed where it meant them to.
+
 The new parent also takes over everything `CREATE TABLE ... LIKE` does not carry: the **owner**, table and
 **column-level grants**, **row level security** (both `ENABLE` and `FORCE`), every **policy**, table and
 column **comments**, **row triggers**, each in the enabled state it had (`DISABLE`, `ENABLE ALWAYS`
@@ -299,9 +314,11 @@ Parameters:
 - `p_control` -- the partition-key column. It **must be `NOT NULL`** (a partition key cannot be null;
   `pgpm` never scans to enforce it). A key is not required: if the **primary key** includes the control
   column, `pgpm` reuses it in place and never rewrites it; if there is no primary key and a **unique
-  constraint** includes the control column, that is reused instead (either way with its deferrability:
-  a `DEFERRABLE` or `INITIALLY DEFERRED` key stays so on the parent and on every partition, the forward
-  ones included); if there is neither, the table is partitioned **keyless** (no key synthesized). A
+  constraint** includes the control column, that is reused instead (either way with its whole definition:
+  its `INCLUDE` columns, `NULLS NOT DISTINCT`, the index's storage parameters and its deferrability, so a
+  `DEFERRABLE` or `INITIALLY DEFERRED` key stays so on the parent and on every partition, the forward
+  ones included, and the monolith's index is adopted in place, never built again); if there is neither,
+  the table is partitioned **keyless** (no key synthesized). A
   **primary key that *excludes* the control column is refused** (no rewrite), whatever other unique
   constraints the table has: it could not be carried onto the parent, and `pgpm` will not adopt a
   different key and leave it behind on the monolith, where it would enforce nothing for new rows. The error names the constraint and the control column. A *bare*
@@ -589,7 +606,10 @@ the table's lock, from the claim as it stands then, so a conversion you resumed 
 sweep was waiting is left to finish rather than undone. Both this function and the sweep find the
 table by the identity the claim recorded, not by its name, so a half-converted table that was renamed or
 moved to another schema after its conversion failed is still found and has its bound dropped; the sweep
-forgets a claim without acting only when that table no longer exists at all. The sweep waits at most 5 s
+forgets a claim without acting only when that table no longer exists at all. Each takes the table's lock by
+that identity before it drops the bound, so a schema renamed while the call waits for the lock, with a
+same-named table put in its place, is followed to the claimed table: the bound comes off it, and the
+other table keeps what it had. The sweep waits at most 5 s
 for the table's lock: behind a longer transaction it logs `skip_transmute_reap` and tries again next tick,
 rather than queue every read and write of the table behind its own `ACCESS EXCLUSIVE` request.
 
@@ -682,6 +702,15 @@ On PostgreSQL 18 a key on a partitioned referencing table comes back `NOT VALID`
 `NOTICE`. Before 18 a partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added
 validated in one step, as `restore_incoming_fks` does there: the scan of the referencing table runs under the
 `ACCESS EXCLUSIVE` this call holds on the restored table, and an orphan in it fails the reverse.
+
+The statements the reverse captures off the parent (its comments, grants, policies and publication
+memberships) name the table in the parent's schema, read under the reverse's first lock, and are run after
+it has waited for other locks (the parent's `ACCESS EXCLUSIVE`, the referencing tables', the sequences').
+So the reverse asks again, after its check for rows outside the monolith and after each of those waits,
+whether that schema still has its name, and refuses, rolled back, when it was renamed meanwhile; run
+`untransmute` again on the table's name now. The keys it drops and re-adds on referencing tables, the
+policies, the publication memberships and the sequences it hands back are checked by oid as `transmute`'s
+are.
 
 It is a **one-way door** once any row lives outside the monolith's range -- a forward partition after the
 frontier crosses `B`, or the finer children a regrain's swap has put in the monolith's place -- because a
@@ -1750,12 +1779,17 @@ its place, holds under the name, and it can wait again inside itself (an RI chec
 are swapped back. So each such write is checked after it ran, before anything commits, by what it did to the
 relation pgpm identified, by OID: a `DROP` must have removed it, every row a `DELETE` took must be its (or its
 partitions'), a `TRUNCATE` must have given it a new file, a trigger must be on it, a rename or a change of
-owner must show on it. When the check fails the
+owner must show on it. A function cannot be locked, so the `DROP FUNCTION` of a hypertable capture function (by
+the cutover, or by a re-run of `from_hypertable_copy`) must have removed the function pgpm recorded, or the call
+refuses, rolled back, rather than leave that function behind after dropping another under its name. When the check fails the
 statement is rolled back: `retire` logs `fail_retain_drop` or `fail_retain_crossing` and returns false, or raises
 from the write block, and `regrain_cancel`, the regrain swap's and reclaim's emptying of the delta raise, saying the
 statement reached another relation. A read has no effect to check: the regrain reconcile, `untransmute`'s gate under
-its lock and the hypertable drain steps first lock the relation by OID and then name it through the name it has
-under that lock, so the read waits for nothing of its own and reaches the relation wherever its schema now is.
+its lock, the hypertable drains and their steps (the copy, the source and the delta, the residual checks and the
+copy's watermark included) and the cutover's catch-up and conservation check first lock the relation by OID and
+then name it through the name it has under that lock, so the read waits for nothing of its own and reaches the
+relation wherever its schema now is. A drain that waited while the hypertable's schema was renamed drains the
+relations pgpm recorded where they went, and never reads what took their names as nothing left to drain.
 
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already
@@ -2475,7 +2509,9 @@ partition's detach only once its range is covered, so this is reached only when 
 (`set_archive_fn`) after that retirement began. Such a table is not archived and nothing is recorded for it,
 `retire` keeps it while its range is uncovered, and every tick logs `skip_archive` over its range with the
 remedy: once it is no longer pending a detach, attach it back on its bounds (`ALTER TABLE <parent> ATTACH
-PARTITION <partition> FOR VALUES FROM (<lo>) TO (<hi>)`, which the `method` spells out); the next tick
+PARTITION <partition> FOR VALUES FROM (<lo>) TO (<hi>)`, which the `method` spells out with the bounds as the
+control column holds them, encoded on a uuidv7 or text_time grid, as in every remedy that attaches a table back);
+the next tick
 archives it through the parent and `retire` completes the retirement. `scripts/archive_partition_whole.sql`
 refuses it with the same message.
 
@@ -2699,9 +2735,15 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   relation gone (`archive_chunk_retired`) and holds the range the same way. Which partitions a retired chunk
   holds is the same answer from every session, and never narrower than the chunk. A retired chunk's bound that
   names no instant by itself (one an older install stored as a strategy wrote its `covered_hi`, in a session
-  whose zone nothing recorded) is read at its widest: as wall time under both day-month orders, a `lo` at
-  UTC+14 and a `hi` at UTC-12, whatever zone the text names; text no DateStyle parses reaches without
-  bound, and the call never raises on it. So such a chunk can hold a partition next to it,
+  whose zone nothing recorded) is read at its widest: as wall time under both day-month orders, a `lo` 169
+  hours east of UTC and a `hi` 168 hours west, whatever zone the text names. That is the furthest offset a
+  `TimeZone` string can give a session: a POSIX offset reaches 167:59:60 either side (`'XYZ167:59:60'` is
+  UTC-168), and a DST name without an offset of its own is an hour east of that (`'XYZ-167:59:60DEF'` is UTC+169
+  in summer). tzdata's LMT passes -12 and +14 too. PostgreSQL does not range-check the offsets inside a zone
+  file, but no file tzdata ships is 16 hours or more from UTC. Text no DateStyle parses reaches without
+  bound, and the call never raises on it. A bound written with an offset of 16 hours or more (a session that far
+  out renders one, `'2025-12-19 10:00:00-20'`, and `timestamptz` input refuses it) is read as the instant it
+  names, never cast. pgpm itself writes an instant that far out in the caller's zone in UTC. So such a chunk can hold the partitions within a week of it,
   pgpm's own included, for as long as the row stays as written; the skip row then names the chunk's `lo` and
   the remedy: once you know the instant the bound names (for a partition's last chunk, usually the `hi` of the
   `retain_drop` row `pgpm.log` has for it), write it with its offset (`update pgpm.archive_ledger set hi =
@@ -3019,12 +3061,16 @@ reads its `p_lo` and `p_hi` once, on the grid's clock: a bound that carries an o
 offset-less one is read in the table's `partition_tz` (never the session's `TimeZone`), the spelling is read
 under the session's `DateStyle`, and an `id` bound is read as a number, at its least scale. On a `date`
 control column a bound is the start of the day it falls in on that clock, because a `date` keeps a bound's day
-and drops the rest. The empty-range check, the range it reads,
+and drops the rest; on a `uuidv7` or `text_time` grid it is the start of the unit it falls in (the millisecond,
+or the second of an ObjectId or KSUID key), because the read compares the column with the bound encoded and the
+encoding drops what is below the unit. The empty-range check, the range it reads,
 the recorded-chunk check and the key all take that one reading: from a `SQL, DMY` session a `p_lo` of
 `02/01/2024 00:00:00+00` reads the rows of 2 January and is keyed `2024010200000000`; on a `date` grid
 `'2024-01-02'` is keyed `2024010200000000`, the cell's start, from a New York session as from a UTC one,
 `'2024-01-02 00:00:00+09'` (15:00 UTC on 1 January) reads the whole 1 January cell and is keyed
-`2024010100000000`, and two instants of one day are refused as an empty range; and
+`2024010100000000`, and two instants of one day are refused as an empty range; on a `uuidv7` grid
+`['2024-01-02 00:00:00', '2024-01-02 00:00:00.0005')` is refused as an empty range, and a `p_lo` of
+`2024-01-02 00:00:00.0005+00` is keyed `2024010200000000`, the millisecond's start; and
 `'0100'` on an `id` grid is keyed `100`, as a tick keys that chunk. The result's `covered_hi` is `p_hi` as
 passed. Objects uploaded before this key
 shape stay where they are: each `pgpm.archive_ledger` row records the key its object was written to, and
@@ -3847,6 +3893,12 @@ any other unrestored FK for the next tick.
 It re-adds each FK `NOT VALID` and **stops there**. `NOT VALID` already enforces every *new* write, so
 referential integrity is live the moment this returns; only pre-existing rows are unverified, which
 `status().fks_unvalidated` reports. `maintain` finishes the validation on a later tick.
+
+The re-add waits for the referencing table's lock behind its writers, so a schema renamed during that wait
+could send it to a same-named table: each re-add is checked by oid afterwards, and one that did not land on
+the recorded table referencing the managed parent is rolled back and logged `fail_restore_incoming_fk`, its
+record left suspended for the next call. `validate_incoming_fks`, `suspend_incoming_fks`, `transmute`'s drop
+of the keys and `untransmute`'s drop and re-add of them are checked the same way, and raise.
 
 That split is deliberate. The re-add briefly blocks writes to **both** the referencing table and the
 managed parent; validating in the same statement would hold that block across a full scan of the

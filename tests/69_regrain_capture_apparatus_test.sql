@@ -12,7 +12,7 @@ select plan(15);
 create or replace procedure pg_temp.mk(p_rel text) language plpgsql as $$
 begin
   execute format('create table public.%I (id bigint primary key, payload text)', p_rel);
-  execute format('insert into public.%I select g*10, ''x'' from generate_series(1, 250) g', p_rel);
+  execute format('insert into public.%I select g*10, ''p'' || g from generate_series(1, 250) g', p_rel);
   call pgpm.transmute(format('public.%I', p_rel)::regclass, 'id', 1000);
   execute format('insert into public.%I values (20000, ''frontier'')', p_rel);
 end $$;
@@ -98,7 +98,9 @@ select is(
   (select count(*)::int from pgpm.part where parent_table = 'public.ca4'::regclass and not attached),
   0, 'regrain_cancel drops every in-flight copy: none may survive to be resumed from');
 
-select is((select count(*)::int from public.ca4), 251,
+-- by identity (#1374): each row carries its own payload, so a lost row and a stray one cannot cancel
+select is((select array_agg(id || ':' || payload order by id) from public.ca4),
+  (select array_agg(g * 10 || ':p' || g order by g) from generate_series(1, 250) g) || '20000:frontier'::text,
   'and the parent is untouched: the source still holds every row');
 
 -- ======================= one regrain per parent =======================

@@ -1465,9 +1465,21 @@ $$;
 -- IS the defect. Pinned to ISO only, not to a zone: the offset carried in the text makes the instant
 -- exact whatever zone rendered it. bench/mutations/mutate.py's datestyle_session_render removes the
 -- clause to put the defect back.
+--
+-- AN OFFSET POSTGRESQL CAN READ BACK (#1363). A session's TimeZone can sit up to 169 hours from UTC (a POSIX zone,
+-- see pgpm._native_bound_reach), but timestamptz input reads an offset only to 15:59:59: from a session at 'XYZ20'
+-- the text was '2025-12-25 05:00:00-20', which no session can cast, and a ledger hi in that shape raised out of every
+-- later archive step of the parent. So an instant whose offset in the caller's zone is 16 hours or more is
+-- rendered in UTC (pgpm._ts_text_utc): the same instant, in text every session reads. Any other is rendered as
+-- before, in the caller's zone.
+create or replace function pgpm._ts_text_utc(p_ts timestamptz)
+returns text language sql stable set datestyle = 'ISO, MDY' set timezone = 'UTC' as $$
+  select p_ts::text;
+$$;
 create or replace function pgpm._ts_text(p_ts timestamptz)
 returns text language sql stable set datestyle = 'ISO, MDY' as $$
-  select p_ts::text;
+  select case when abs(coalesce(extract(timezone from p_ts), 0)) < 57600 then p_ts::text
+              else pgpm._ts_text_utc(p_ts) end;
 $$;
 
 -- The SQL for "the greatest hi among the rows a query selects, as canonical native text" (#500): the
@@ -1480,6 +1492,14 @@ $$;
 create or replace function pgpm._max_hi_native(p_kind text)
 returns text language sql immutable as $$
   select case when p_kind = 'id' then 'max(hi::numeric)::text' else 'pgpm._ts_text(max(hi::timestamptz))' end;
+$$;
+
+-- A native value already cast to its kind's type (pgpm._native_type: numeric or timestamptz) as canonical native
+-- text, for dynamic SQL that names the type only at run time (#1370): _ts_text's rendering for an instant, a
+-- number's own text. The log rows that aggregate ledger bounds (min(lo::%s)) render through this, not ::text.
+create or replace function pgpm._typed_text(p_val anyelement)
+returns text language sql stable set datestyle = 'ISO, MDY' as $$
+  select p_val::text;
 $$;
 
 -- A native value handed to pgpm from OUTSIDE (an archive_fn's covered_hi) as the canonical text of what THIS
@@ -4145,6 +4165,56 @@ begin
 end;
 $$;
 
+-- A constraint statement's effect, checked by oid after it ran (#1364, #1355 siblings). ALTER TABLE ... ADD, DROP or
+-- VALIDATE CONSTRAINT on a table pgpm did not lock first (an incoming key's referencing table, an outgoing key's
+-- referenced one) waits for that table's lock, and resolves the names again once granted: a schema swapped during
+-- the wait sends it to a namesake, which gains the key, loses its own of that name or has it validated, while the
+-- table pgpm identified is left as it was and its record says otherwise. So p_rel must show the state asked for:
+-- p_state 'present' (referencing p_ref, when given), 'absent' or 'validated'. Raised before the statement commits.
+create or replace function pgpm._con_effect_or_raise(p_rel regclass, p_con name, p_state text, p_what text,
+                                                     p_ref regclass default null)
+returns void language plpgsql as $$
+begin
+  perform pgpm._effect_or_raise(
+    coalesce((select p_state <> 'absent' and (p_state <> 'validated' or c.convalidated)
+                     and (p_ref is null or c.confrelid = p_ref)
+                from pg_constraint c where c.conrelid = p_rel and c.conname = p_con), p_state = 'absent'),
+    p_rel, p_what);
+end;
+$$;
+
+-- _lock_oid through the name a caller read earlier, refused when the name no longer denotes p_rel (#1355, #1367).
+-- transmute reads the table's schema and name in its preflight and derives every name it makes from them (the
+-- staging parent, the monolith, the children), across three transactions with no lock held between them: a table
+-- renamed, or its schema renamed, since then is refused here, before the step does anything, rather than renamed
+-- back by the cutover or followed by some statements and not by others.
+create or replace function pgpm._lock_named_or_raise(p_rel regclass, p_mode text, p_only boolean, p_nsp name,
+                                                     p_name name, p_what text)
+returns void language plpgsql as $$
+begin
+  if not pgpm._lock_oid(p_rel, p_mode, p_only, p_nsp, p_name) then
+    raise exception 'pg_partition_magician: % could not take its % lock on % (oid %) under the name %.% it read before: the table or its schema was renamed since, or the table dropped. Nothing of this step was done. Re-run it on the table''s name now',
+      p_what, p_mode, p_rel, p_rel::oid, quote_ident(p_nsp), quote_ident(p_name);
+  end if;
+end;
+$$;
+
+-- The schema p_nsp still names p_nspoid (#1367). A lock pins a relation's own name, never its schema's, so a caller
+-- holding the table's lock that renders names in the schema it read (the cutover's monolith and staging names, the
+-- captured triggers, policies and grants) and then waits for ANOTHER object's lock (a referencing table's, a
+-- referenced table's, a sequence's) reaches a namesake schema committed during that wait with every later
+-- statement. Asked after each such wait, before the next of those statements runs: a schema swapped away in a wait
+-- is refused before anything reaches it, so one swapped back in a later wait has had nothing reach it meanwhile.
+create or replace function pgpm._nsp_held_or_raise(p_nspoid oid, p_nsp name, p_what text)
+returns void language plpgsql as $$
+begin
+  if (select n.nspname from pg_namespace n where n.oid = p_nspoid) is distinct from p_nsp then
+    raise exception 'pg_partition_magician: % names the table''s objects in its schema % (oid %), which was renamed or dropped while it waited for a lock; rolled back. Re-run it on the table''s name now',
+      p_what, quote_ident(p_nsp), p_nspoid;
+  end if;
+end;
+$$;
+
 -- retire(): the sanctioned single-partition drop (issue #195) -- retain()'s per-partition body,
 -- public and claim-guarded, so an external assistant (e.g. an archive-then-drop scanner) or several
 -- cooperating ones can drive retirement themselves through the same protocol retain() uses: claim,
@@ -5276,10 +5346,13 @@ create index if not exists archive_ledger_parent_child_hi_idx on pgpm.archive_le
 -- instant per reading session: before #977 a strategy's covered_hi was stored as written ('2026-10-15 06:00:00')
 -- after a check in whatever session ran the archive step (pg_cron's, an operator's), and that session's TimeZone
 -- and DateStyle were recorded nowhere, so no reading, the caller's or the grid's, is provably the one checked.
+-- The offset must be one timestamptz input reads, to 15:59:59 (#1363): a session can be further out (a POSIX zone,
+-- to 169 hours), and its render ('2026-01-04 15:00:00-20') names no instant any session can cast, so it is
+-- treated as naming none rather than cast where nothing can read it.
 create or replace function pgpm._native_named(p_kind text, p_text text)
 returns boolean language sql immutable as $$
   select p_kind = 'id' or p_text ~ ('^(-?infinity|[0-9]{4,}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?'
-                                     || '[+-][0-9]{2}(:[0-9]{2}){0,2}( BC)?)$');
+                                     || '[+-](0[0-9]|1[0-5])(:[0-5][0-9]){0,2}( BC)?)$');
 $$;
 
 -- A native bound's position as a number (#1163): the value itself for an id kind's text, the epoch for a time
@@ -5425,8 +5498,8 @@ begin
                                and pgpm._part_rel(l.parent_table, l.child_name) is null))
                    returning l.child_name, l.child_oid, l.lo, l.hi)
      select child_name, child_oid, count(*) as chunks,
-            coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,
-            coalesce(max(case when pgpm._native_named(%4$L, hi) then hi::%1$s end)::text, max(hi)) as hi
+            coalesce(pgpm._typed_text(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)), min(lo)) as lo,
+            coalesce(pgpm._typed_text(max(case when pgpm._native_named(%4$L, hi) then hi::%1$s end)), max(hi)) as hi
        from gone group by child_name, child_oid',
     pgpm._native_type(cfg.control_kind), p_parent::text, p_child, cfg.control_kind)
   loop
@@ -5941,19 +6014,35 @@ $$;
 -- (p_latest false), the latest for a hi. Text that names its instant (pgpm._native_named) is that instant. Any
 -- other text was written in a session whose TimeZone and DateStyle nothing recorded, so it is read as wall time
 -- under each DateStyle that parses it (MDY and DMY: every pre-#500 render carries a four-digit year), ignoring any
--- zone it names, and placed in the zone furthest along: UTC+14 for a lo, UTC-12 for a hi. Nothing narrower is
+-- zone it names, and placed at the furthest offset a session can take: 169 hours east of UTC for a lo, 168 west for a hi (#1363). Not the -12 to
+-- +14 of today's civil zones. PostgreSQL's POSIX TimeZone parser (src/timezone/localtime.c, getsecs) takes an
+-- offset to 167:59:60, so 'XYZ167:59:60' is UTC-168 and 'XYZ-167:59:60' UTC+168, and a DST name with no offset
+-- of its own is one hour east of standard, unchecked: 'XYZ-167:59:60DEF' is UTC+169 in summer. An interval or a
+-- number of hours reaches just under 168, and tzdata's LMT -15:56:08 (Asia/Manila before 1845). Nothing narrower is
 -- safe: the chunk is the record of the only copy of its rows, and a partition it does not hold is archived to its
 -- key. Text nothing parses (a strategy's covered_hi in another encoding, a named shape with month 13) could be
 -- anywhere, so it reaches as far as a bound can, -Infinity for a lo and Infinity for a hi, rather than raising out of
 -- every archive step and retain() of the parent (#1351's P1-02). The SET clauses keep the DateStyle it sets to the call.
+-- One shape names its instant but cannot be cast (#1363): _ts_text's render from a session 16 hours or more from
+-- UTC, year first with the offset that session had ('2025-12-19 10:00:00-20'), which timestamptz input refuses past
+-- 15:59:59. It is read exactly, its wall time less its offset, not widened.
 create or replace function pgpm._native_bound_reach(p_kind text, p_text text, p_tz text, p_latest boolean)
 returns numeric language plpgsql stable set datestyle = 'ISO, MDY' set timezone_abbreviations = 'Default' as $$
-declare v numeric; v_w numeric; v_ds text;
+declare v numeric; v_w numeric; v_ds text; v_m text[];
 begin
+  v_m := regexp_match(p_text, '^([0-9]{4,}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)([+-])([0-9]{2,3})'
+                              || '(?::([0-5][0-9]))?(?::([0-5][0-9]))?( BC)?$');
   if p_text is null or pgpm._native_named(p_kind, p_text) then
     begin
       return pgpm._native_bound_key(p_kind, p_text, p_tz);
     exception when data_exception then null;   -- the shape of a bound but no value: unplaceable
+    end;
+  elsif p_kind <> 'id' and v_m is not null then
+    begin
+      return extract(epoch from (v_m[1] || coalesce(v_m[6], ''))::timestamp)
+             - case when v_m[2] = '-' then -1 else 1 end
+               * (v_m[3]::int * 3600 + coalesce(v_m[4]::int, 0) * 60 + coalesce(v_m[5]::int, 0));
+    exception when data_exception then null;   -- unplaceable, as above
     end;
   else
     foreach v_ds in array array['ISO, MDY', 'ISO, DMY'] loop
@@ -5966,7 +6055,7 @@ begin
     end loop;
   end if;
   if v is null then return case when p_latest then 'Infinity' else '-Infinity' end::numeric; end if;
-  return v + case when p_latest then 43200 else -50400 end;
+  return v + case when p_latest then 604800 else -608400 end;
 end;
 $$;
 
@@ -6130,6 +6219,25 @@ begin
 end;
 $$;
 
+-- The ATTACH PARTITION a skip_archive remedy tells the operator to type to put p_nsp.p_child back under p_parent on
+-- its pgpm.part bounds, [p_lo, p_hi) native (#1371): each bound encoded for the control column, as every ATTACH pgpm
+-- runs spells it (and _disown_retirement's remedy, #1272). A uuidv7 or text_time column's partition bounds are its own
+-- values, so the native text typed as one is refused ('invalid input syntax for type uuid') or names other bounds.
+create or replace function pgpm._attach_back_sql(p_parent regclass, p_nsp name, p_child name, p_lo text, p_hi text)
+returns text language plpgsql stable as $$
+declare cfg pgpm.config;
+begin
+  select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
+  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)', p_parent, p_nsp, p_child,   -- part-row-by-name: remedy text the operator types, runs nothing
+    pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+    pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+exception when others then
+  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM ... TO ..., its bounds [%s, %s) as the column''s values (they could not be encoded here: %s)',   -- part-row-by-name: the same
+                p_parent, p_nsp, p_child, p_lo, p_hi, sqlerrm);
+end;
+$$;
+
 -- _archive_unheld_reason: why an archive candidate _archive_hold_partition did not hold is not archived, with the
 -- remedy, for the two candidates the hold refuses that only an operator can resolve: a partition pgpm's own
 -- retirement detached (the record of pgpm's dispatch names p_rel, the relation the name resolves to,
@@ -6147,13 +6255,13 @@ declare v_nsp name;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);
   if p_child_oid is null and not pgpm._detach_dispatched(p_parent, p_child, p_rel) then
-    return format('pgpm.part''s row for %I.%I over [%s, %s) records no oid (an upgrade from before child_oid could not anchor it), so pgpm cannot tell that the relation is a partition of %s and does not hand it to a strategy; not archived and nothing recorded, and retire() keeps it while the range is uncovered. If it is a partition of %s, anchor the row (select pgpm.adopt_partition(%L, %L)) and the next tick archives it; if it was detached by hand, first attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)), or, to keep it as yours, forget the row (delete from pgpm.part where parent_table = %L::regclass and child_name = %L)',
+    return format('pgpm.part''s row for %I.%I over [%s, %s) records no oid (an upgrade from before child_oid could not anchor it), so pgpm cannot tell that the relation is a partition of %s and does not hand it to a strategy; not archived and nothing recorded, and retire() keeps it while the range is uncovered. If it is a partition of %s, anchor the row (select pgpm.adopt_partition(%L, %L)) and the next tick archives it; if it was detached by hand, first attach it back on its bounds (%s), or, to keep it as yours, forget the row (delete from pgpm.part where parent_table = %L::regclass and child_name = %L)',
                   v_nsp, p_child, p_lo, p_hi, p_parent, p_parent, p_parent::text, format('%I.%I', v_nsp, p_child),   -- part-row-by-name: text of the message
-                  p_parent, v_nsp, p_child, p_lo, p_hi, p_parent::text, p_child);
+                  pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi), p_parent::text, p_child);
   end if;
   if not pgpm._detach_dispatched(p_parent, p_child, p_rel) then return null; end if;
-  return format('%I.%I was detached from %s by a retirement of pgpm''s before its range [%s, %s) was archived (archiving was configured after the retirement began), so a strategy reading the range through the parent would read none of its rows; not archived and nothing recorded, and retire() keeps the table while the range is uncovered. To archive it, once it is no longer pending a detach attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)); the archive step then archives it and retire() completes the retirement',
-                v_nsp, p_child, p_parent, p_lo, p_hi, p_parent, v_nsp, p_child, p_lo, p_hi);
+  return format('%I.%I was detached from %s by a retirement of pgpm''s before its range [%s, %s) was archived (archiving was configured after the retirement began), so a strategy reading the range through the parent would read none of its rows; not archived and nothing recorded, and retire() keeps the table while the range is uncovered. To archive it, once it is no longer pending a detach attach it back on its bounds (%s); the archive step then archives it and retire() completes the retirement',
+                v_nsp, p_child, p_parent, p_lo, p_hi, pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi));
 end;
 $$;
 
@@ -6170,8 +6278,8 @@ returns text language plpgsql stable as $$
 declare v_nsp name;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);
-  return format('%I.%I stopped being an attached partition of %s while the archive strategy ran on its chunk [%s, %s) (a DETACH PARTITION ... CONCURRENTLY began: once its first transaction commits, a read through the parent sees none of the partition''s rows), so what the strategy returned is not coverage: nothing recorded, and retire() keeps the table while the range is uncovered. Whatever the strategy wrote for the chunk is written again if the chunk is archived later. Once the detach is finished the table is yours, left standing; to have it archived and retired after all, attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)) and the next tick archives the chunk',
-                v_nsp, p_child, p_parent, p_chunk_lo, p_chunk_hi, p_parent, v_nsp, p_child, p_lo, p_hi);
+  return format('%I.%I stopped being an attached partition of %s while the archive strategy ran on its chunk [%s, %s) (a DETACH PARTITION ... CONCURRENTLY began: once its first transaction commits, a read through the parent sees none of the partition''s rows), so what the strategy returned is not coverage: nothing recorded, and retire() keeps the table while the range is uncovered. Whatever the strategy wrote for the chunk is written again if the chunk is archived later. Once the detach is finished the table is yours, left standing; to have it archived and retired after all, attach it back on its bounds (%s) and the next tick archives the chunk',
+                v_nsp, p_child, p_parent, p_chunk_lo, p_chunk_hi, pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi));
 end;
 $$;
 
@@ -6234,8 +6342,8 @@ begin
                                      and l.retired_at is null
                                      and not exists (select 1 from pgpm.part p
                                                       where p.parent_table = l.parent_table and p.child_name = l.child_name))
-     select o.child_name, count(*) as chunks, coalesce(min(case when o.named then o.lo::%1$s end)::text, min(o.lo)) as lo,
-            coalesce(max(case when o.named then o.hi::%1$s end)::text, max(o.hi)) as hi
+     select o.child_name, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
+            coalesce(pgpm._typed_text(max(case when o.named then o.hi::%1$s end)), max(o.hi)) as hi
        from orphan o
       where case when o.named then exists (select 1 from pgpm.part t
                                             where t.parent_table = o.parent_table
@@ -6270,7 +6378,7 @@ begin
                          '. If they are, because %I is the relation those chunks were read from, renamed (an upgrade cannot tell that from a drop), the rows are in a live partition: once you have confirmed it holds them, delete the retired rows recorded under %s (delete from pgpm.archive_ledger where parent_table = %L::regclass and child_name = <that name> and retired_at is not null) and it archives afresh',
                          r.child_name, r.other_names, p_parent::text) else '' end,
                        case when r.unnamed is not null then format(
-                         '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach in any zone from UTC-12 to UTC+14 and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
+                         '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach at any offset a session can take (to 168 hours west of UTC and 169 east) and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
                          r.unnamed, p_parent::text) else '' end));
     end if;
   end loop;
@@ -6785,12 +6893,14 @@ begin
 
   -- A NULL key component can never be matched by the row-constructor reconcile below, so its change would
   -- be silently lost -- the exact failure this apparatus exists to prevent. PK columns are NOT NULL, but a
-  -- reused UNIQUE key may legitimately permit nulls, so refuse rather than lose the change.
+  -- reused UNIQUE key may legitimately permit nulls, so refuse rather than lose the change. Here and below, the
+  -- key is the index's first indnkeyatts columns: its INCLUDE columns, which the parent's key carries (#766),
+  -- identify nothing.
   select string_agg(quote_ident(a.attname), ', ') into v_bad_q
     from pg_index i
     cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-   where i.indexrelid = v_keyidx and not a.attnotnull;
+   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts and not a.attnotnull;
   if v_bad_q is not null then
     raise exception 'pg_partition_magician: cannot regrain % -- its reused key has nullable column(s) (%), and a NULL key component cannot be reconciled, so a concurrent change to such a row would be lost. Add NOT NULL to those columns, then re-run.',
       p_parent, v_bad_q;
@@ -6804,7 +6914,7 @@ begin
     from pg_index i
     cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-   where i.indexrelid = v_keyidx;
+   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;
   -- the capture's bind parameters: $1..$n for one key row, $n+1..$2n for an UPDATE's second
   select string_agg('$' || g, ', ' order by g) into v_oldargs from generate_series(1, v_nkeys) g;
   select string_agg('$' || g, ', ' order by g) into v_newargs from generate_series(v_nkeys + 1, 2 * v_nkeys) g;
@@ -7766,7 +7876,7 @@ begin
     from pg_index i
     cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-   where i.indexrelid = p_keyidx;
+   where i.indexrelid = p_keyidx and k.ord <= i.indnkeyatts;
   if v_delta_reg is null then
     return format('change capture''s delta table (oid %s, recorded in pgpm.config) is gone; change capture is re-minted for the key (%s)',
                   coalesce((select regrain_delta_oid::text from pgpm.config where parent_table = p_parent), 'none'), v_want_q);
@@ -9066,7 +9176,8 @@ begin
   -- a resumed batch never re-copies a row already in the child even when the control column is non-unique.
   -- The key is whatever transmute reused: a PRIMARY KEY, or (relaxed key contract) a UNIQUE constraint.
   -- A truly KEYLESS monolith has no key to identify rows by, so a resumable copy cannot dedup -- regrain is
-  -- refused for it below ('nokey'); the coarse monolith stays a correct, queryable permanent state.
+  -- refused for it below ('nokey'); the coarse monolith stays a correct, queryable permanent state. Its KEY
+  -- columns only (#766): an INCLUDE column in the equijoin re-copied a row whose value it holds is NULL.
   select coalesce(
            (select i.indexrelid from pg_index i where i.indrelid = p_parent and i.indisprimary limit 1),
            (select con.conindid from pg_constraint con join pg_index i on i.indexrelid = con.conindid
@@ -9078,7 +9189,7 @@ begin
       from pg_index i
       cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
       join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-     where i.indexrelid = v_keyidx;
+     where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;
   end if;
   if v_pkjoin_q is null then return 'nokey'; end if;
   -- #873: the copy, the reconcile and the avg-width probe below read the SOURCE directly, under its own
@@ -11132,6 +11243,33 @@ returns text language sql stable as $$
        from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped));
 $$;
 
+-- The clause the cutover declares a carried primary key or unique constraint with on the parent (steps 8 and
+-- 9b): its whole definition, pg_get_constraintdef's (columns, NULLS NOT DISTINCT, INCLUDE, DEFERRABLE, INITIALLY
+-- DEFERRED), with the index's storage parameters, which pg_get_constraintdef leaves out, spliced in ahead of the
+-- deferral clause it ends with. Step 8 used to declare the reused key from its column list (#766): a PRIMARY KEY
+-- ... INCLUDE then matched no index of the monolith and failed the cutover with "multiple primary keys", and a
+-- UNIQUE NULLS NOT DISTINCT key was built again on the monolith under the lock, plain, on the parent and every
+-- forward partition.
+create or replace function pgpm._transmute_key_ddl(p_con oid)
+returns text language plpgsql stable as $$
+declare v_def text; v_sfx text; v_with_q text;
+begin
+  select pg_get_constraintdef(k.oid),
+         case when k.condeferrable and k.condeferred then ' DEFERRABLE INITIALLY DEFERRED'
+              when k.condeferrable then ' DEFERRABLE'
+              else '' end,
+         (select string_agg(quote_ident(o.option_name) || '=' || quote_literal(o.option_value), ', ')
+            from pg_class ic, pg_options_to_table(ic.reloptions) o where ic.oid = k.conindid)
+    into v_def, v_sfx, v_with_q
+    from pg_constraint k where k.oid = p_con;
+  if right(v_def, length(v_sfx)) is distinct from v_sfx then
+    raise exception 'pg_partition_magician: cannot carry the constraint % of %: its definition (%) does not end with its deferral clause (%), so its storage parameters cannot be placed ahead of it',
+      (select quote_ident(conname) from pg_constraint where oid = p_con),
+      (select conrelid::regclass from pg_constraint where oid = p_con), v_def, v_sfx;
+  end if;
+  return left(v_def, length(v_def) - length(v_sfx)) || coalesce(' WITH (' || v_with_q || ')', '') || v_sfx;
+end $$;
+
 -- The bare unique index transmute refuses to take as the key (#792): a live, non-partial, non-expression
 -- unique index, not the primary key and backing no constraint, whose key columns include the control
 -- column, on a table with no primary key and no unique constraint transmute would reuse instead (the
@@ -11373,6 +11511,7 @@ create or replace procedure pgpm._transmute(
 language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_relkind "char"; v_default name; v_staging name; v_parent regclass;
+  v_nspoid oid;   -- #1367: the schema v_nsp names, asked again after every wait of the cutover
   v_resumed boolean := false;
   v_own_start timestamptz;   -- #771: this session's backend_start, the claim's owner identity
   v_typname text; v_oldpk text[]; v_pkcols text[]; v_idcols name[]; v_pkname name; v_col name;
@@ -11412,14 +11551,13 @@ declare
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_poldefs text[] := '{}'; v_poldef text;   -- #897: the policies, captured as statements naming the table
   v_pub record;   -- #566: publication membership, carried (_transmute_refuse_publications refuses)
-  v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
+  v_key_def text;                 -- #731, #766: the reused key's whole definition (_transmute_key_ddl), carried onto the parent
   v_key_name name; v_key_idx oid; -- #789: the reused key's constraint name, which the parent takes, and its index
   v_replident "char"; v_ri_idx name;   -- #782: the table's replica identity, and the parent index it maps to
   v_grantors_q text;   -- #903: the grantors of the table's grants this session cannot replay them as
   v_sq record;                    -- #573: sequences the table owns through a column
-  -- #828: a carried secondary UNIQUE constraint: its name (the parent takes it), its index, its definition,
-  -- the deferral suffix that definition ends with, and its index's storage parameters
-  v_ucon_name name; v_ucon_idx oid; v_ucon_def text; v_ucon_sfx text; v_ucon_with_q text;
+  -- #828: a carried secondary UNIQUE constraint: its name (the parent takes it), its index, its definition
+  v_ucon_name name; v_ucon_idx oid; v_ucon_def text;
   v_spc name;                     -- #829: the table's tablespace, which the parent takes (null: the database default)
 begin
   -- #896: every argument with no null meaning, refused here, before anything below reads or commits. Not
@@ -11476,7 +11614,7 @@ begin
     raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
   end;
 
-  select n.nspname, c.relname, c.relkind into v_nsp, v_rel, v_relkind
+  select n.nspname, c.relname, c.relkind, n.oid into v_nsp, v_rel, v_relkind, v_nspoid
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   -- #509: transmute converts an ORDINARY table, once. Nothing checked either, and every shape refused here
@@ -11506,6 +11644,11 @@ begin
     raise exception 'pg_partition_magician: % has inheritance children (%). transmute converts a standalone table only: its cutover attaches the table to a new parent, and PostgreSQL refuses to attach an inheritance parent as a partition.',
       p_parent, (select string_agg(inhrelid::regclass::text, ', ' order by inhrelid) from pg_inherits where inhparent = p_parent);
   end if;
+
+  -- #1355: the table's first lock, through the name read above and held to phase 1's commit, so every read below
+  -- reaches the table under the name it has now: a read that waited for its lock behind another session's ALTER
+  -- reached whatever a schema swapped during that wait put under the name. Nothing is committed yet.
+  perform pgpm._lock_named_or_raise(p_parent, 'access share', true, v_nsp, v_rel, 'transmute');
 
   -- #825: every read below (the bound's min and max, the plausibility samples, the identity maxima) has to
   -- see every row, and under row-level security that filters this caller none of them would.
@@ -12250,6 +12393,11 @@ begin
   perform set_config('lock_timeout', p_lock_timeout, true);
   if not exists (select 1 from pg_constraint
                   where conrelid = p_parent and conname = 'pgpm_monolith_bound') then
+    -- #1355: the ADD's ACCESS EXCLUSIVE taken first, by oid, and the ADD named under it, so it waits for nothing: an
+    -- ADD that waited behind a reader resolved the name again once granted, and a schema swapped during that wait
+    -- put the write-rejecting bound on a namesake and committed it. Phases 1 and 2 follow the table by oid; the
+    -- cutover, which makes names from the preflight's, refuses a table moved since (#1367).
+    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, 'transmute');
     execute format('alter table %s add constraint pgpm_monolith_bound check (%I >= %L and %I < %L) not valid',
                    p_parent::text, p_control, pgpm._encode(p_control_kind, v_lo_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz),
                    p_control, pgpm._encode(p_control_kind, v_hi_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz));
@@ -12263,6 +12411,8 @@ begin
   perform set_config('lock_timeout', p_lock_timeout, true);   -- `set local` did not survive the COMMIT
   if not (select convalidated from pg_constraint
            where conrelid = p_parent and conname = 'pgpm_monolith_bound') then
+    -- #1355: the VALIDATE's lock first, the same way: a namesake carrying a constraint of that name was validated
+    perform pgpm._lock_oid_or_raise(p_parent, 'share update exclusive', true, 'transmute');
     execute format('alter table %s validate constraint pgpm_monolith_bound', p_parent::text);
   end if;
   commit;
@@ -12310,7 +12460,9 @@ begin
   -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
   -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
   -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
-  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');   -- #1335 b10: by oid, pinning the name
+  -- #1367: through the preflight's name, which every name the cutover makes is derived from and which nothing held
+  -- still between the phases: a RENAME committed since was undone by the renames below. Refused, not followed.
+  perform pgpm._lock_named_or_raise(p_parent, 'access share', false, v_nsp, v_rel, 'transmute');
   perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
@@ -12343,6 +12495,7 @@ begin
       end if;
       raise;
   end;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the CREATE's wait for a holder
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
   -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
@@ -12472,6 +12625,8 @@ begin
   -- no policies yet to count among them: they are created after the renames (#897), where a subquery over
   -- the table binds to the new parent rather than to this oid.
   perform pgpm._refuse_oid_bound_dependants(p_parent, false);   -- #779, again under the lock
+  -- #1367: the schema the names below are made in, asked again after that wait, and after each wait further down
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');
 
   -- 0b (under the lock, #630 and #656). What the preflight listed, listed again now that nothing can change
   -- it: the secondary indexes 9b carries, the outgoing keys 7a re-adds, and where 8b resumes each identity
@@ -12562,11 +12717,13 @@ begin
        order by c.conname
     loop
       execute format('alter table %s drop constraint %I', v_fk.reltbl::text, v_fk.conname);
+      perform pgpm._con_effect_or_raise(v_fk.reltbl, v_fk.conname, 'absent', 'transmute''s drop of an incoming key');
       insert into pgpm.dropped_fk (parent_table, referencing_table, constraint_name, definition)
         values (v_parent, v_fk.reltbl, v_fk.conname, v_fk.def);
       insert into pgpm.log (parent_table, action, method) values (v_parent, 'drop_incoming_fk', v_fk.conname);
     end loop;
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the sequences' and the drops' waits
 
   -- 0d. The records in which THIS table is the REFERENCER (#498). pgpm.dropped_fk.referencing_table is an
   -- oid, and the rename below turns p_parent into the monolith child of this conversion. A key another
@@ -12665,6 +12822,7 @@ begin
   -- and their grants (#1076): each sequence's ACL reset, the owner included, and the original's grants
   -- replayed, each under its grantor, as 7b does for the table. Step 6 made it under this role's ALTER DEFAULT
   -- PRIVILEGES. After the OWNER TO (7b), which the parent's sequences follow and the reset needs.
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the drop of identity's waits
   foreach v_grant in array v_seqgrants loop
     execute v_grant;
   end loop;
@@ -12687,7 +12845,11 @@ begin
      order by a.attnum
   loop
     execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_parent::text, v_sq.attname);
+    -- #1367: the sequence is named before the wait for its lock, behind a session holding it
+    perform pgpm._effect_or_raise(exists (select 1 from pg_depend d where d.objid = v_sq.seq and d.refobjid = v_parent
+                                            and d.deptype = 'a'), v_sq.seq, 'transmute''s hand-over of a sequence');
   end loop;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: those waits, before 7b names the parent
   -- only a reused PRIMARY KEY makes its other columns NOT NULL; a reused UNIQUE constraint legitimately
   -- permits nullable non-control columns, so leave those as they are (and never scan them).
   if v_add_pk and v_pkcols is not null then
@@ -12732,8 +12894,11 @@ begin
     for v_i2 in 1 .. array_length(v_out_names, 1) loop
       execute format('alter table %s add constraint %I %s',
                      v_parent::text, v_out_names[v_i2], v_out_defs[v_i2]);
+      perform pgpm._con_effect_or_raise(v_parent, v_out_names[v_i2], 'present', 'transmute''s re-add of an outgoing key',
+        (select k.confrelid from pg_constraint k where k.conrelid = p_parent and k.conname = v_out_names[v_i2])::regclass);
     end loop;
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: 3b's and 7a's waits
 
   -- 7b (triggers). Last of the replay from 0b, and only now that both renames are done: the captured text
   -- names the ORIGINAL table, which only resolves to the parent once the live name is in place. The
@@ -12774,6 +12939,10 @@ begin
     execute v_poldef;   -- names the ORIGINAL table, which is now the parent: replays verbatim
   end loop;
 
+  -- #1367: each CREATE POLICY names the table and can wait inside itself (a subquery's table), so what is checked
+  -- is where they went, by oid: the parent carries every one, or a schema swapped meanwhile took some
+  perform pgpm._effect_or_raise((select count(*) from pg_policy where polrelid = v_parent) = cardinality(v_poldefs),
+                                v_parent, 'transmute''s replay of the policies');
   -- 7b (comments). Read and replayed under the lock (see 0b): COMMENT takes only SHARE UPDATE EXCLUSIVE,
   -- which the staging LIKE's ACCESS SHARE does not exclude. p_parent is the monolith's oid by now, which
   -- is the table the comments are on.
@@ -12820,6 +12989,10 @@ begin
       execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
                      case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
                      case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
+      -- #1367: the table is named after the wait for the publication's lock, so the effect is checked by oid
+      perform pgpm._effect_or_raise(exists (select 1 from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+                                             where p.pubname = v_pub.pubname and r.prrelid = v_parent),
+                                    v_parent, 'transmute''s ADD TABLE to a publication');
     end loop;
   exception when others then
     perform pgpm._transmute_refuse_publications(p_parent, v_parent);
@@ -12829,12 +13002,15 @@ begin
   -- 8. parent key -- adopts the monolith's kept constraint index (metadata-only, no rebuild): a PRIMARY
   -- KEY when the reused key was the PK, a UNIQUE constraint when it was a unique constraint.
   --
-  -- With the key's deferrability (#731). A bare ADD PRIMARY KEY / ADD UNIQUE is immediate, and it still
-  -- adopted a DEFERRABLE monolith key, so the monolith kept its deferred check while every forward
-  -- partition got an immediate clone of the parent's: a key swap inside one statement, which the table
-  -- accepted before, failed with a duplicate key once its rows were past the monolith. The flags are
-  -- read off the monolith's own constraint here, under the cutover's lock (p_parent is the monolith's oid
-  -- by now), and the adopted index is the same one either way. The %s carries keywords only.
+  -- With the key's whole definition (#731, #766): _transmute_key_ddl's, read off the monolith's own
+  -- constraint here, under the cutover's lock (p_parent is the monolith's oid by now). Declared from its
+  -- column list, the key lost its deferrability (every forward partition's clone was immediate, so a key
+  -- swap inside one statement failed with a duplicate key past the monolith), its INCLUDE columns (the
+  -- parent's key matched no index of the monolith, and ADD PRIMARY KEY died with "multiple primary keys"
+  -- after phases 1 and 2 had committed, on every retry) and NULLS NOT DISTINCT (a second unique index was
+  -- built on the monolith under the lock, and every forward partition took a duplicate the table refused).
+  -- Declared on ONLY the parent, with the monolith's index attached under it, as 9b carries a unique
+  -- constraint: a definition the index does not match fails the ATTACH rather than building another.
   --
   -- Under the table's own constraint name (#789). Declared anonymously, the parent's key took an
   -- auto-name (t_pkey came back as t_pkey1, since the monolith's index still held t_pkey, and a named
@@ -12845,24 +13021,18 @@ begin
   -- pgpm_key_<its index oid>: whole at any key length, where <name>_pgpm cannot fit beside a 59 to 63
   -- byte name (from_hypertable hands such keys to this cutover), and recognisable by identity, which is
   -- how untransmute knows to hand the original name back. _transmute_carried_indexes refused it up front
-  -- if taken. Name, index and flags are read together, off the monolith's constraint, under the lock.
-  select c.conname, c.conindid,
-         case when c.condeferrable and c.condeferred then ' deferrable initially deferred'
-              when c.condeferrable then ' deferrable'
-              else '' end
-    into v_key_name, v_key_idx, v_key_defer
+  -- if taken. Name, index and definition are read together, off the monolith's constraint, under the lock.
+  select c.conname, c.conindid, pgpm._transmute_key_ddl(c.oid)
+    into v_key_name, v_key_idx, v_key_def
     from pg_constraint c
    where c.conrelid = p_parent
      and ((v_add_pk and c.contype = 'p') or (v_add_uniq and c.contype = 'u' and c.conindid = v_reuse_idx));
   if v_add_pk or v_add_uniq then
     execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_name, 'pgpm_key_' || v_key_idx);
-  end if;
-  if v_add_pk then
-    execute format('alter table %s add constraint %I primary key (%s)%s', v_parent::text, v_key_name,
-                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
-  elsif v_add_uniq then
-    execute format('alter table %s add constraint %I unique (%s)%s', v_parent::text, v_key_name,
-                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
+    execute format('alter table only %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);
+    execute format('alter index %s attach partition %s',
+                   (select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.conname = v_key_name),
+                   v_key_idx::regclass::text);
   end if;
 
   -- 8b. advance each identity sequence to the original sequence's own next value (no re-issue of ids it
@@ -12876,6 +13046,7 @@ begin
     end loop;
   end if;
 
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: 7c's and 8's waits, before 9b's names
   -- 9b. recreate secondary indexes as partitioned indexes, attaching the monolith's
   if v_idx_names is not null then
     for j in 1 .. array_length(v_idx_names, 1) loop
@@ -12886,30 +13057,17 @@ begin
       -- immediate on the parent and on every forward partition, so a one-statement swap the table accepted
       -- before failed with a duplicate key past the monolith. The monolith's copy makes way under
       -- pgpm_key_<its index oid> (refused up front if taken; untransmute hands the name back), the parent
-      -- takes the name with the original definition (columns, NULLS NOT DISTINCT, INCLUDE, DEFERRABLE,
-      -- INITIALLY DEFERRED: pg_get_constraintdef's), on ONLY the parent, and the monolith's own index is
-      -- attached under it by name, so the adoption is exact and nothing is rebuilt. pg_get_constraintdef
-      -- leaves out the index's storage parameters, so they are spliced back in ahead of the deferral clause
-      -- it ends with, which comes from the same two flags. Read under the cutover's lock.
-      select k.conname, k.conindid, pg_get_constraintdef(k.oid),
-             case when k.condeferrable and k.condeferred then ' DEFERRABLE INITIALLY DEFERRED'
-                  when k.condeferrable then ' DEFERRABLE'
-                  else '' end,
-             (select string_agg(quote_ident(o.option_name) || '=' || quote_literal(o.option_value), ', ')
-                from pg_class ic, pg_options_to_table(ic.reloptions) o where ic.oid = k.conindid)
-        into v_ucon_name, v_ucon_idx, v_ucon_def, v_ucon_sfx, v_ucon_with_q
+      -- takes the name with the original definition (_transmute_key_ddl's, as step 8's key), on ONLY the
+      -- parent, and the monolith's own index is attached under it by name, so the adoption is exact and
+      -- nothing is rebuilt. Read under the cutover's lock.
+      select k.conname, k.conindid, pgpm._transmute_key_ddl(k.oid)
+        into v_ucon_name, v_ucon_idx, v_ucon_def
         from pg_constraint k
        where k.conrelid = v_monreg and k.contype = 'u'
          and k.conindid = to_regclass(format('%I.%I', v_nsp, v_old))::oid;
       if found then
-        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then
-          raise exception 'pg_partition_magician: cannot carry the unique constraint % of %: its definition (%) does not end with its deferral clause (%), so its storage parameters cannot be placed ahead of it',
-            quote_ident(v_ucon_name), p_parent, v_ucon_def, v_ucon_sfx;
-        end if;
         execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_ucon_name, 'pgpm_key_' || v_ucon_idx);
-        execute format('alter table only %s add constraint %I %s%s%s', v_parent::text, v_ucon_name,
-                       left(v_ucon_def, length(v_ucon_def) - length(v_ucon_sfx)),
-                       coalesce(' WITH (' || v_ucon_with_q || ')', ''), v_ucon_sfx);
+        execute format('alter table only %s add constraint %I %s', v_parent::text, v_ucon_name, v_ucon_def);
         execute format('alter index %I.%I attach partition %I.%I', v_nsp, v_ucon_name, v_nsp, 'pgpm_key_' || v_ucon_idx);
         continue;
       end if;
@@ -13051,6 +13209,7 @@ begin
       raise;
   end;
   perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: obtain's waits, and that asking
 
   -- the conversion is complete: deleting the claim row IS releasing the claim, and nothing is left for the
   -- reaper to undo.
@@ -13204,6 +13363,10 @@ begin
   v_prev_lock_timeout := current_setting('lock_timeout');
   perform set_config('lock_timeout', p_lock_timeout, true);
   begin
+    -- #1364: the lock by the claim's oid first, and the DROP named under it, so the DROP waits for nothing: named
+    -- before its own wait, it reached whatever a schema swapped during that wait put under the name, while the
+    -- claim was deleted and the table logged restored with its bound still on.
+    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', false, 'transmute_abort');
     execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);
   exception when lock_not_available then
     raise exception 'pg_partition_magician: transmute_abort(%) could not take ACCESS EXCLUSIVE on % within % (another transaction holds a lock on it); nothing was changed, the bound and the claim are as they were. Retry when that transaction has finished, or pass a longer p_lock_timeout.',
@@ -13556,6 +13719,7 @@ create or replace function pgpm.untransmute(p_parent regclass)
 returns regclass language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_rel name; v_monreg regclass; v_restored regclass;
+  v_nspoid oid; v_cfn_reg regprocedure;   -- #1367: the schema v_nsp names; the capture function, by oid
   v_mon name; v_mon_lo text; v_mon_hi text; v_outside boolean;
   v_gate_q text; v_door text;   -- #443: the outside-rows check and its refusal, asked twice
   v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext numeric[]; v_seq regclass;
@@ -13573,6 +13737,7 @@ declare
   v_g record;
   v_owner oid; v_comdefs text[] := '{}';
   v_pubdefs text[] := '{}';   -- #780: the parent's publication memberships, as ADD TABLEs naming the restored table
+  v_pubwant text[];           -- #1367: the same, kept whole, for the check of where they went
   v_key_name name; v_key_mon name;   -- #789: the parent's key name, and the monolith copy's pgpm_key_<oid>
   v_ix_oids oid[] := '{}'; v_ix_names name[] := '{}';   -- #830: monolith index oids, and the parent copies' names
   v_ri "char"; v_ri_idx oid;   -- #815: the parent's replica identity, and the monolith's index under its identity index
@@ -13601,7 +13766,7 @@ begin
   -- what both runs read. Held to the end, this pins the name every later statement renders.
   perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'untransmute');
 
-  select n.nspname, c.relname into v_nsp, v_rel
+  select n.nspname, c.relname, n.oid into v_nsp, v_rel, v_nspoid
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   -- resolve the regrain change-capture names (#267) NOW, while the parent and its config row still exist:
   -- they come from the oids recorded there at prepare (#496), or failing that from the parent's own name,
@@ -13609,6 +13774,9 @@ begin
   select nsp, delta, fn, fn_nsp into v_cnsp, v_cdelta, v_cfn, v_cfnsp from pgpm._regrain_capture_names(p_parent);
   if v_cdelta is not null then   -- #1335 b10: dropped at the end by this oid, not by the name
     v_cdelta_reg := to_regclass(format('%I.%I', v_cnsp, v_cdelta));
+  end if;
+  if v_cfn is not null then   -- #1367: and the function, the same way
+    v_cfn_reg := to_regprocedure(format('%I.%I()', v_cfnsp, v_cfn));
   end if;
   -- #969: and they are dropped at the end, with the copies a regrain in flight leaves, which a table handed to a
   -- new owner may have left with the old one. Asked before anything is changed, so the new owner's untransmute
@@ -13699,6 +13867,7 @@ begin
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null order by id loop
     execute format('alter table %s drop constraint %I', r.referencing_table::text, r.constraint_name);
+    perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'absent', 'untransmute''s drop of an incoming key');
   end loop;
 
   -- THE GATE, AGAIN, UNDER THE LOCK (#443). The check above ran under ACCESS SHARE, which excludes no
@@ -13724,6 +13893,9 @@ begin
     raise exception '%', v_door;
   end if;
   perform pgpm._refuse_oid_bound_dependants(p_parent, true);   -- #779, final: no CREATE VIEW passes this lock
+  -- #1367: the parent's own name is pinned since the first lock, its schema's is not: the statements captured below
+  -- name the table in the schema read then, so a schema renamed in this wait or a later one is refused, after the door
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');
 
   -- Capture the parent's triggers before it is dropped (#277). transmute dropped the monolith's own
   -- originals in favour of the parent's, which clone down to every partition, and DETACH strips those
@@ -13921,6 +14093,8 @@ begin
      order by a.attnum
   loop
     execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_monreg::text, v_sq.attname);
+    perform pgpm._effect_or_raise(exists (select 1 from pg_depend d where d.objid = v_sq.seq and d.refobjid = v_monreg
+                                            and d.deptype = 'a'), v_sq.seq, 'untransmute''s hand-back of a sequence');
   end loop;
   execute format('drop table %s', p_parent::text);
   -- the parent's key went with it, which frees its name for the table's own key again (#789), and so did
@@ -13992,10 +14166,12 @@ begin
       execute format('alter table %s add constraint %I %s',
                      r.referencing_table::text, r.constraint_name,
                      pgpm._fk_readd_definition(r.definition, v_restored));   -- #872: the restored table by oid
+      perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'untransmute''s re-add of an incoming key', v_restored);
     else
       execute format('alter table %s add constraint %I %s not valid',
                      r.referencing_table::text, r.constraint_name,
                      pgpm._fk_readd_definition(r.definition, v_restored));   -- #872: the restored table by oid
+      perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'untransmute''s re-add of an incoming key', v_restored);
       raise notice 'pg_partition_magician: untransmute re-added % on % NOT VALID; validate it outside this transaction with: ALTER TABLE % VALIDATE CONSTRAINT %',
         quote_ident(r.constraint_name), r.referencing_table::text, r.referencing_table::text, quote_ident(r.constraint_name);
     end if;
@@ -14006,9 +14182,11 @@ begin
   -- restored table goes there, its indexes, its row type and the sequences it owns with it, so the statements
   -- captured off the parent (triggers, comments, grants, policies, publication memberships) replay against
   -- the name they were built with. The parent's DROP freed that name.
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: every wait since the gate
   if (select relnamespace from pg_class where oid = v_restored) <> (select oid from pg_namespace where nspname = v_nsp) then
     execute format('alter table %s set schema %I', v_restored::text, v_nsp);
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: the move's owned sequences' waits
 
   -- The restored table's identity sequences take the names the managed table's carried (#877). They were
   -- re-added above on the monolith, still named <table>_p<label>, so PostgreSQL named each
@@ -14043,6 +14221,7 @@ begin
   if (select relowner from pg_class where oid = v_restored) <> v_owner then
     execute format('alter table %s owner to %I', v_restored::text, pg_get_userbyid(v_owner));
   end if;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: the moves' and owner's sequence waits
   foreach v_tdef in array v_comdefs loop
     execute v_tdef;
   end loop;
@@ -14076,12 +14255,16 @@ begin
   foreach v_tdef in array v_poldefs loop
     execute v_tdef;
   end loop;
+  -- #1367: where the policies went, by oid, as transmute's 7b asks
+  perform pgpm._effect_or_raise((select count(*) from pg_policy where polrelid = v_restored) = cardinality(v_poldefs),
+                                v_restored, 'untransmute''s replay of the policies');
 
   -- Put the parent's publication memberships on the restored table in place of the monolith's (#780;
   -- captured under the lock, above). The two are compared as the statements that would create them: one the
   -- restored table has and the parent did not, or has with another column list or row filter, is dropped;
   -- one the parent had is then added, unless the restored table already has it exactly. FOR ALL TABLES and
   -- FOR TABLES IN SCHEMA name no table, so they cover the restored table as they covered the parent.
+  v_pubwant := v_pubdefs;
   for v_g in select o_pub, o_def from pgpm._publication_adds(v_restored, v_nsp, v_rel) loop
     if v_g.o_def = any(v_pubdefs) then
       v_pubdefs := array_remove(v_pubdefs, v_g.o_def);
@@ -14092,6 +14275,11 @@ begin
   foreach v_tdef in array v_pubdefs loop
     execute v_tdef;
   end loop;
+  -- #1367: each ALTER PUBLICATION names the table after waiting for the publication's lock, so where they went is
+  -- checked by oid: the restored table's memberships are now the parent's, or a schema swapped meanwhile took some
+  perform pgpm._effect_or_raise(array(select o_def from pgpm._publication_adds(v_restored, v_nsp, v_rel) order by 1)
+                                = array(select d from unnest(v_pubwant) d order by 1),
+                                v_restored, 'untransmute''s publication memberships');
 
   -- Put the parent's replica identity on the restored table in place of the monolith's conversion-time one
   -- (#815; captured under the lock, above). Only when they differ, so a reverse with nothing changed costs
@@ -14110,7 +14298,7 @@ begin
   -- #555: where they are, not the parent's schema; #955: only what pgpm.config recorded, never a namesake;
   -- #1271: each in its OWN schema, since either may have been moved without the other
   if v_cdelta_reg is not null then perform pgpm._drop_by_oid(v_cdelta_reg, 'untransmute, dropping the regrain delta,'); end if;
-  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cfnsp, v_cfn); end if;
+  if exists (select 1 from pg_proc where oid = v_cfn_reg) then execute format('drop function %s', v_cfn_reg::text); end if;
 
   -- forget all pgpm state for this table (matched by the dropped parent's oid, which p_parent still
   -- carries), and log the reversal against the restored table.
@@ -16381,11 +16569,15 @@ begin
         execute format('alter table %s add constraint %I %s',
                        r.referencing_table::text, r.constraint_name,
                        pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid
+        perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'the re-add of an incoming key', p_parent);
         update pgpm.dropped_fk set restored_at = now(), validated_at = now(), validate_retry_after = null where id = r.id;
       else
         execute format('alter table %s add constraint %I %s not valid',
                        r.referencing_table::text, r.constraint_name,
                        pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid
+        -- the ADD waits for the referencing table's lock and the parent's, and a schema swapped during that wait sent
+        -- it to a namesake: the record was marked restored, and _forget_dangling_fks then forgot the key for good
+        perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'present', 'the re-add of an incoming key', p_parent);
         update pgpm.dropped_fk set restored_at = now(), validated_at = null where id = r.id;
       end if;
       v_readded := true;
@@ -16450,6 +16642,7 @@ begin
             order by id loop
     begin
       execute format('alter table %s validate constraint %I', r.referencing_table::text, r.constraint_name);
+      perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'validated', 'the VALIDATE of an incoming key');
       update pgpm.dropped_fk set validated_at = now(), validate_retry_after = null where id = r.id;
       insert into pgpm.log (parent_table, action, method) values (p_parent, 'validate_incoming_fk', r.constraint_name);
       v_n := v_n + 1;
@@ -16542,6 +16735,7 @@ begin
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null order by id loop
     execute format('alter table %s drop constraint %I', r.referencing_table::text, r.constraint_name);
+    perform pgpm._con_effect_or_raise(r.referencing_table, r.constraint_name, 'absent', 'the suspension of an incoming key');
     update pgpm.dropped_fk set restored_at = null, validated_at = null where id = r.id;
     insert into pgpm.log (parent_table, action, method) values (p_parent, 'suspend_incoming_fk', r.constraint_name);
     v_n := v_n + 1;

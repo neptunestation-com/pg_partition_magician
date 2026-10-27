@@ -9,8 +9,10 @@ select plan(8);
 
 -- (A) keyless table (no PK, no unique constraint), control NOT NULL
 create table public.kl (ts timestamptz not null, device int, val float8);
+-- each row its own device, day and value, so a keyless table that duplicated one row and lost another
+-- fails the conservation check below rather than cancelling in a count (#1374)
 insert into public.kl (ts, device, val)
-  select date_trunc('month', now()) - interval '3 months' + (g || ' days')::interval, g, random()
+  select date_trunc('month', now()) - interval '3 months' + (g || ' days')::interval, g, g * 1.5
   from generate_series(1, 40) g;
 
 call pgpm.transmute('public.kl', 'ts', interval '1 month', p_paused => false);
@@ -24,7 +26,12 @@ select is(
 select is(
   (select attnotnull from pg_attribute where attrelid = 'public.kl'::regclass and attname = 'ts'),
   true, 'the control column is NOT NULL');
-select is((select count(*)::int from public.kl), 40, 'all rows conserved through the parent');
+-- by value, as a bag: the table has no key, so a duplicate is a row like any other (#1374)
+select is(
+  (select array_agg(device || ':' || (ts::date - d0) || ':' || val order by device, ts, val)
+     from public.kl, (select min(ts)::date - 1 as d0 from public.kl) m),
+  (select array_agg(g || ':' || g || ':' || (g * 1.5)::float8 order by g) from generate_series(1, 40) g),
+  'all rows conserved through the parent');
 -- the monolith holds the history as one coarse child, queryable through the parent
 -- status().coarse_partitions rather than a width predicate on lo/hi: this table is TIME-kind, so those
 -- are timestamps and will not subtract as numerics. status() already knows the control kind.

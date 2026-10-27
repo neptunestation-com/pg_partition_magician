@@ -612,6 +612,12 @@ run_timescale() {
     # the clean-code half of the pairs discriminate.sh completes with its two mutants.
     echo "--- a drain step refuses a name a schema rename moved while it waited (issue #1335 bullet 10) ---"
     bash "$(dirname "$0")/bench/hypertable_drain_schema_swap.sh" pgpm_test-timescale pgpm_perf401 || fail=1
+    # #1366's and #1356's guards, the same way: they re-run tests/timescale/db/346 and 347 against the real install,
+    # the clean-code half of the pairs discriminate.sh completes with their nine mutants.
+    echo "--- the module reaches what pgpm recorded by oid after a wait (issue #1366) ---"
+    bash "$(dirname "$0")/bench/hypertable_by_oid_after_wait.sh" pgpm_test-timescale pgpm_perf413 || fail=1
+    echo "--- the drains never read an empty namesake as converged (issue #1356) ---"
+    bash "$(dirname "$0")/bench/hypertable_drain_probe_by_oid.sh" pgpm_test-timescale pgpm_perf414 || fail=1
     # #1241's hypertable guard, the same way: it re-runs tests/timescale/db/67 against the real install, the clean-code
     # half of the pair discriminate.sh completes with its mutant.
     echo "--- the cutover waits for snapshots older than its copy before it swaps (issue #1241) ---"
@@ -993,11 +999,13 @@ run_archive() {
   # claim row left unlocked before the ledger lookup.
   echo "--- a direct archive_fn call racing a tick on the same chunk is refused guard (issue #1069) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk_tick_race.sh" pgpm_test-archive pgpm_g1race || fail=1
-  # The read-back guard (#1093, #1284) re-runs tests/archive/db/08, 16 and 44 for the same reason: the clean-code
-  # half of the pairs bench/discriminate.sh completes with each file's read-back weakened to its pre-fix shape
-  # (archive_fn_parquet_readback_trusted, archive_fn_ndjson_readback_by_count,
-  # archive_key_parquet_readback_by_presence, archive_extres_parquet_by_prefix).
-  echo "--- tests/archive/db/08, 16 and 44 read their objects back by identity guard (issues #1093, #1284) ---"
+  # The read-back guard (#1093, #1284, #1376) re-runs tests/archive/db/08, 16, 26, 42, 44, 48 and 54 for the same
+  # reason: the clean-code half of the pairs bench/discriminate.sh completes with each file's read-back weakened
+  # to its pre-fix shape (archive_fn_parquet_readback_trusted, archive_fn_ndjson_readback_by_count,
+  # archive_key_parquet_readback_by_presence, archive_extres_parquet_by_prefix, archive_schema_zone_parquet_by_size,
+  # archive_recorded_chunk_rerun_by_length, archive_recorded_rows_rerun_by_length,
+  # archive_direct_bounds_parquet_by_status).
+  echo "--- tests/archive/db/08, 16, 26, 42, 44, 48 and 54 read their objects back by identity guard (issues #1093, #1284, #1376) ---"
   bash "$(dirname "$0")/bench/archive_fn_s3_readback.sh" pgpm_test-archive pgpm_perf123 || fail=1
   # The key-by-resolved-oid guard (#1064) re-runs tests/archive/db/49 for the same reason, and runs
   # scripts/check_archive_child_by_oid.py on the module: the clean-code half of the pair bench/discriminate.sh
@@ -1024,6 +1032,14 @@ run_archive() {
   # pairs bench/discriminate.sh completes with each encoder keying its object by the caller's spelling of lo again.
   echo "--- a direct archive_fn strategy call keys the chunk it read, in any DateStyle or zone guard (issue #814) ---"
   bash "$(dirname "$0")/bench/archive_direct_call_bounds.sh" pgpm_test-archive pgpm_perf396 || fail=1
+  # The prefix-refusal guard (#1368) re-runs tests/archive/db/55 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with the p_prefix refusal printing a value that holds an '@' again.
+  echo "--- archive.configure's p_prefix refusal prints no value holding an '@' guard (issue #1368) ---"
+  bash "$(dirname "$0")/bench/archive_configure_prefix_shown.sh" pgpm_test-archive pgpm_perf422 || fail=1
+  # The encoded-unit guard (#1369) re-runs tests/archive/db/56 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with a uuidv7 or text_time bound read as its instant again.
+  echo "--- a direct strategy call reads an encoded grid's bound at its unit guard (issue #1369) ---"
+  bash "$(dirname "$0")/bench/archive_direct_call_encoded_unit.sh" pgpm_test-archive pgpm_perf423 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
@@ -1136,6 +1152,7 @@ run_perf() {
     "bench/archive_keys_inverse_rule.sh pgpm_perf386"
     "bench/lint_child_by_oid_inverse.sh pgpm_perf348"
     "bench/lint_child_by_oid_cast_spellings.sh pgpm_perf387"
+    "bench/lint_changelog_residue_spellings.sh pgpm_perf436"
     "bench/tap_verdict.sh pgpm_perf80"
     "bench/retire_straddle.sh pgpm_perf81"
     "bench/archive_overclaim.sh pgpm_perf82"
@@ -1311,6 +1328,7 @@ run_perf() {
     "bench/over_retired_chunks_grid_zone.sh pgpm_perf372"
     "bench/archive_coverage_unnamed_bound.sh pgpm_perf402"
     "bench/over_retired_chunks_unnamed_widest.sh pgpm_perf404"
+    "bench/native_bound_reach_every_offset.sh pgpm_perf416"
     "bench/transmute_reap_reread.sh pgpm_perf336"
     "bench/set_regrain_restated_target.sh pgpm_perf335"
     "bench/regrain_registered_grid_off_unit.sh pgpm_perf355"
@@ -1318,6 +1336,7 @@ run_perf() {
     "bench/transmute_child_names_under_lock.sh pgpm_perf337"
     "bench/obtain_walk_reads_rows_once.sh pgpm_perf332"
     "bench/ci_runs_lint_jobs.sh pgpm_perf351"
+    "bench/summary_gates_every_job.sh pgpm_perf432"
     "bench/throws_pinned_sites.sh pgpm_perf350"
     "bench/wrapper_premise_rule.sh pgpm_perf344"
     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
@@ -1327,6 +1346,7 @@ run_perf() {
     "bench/adopt_partition_isolation.sh pgpm_perf370"
     "bench/retire_locks_by_oid.sh pgpm_perf400"
     "bench/uninstall_drops_by_oid.sh pgpm_perf406"
+    "bench/transmute_by_oid.sh pgpm_perf410"
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
     "bench/install_keeps_surface_grants.sh pgpm_perf375"
     "bench/retirement_mark_needs_dispatch.sh pgpm_perf367"
@@ -1341,6 +1361,11 @@ run_perf() {
     "bench/harness_conservation_identity.sh pgpm_perf390"
     "bench/retire_referenced_by_anchor.sh pgpm_perf418"
     "bench/part_row_by_name_lint.sh pgpm_perf419"
+    "bench/transmute_reused_key_shape.sh pgpm_perf420"
+    "bench/archive_log_bounds_canonical.sh pgpm_perf424"
+    "bench/archive_remedy_encoded_bounds.sh pgpm_perf425"
+    "bench/tests_identity_not_count.sh pgpm_perf426"
+    "bench/verify_parquet_tests_see_rows.sh pgpm_perf427"
   )
   local selected=()
   local n=${#guards[@]} idx
@@ -1623,6 +1648,9 @@ lint_job_minifier() {
   python3 scripts/minify_sql.py --selftest
   PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
 }
+lint_job_core_growth() {
+  python3 scripts/core_growth.py --selftest
+}
 lint_job_track_filters() {
   python3 scripts/check_track_filters.py --selftest
   python3 scripts/check_track_filters.py
@@ -1673,6 +1701,7 @@ run_lint() {
     quoted-splices
     archive-object-keys
     minifier
+    core-growth
     track-filters
     review-tooling-selftest
     shellcheck

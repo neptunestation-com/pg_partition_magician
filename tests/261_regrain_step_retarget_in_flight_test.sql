@@ -85,8 +85,9 @@ select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
 select is((select array_agg(left(method, 60) order by id) from pgpm.log
             where parent_table = 'public.rt261'::regclass and action = 'skip_regrain'), null,
           'no tick of the run was refused');
-select is((select array_agg(id || ':' || note order by id) from public.rt261 where id in (1, 45, 50, 55, 150, 200, 450)),
-          array['1:old1', '45:old45', '50:old50', '55:old55', '150:old150', '200:old200', '450:frontier'],
+-- every row, not a sample of ids (#1375): a swap that lost a row between the sampled ones would pass a sample
+select is((select array_agg(id || ':' || note order by id) from public.rt261),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
           'every row reads as inserted after the swap');
 
 -- ======================================================================================================
@@ -121,8 +122,8 @@ select is(pgpm.regrain('public.rh261', :'mon_b', '20'), 15,
 select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
             where parent_table = 'public.rh261'::regclass and attached and hi::numeric <= 60),
           array['0-20', '20-40', '40-60'], 'LIVENESS: (B) the swap attached the run''s 20-grid children');
-select is((select array_agg(id || ':' || note order by id) from public.rh261 where id in (1, 19, 20, 21, 150, 200)),
-          array['1:old1', '19:old19', '20:old20', '21:old21', '150:old150', '200:old200'],
+select is((select array_agg(id || ':' || note order by id) from public.rh261),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
           'every row reads as inserted after it');
 
 select * from finish();

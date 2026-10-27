@@ -943,6 +943,44 @@ returns text language sql stable set datestyle = 'ISO, MDY' as $$
   select p_value::text;
 $$;
 
+-- _from_hypertable_drop_fn: DROP FUNCTION of a capture function pgpm recorded, by its oid (#1366). DROP FUNCTION
+-- takes a name, waits for the function's lock and looks the name up again once granted, so the function or its
+-- schema renamed aside with a namesake committed during that wait was what it dropped: the operator's function,
+-- while pgpm's stayed behind with its record deleted. LOCK cannot take a function, so the name is rendered from the
+-- oid at the statement and the oid must be gone after it, or the caller's transaction is refused and rolled back
+-- (the check core's _effect_or_raise makes of a relation, and uninstall.sql's of a function, #1357).
+create or replace function pgpm._from_hypertable_drop_fn(p_fn oid, p_what text)
+returns void language plpgsql as $$
+begin
+  if not exists (select 1 from pg_proc f where f.oid = p_fn) then return; end if;
+  execute format('drop function %s', p_fn::regprocedure::text);
+  if exists (select 1 from pg_proc f where f.oid = p_fn) then
+    raise exception 'pg_partition_magician: % reached another function than the one pgpm recorded (oid %): the function or its schema was renamed while the DROP waited for its lock, and another function stood under the name; rolled back. Re-run it',
+      p_what, p_fn;
+  end if;
+end $$;
+
+-- _from_hypertable_lock_copy: the copy pgpm recorded for p_hypertable, locked ROW EXCLUSIVE by its oid (#1366), as
+-- the online drains take it first in every transaction (#1158). They used to lock it by the name read at their
+-- start, and LOCK TABLE looks the name up again once granted: a schema renamed aside with a namesake copy committed
+-- while the drain waited put the lock and the watermark read on the namesake, and an empty one's NULL watermark
+-- (every row past it, #736) made the step copy every source row into the real copy a second time. Followed to
+-- wherever its schema went; gone (the cutover swapped it in and deleted its record) keeps the 42P01 a lock by name
+-- raised. Returns the copy, for the caller to name by its oid's rendering under this lock.
+create or replace function pgpm._from_hypertable_lock_copy(p_hypertable regclass, p_what text)
+returns regclass language plpgsql as $$
+declare v_copy regclass := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');
+begin
+  if v_copy is not null and pgpm._lock_oid(v_copy, 'row exclusive', true) then
+    -- the record asked again in a statement of its own, so in a snapshot taken after the wait: the swap deletes it
+    if pgpm._scratch_rel(p_hypertable, 'hypertable_dest') is not distinct from v_copy then
+      return v_copy;
+    end if;
+  end if;
+  raise exception 'pg_partition_magician: %(%): the copy pgpm recorded is gone, or the cutover swapped it in while this waited for its lock; nothing left to drain into',
+    p_what, p_hypertable using errcode = 'undefined_table';
+end $$;
+
 -- from_hypertable runs in two phases, exposed as separate procedures so writes can keep arriving between
 -- them: from_hypertable_copy does the online bulk copy to a watermark, then from_hypertable_cutover catches
 -- up the rows that arrived after it, swaps the copy into place, and hands off to transmute. from_hypertable
@@ -1017,7 +1055,8 @@ begin
               where t.tgrelid = p_hypertable and t.tgfoid = v_prev_fn and not t.tgisinternal loop
       execute format('drop trigger %I on %I.%I', r.tgname, v_nsp, v_rel);
     end loop;
-    execute format('drop function %s', v_prev_fn::text);
+    -- #1366: by the oid, its drop checked (a trigger drop that reached a namesake leaves ours depending on it: 2BP01)
+    perform pgpm._from_hypertable_drop_fn(v_prev_fn, format('from_hypertable_copy(%s), dropping the previous capture function,', p_hypertable));
   end if;
   v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');
   if v_prev is not null then
@@ -1378,9 +1417,11 @@ begin
   end if;
   -- #1335 b10, round 3: the delta locked by oid too, after the copy (#1158's order), and every statement below names
   -- the source, the copy and the delta by their oids' renderings, so none waits for its own target and none can be
-  -- sent to a namesake by a schema renamed during such a wait (a read has no effect to check afterwards). The source
-  -- is held by oid already: _refuse_filtered_reads' row_security_active opens it, ACCESS SHARE to the end.
+  -- sent to a namesake by a schema renamed during such a wait (a read has no effect to check afterwards). #1366: and
+  -- the source, which nothing locked before the reconcile read it (row_security_active takes no lock), so that read
+  -- waited behind a holder of the source and, after a schema swap, reconciled the batch from a namesake.
   perform pgpm._lock_oid_or_raise(v_delta, 'row exclusive', true, 'from_hypertable_drain_delta_step');
+  perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_delta_step');
   v_dest_reg := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');
   -- #873: the batch's keys leave the delta below and their rows are re-read from the source as this caller,
   -- so under row-level security that filters it a hidden row's change would be consumed and never applied.
@@ -1457,7 +1498,7 @@ create or replace procedure pgpm.from_hypertable_drain_delta(
   p_threshold bigint default 0, p_max_iter int default 1000000, p_best_effort boolean default false
 ) language plpgsql as $$
 declare
-  v_nsp name; v_rel name; v_dest name;
+  v_dest name;
   v_delta regclass;   -- the recorded delta, by oid, wherever it lives (#1057)
   v_iter int := 0; v_more boolean;
 begin
@@ -1467,8 +1508,6 @@ begin
     'p_max_iter', p_max_iter, 'p_best_effort', p_best_effort));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_drain_delta');   -- #986 #979: owner and writers first
-  select n.nspname, c.relname into v_nsp, v_rel
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta)
   v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (drain_delta)
   if v_delta is null then
@@ -1477,10 +1516,13 @@ begin
 
   loop
     -- #1158: the copy first in every batch's transaction, before the residual check reads the delta (see
-    -- from_hypertable_drain_delta_step). With no copy recorded the step below refuses, naming it.
+    -- from_hypertable_drain_delta_step). With no copy recorded the step below refuses, naming it. #1366: by its oid.
     if v_dest is not null then
-      execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
+      perform pgpm._from_hypertable_lock_copy(p_hypertable, 'from_hypertable_drain_delta');
     end if;
+    -- #1356: the delta by its oid before the residual check names it, the lock the step takes next, so the check
+    -- never waits for it and never reads an empty namesake as "converged"
+    perform pgpm._lock_oid_or_raise(v_delta, 'row exclusive', true, 'from_hypertable_drain_delta');
     -- residual <= threshold? EXISTS at offset stops at the first row past the threshold (count > threshold)
     execute format('select exists(select 1 from %s order by %I offset %s limit 1)',
                    v_delta, pgpm._delta_seq(v_delta), p_threshold) into v_more;
@@ -1567,8 +1609,10 @@ begin
 
   v_past := pgpm._from_hypertable_past(p_control, p_watermark, v_ctl_type);
   -- #1335 b10, round 3: every statement below names the source and the copy by their oids' renderings, under locks
-  -- on both oids (the copy's above; the source's from _refuse_filtered_reads' row_security_active, ACCESS SHARE to
-  -- the end), so neither waits for its own target and a schema renamed meanwhile cannot send it to a namesake
+  -- on both oids, so neither waits for its own target and a schema renamed meanwhile cannot send it to a namesake.
+  -- #1356: the source's lock is taken here; nothing took it before (row_security_active takes no lock), so the
+  -- watermark probe waited for it and read an empty namesake as "nothing past the watermark"
+  perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_appends_step');
   v_dest_reg := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');
   -- #873: the tail is read from the source as this caller
   perform pgpm._refuse_filtered_reads(p_hypertable, 'drain appends from hypertable',
@@ -1602,7 +1646,8 @@ create or replace procedure pgpm.from_hypertable_drain_appends(
   p_threshold bigint default 0, p_max_iter int default 1000000, p_best_effort boolean default false
 ) language plpgsql as $$
 declare
-  v_nsp name; v_rel name; v_dest name; v_ctl_type text; v_watermark text; v_more boolean; v_iter int := 0;
+  v_dest name; v_ctl_type text; v_watermark text; v_more boolean; v_iter int := 0;
+  v_copy regclass;   -- #1366: the copy pgpm recorded, locked by its oid
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('from_hypertable_drain_appends', json_build_object(
@@ -1610,8 +1655,6 @@ begin
     'p_max_iter', p_max_iter, 'p_best_effort', p_best_effort));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_drain_appends');   -- #986 #979: owner and writers first
-  select n.nspname, c.relname into v_nsp, v_rel
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends)
   if v_dest is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_appends(%) found no copy to drain -- run from_hypertable_copy first', p_hypertable;
@@ -1625,19 +1668,22 @@ begin
   -- copy's watermark or the source's residual: a cutover holds SHARE on the copy from its read of it to the
   -- swap, and a drain that waited for the copy while holding a read of the source or the copy would deadlock
   -- with it. Waiting here holds nothing the cutover wants, and once it swaps the copy is gone (42P01).
-  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
+  -- #1366: by the copy's oid, and its watermark read by the oid's rendering under that lock
+  v_copy := pgpm._from_hypertable_lock_copy(p_hypertable, 'from_hypertable_drain_appends');
   -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.
   -- NULL when nothing was copied, which puts every source row past it (#736, _from_hypertable_past).
-  execute format('select pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', p_control, v_nsp, v_dest) into v_watermark;
+  execute format('select pgpm._from_hypertable_ctl_text(max(%I)) from %s', p_control, v_copy) into v_watermark;
   loop
-    -- residual past the watermark <= threshold? EXISTS at offset (chunk-excluded by control > watermark)
-    execute format('select exists(select 1 from %I.%I where %s order by %I offset %s limit 1)',
-                   v_nsp, v_rel, pgpm._from_hypertable_past(p_control, v_watermark, v_ctl_type),
+    -- residual past the watermark <= threshold? EXISTS at offset (chunk-excluded by control > watermark).
+    -- #1356: on the source locked by its oid first, so an empty namesake never reads as "converged"
+    perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_appends');
+    execute format('select exists(select 1 from %s where %s order by %I offset %s limit 1)',
+                   p_hypertable, pgpm._from_hypertable_past(p_control, v_watermark, v_ctl_type),
                    p_control, p_threshold) into v_more;
     exit when not v_more;
     v_watermark := pgpm.from_hypertable_drain_appends_step(p_hypertable, p_control, p_batch, v_watermark);
     commit;
-    execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);   -- #1158: the next transaction's
+    perform pgpm._from_hypertable_lock_copy(p_hypertable, 'from_hypertable_drain_appends');   -- #1158: the next transaction's
     v_iter := v_iter + 1;
     if v_iter > p_max_iter then
       if p_best_effort then return; end if;
@@ -1846,11 +1892,14 @@ begin
   -- count(*) and the content fingerprint of the dest as it stands, which the catch-up below adjusts by
   -- exactly the rows it adds or removes (their RETURNING) so the check under the lock can compare the two
   -- sides without scanning the dest again.
+  -- #1366: by the copy's oid's rendering under that lock, as every statement on the source, the copy or the delta
+  -- below is (v_dest_oid, p_hypertable, v_delta): a schema renamed during a wait no longer sends one to a namesake
+  -- (an empty namesake's baseline and NULL watermark here made a keyless catch-up re-insert every row and agree).
   if not v_track then
-    execute format('select count(*), coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)
+    execute format('select count(*), coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %s', v_fp_q, p_control, v_dest_oid)
       into v_dest_n, v_dest_h, v_watermark;
   else
-    execute format('select count(*), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_dest) into v_dest_n, v_dest_h;
+    execute format('select count(*), coalesce(sum(%s), 0) from %s', v_fp_q, v_dest_oid) into v_dest_n, v_dest_h;
   end if;
   -- #1241: every snapshot that cannot see the copy must be released before the swap. The swap drops the
   -- hypertable and renames the copy into its place, and the copy's rows were written by the copy and drain
@@ -2074,16 +2123,16 @@ begin
       into v_min_ctl, v_max_ctl;
     -- Each write reports what it changed through RETURNING, so the conservation baseline follows the
     -- destination by identity, not only by row_count (#653).
-    execute format('with w as (delete from %I.%I d where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
-                   v_nsp, v_dest, v_dkey_q, v_subsel_q, v_fp_q) into v_n, v_h;
+    execute format('with w as (delete from %s d where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                   v_dest_oid, v_dkey_q, v_subsel_q, v_fp_q) into v_n, v_h;
     v_dest_n := v_dest_n - v_n; v_dest_h := v_dest_h - v_h;
     if v_min_ctl is not null then
-      execute format('with w as (insert into %I.%I (%s) select %s from %I.%I s where %s in (%s) and %I >= %L::%s and %I <= %L::%s returning %s as h) select count(*), coalesce(sum(h), 0) from w',
-                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_subsel_q,
+      execute format('with w as (insert into %s (%s) select %s from %s s where %s in (%s) and %I >= %L::%s and %I <= %L::%s returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                     v_dest_oid, v_cols_q, v_cols_q, p_hypertable, v_skey_q, v_subsel_q,
                      p_control, v_min_ctl, v_ctl_type, p_control, v_max_ctl, v_ctl_type, v_fp_q) into v_n, v_h;
     else
-      execute format('with w as (insert into %I.%I (%s) select %s from %I.%I s where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
-                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_subsel_q, v_fp_q) into v_n, v_h;
+      execute format('with w as (insert into %s (%s) select %s from %s s where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                     v_dest_oid, v_cols_q, v_cols_q, p_hypertable, v_skey_q, v_subsel_q, v_fp_q) into v_n, v_h;
     end if;
     v_dest_n := v_dest_n + v_n; v_dest_h := v_dest_h + v_h;
   else
@@ -2113,15 +2162,15 @@ begin
       -- pg_temp at every use, as pgpm_dbatch is (#894): unqualified, the drop took an operator's own
       -- pgpm_htail through the search_path, and a read could insert that table's rows as the tail.
       execute 'drop table if exists pg_temp.pgpm_htail';
-      execute format('create temp table pg_temp.pgpm_htail on commit drop as select %s from %I.%I where %s',
-                     v_cols_q, v_nsp, v_rel,
+      execute format('create temp table pg_temp.pgpm_htail on commit drop as select %s from %s where %s',
+                     v_cols_q, p_hypertable,
                      pgpm._from_hypertable_past(p_control, v_watermark, p_inclusive => true));
       analyze pg_temp.pgpm_htail;
-      execute format('with w as (insert into %I.%I (%s) select %s from pg_temp.pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
-                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_dest, v_dkey_q, v_skey_q, v_fp_q) into v_n, v_h;
+      execute format('with w as (insert into %1$s (%2$s) select %2$s from pg_temp.pgpm_htail s where not exists (select 1 from %1$s d where %3$s = %4$s) returning %5$s as h) select count(*), coalesce(sum(h), 0) from w',
+                     v_dest_oid, v_cols_q, v_dkey_q, v_skey_q, v_fp_q) into v_n, v_h;
     else
-      execute format('with w as (insert into %I.%I (%s) select %s from %I.%I where %s returning %s as h) select count(*), coalesce(sum(h), 0) from w',
-                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
+      execute format('with w as (insert into %s (%s) select %s from %s where %s returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                     v_dest_oid, v_cols_q, v_cols_q, p_hypertable,
                      pgpm._from_hypertable_past(p_control, v_watermark), v_fp_q) into v_n, v_h;
     end if;
     v_dest_n := v_dest_n + v_n; v_dest_h := v_dest_h + v_h;
@@ -2149,7 +2198,7 @@ begin
   -- find them either; only a copy that tracks changes (or one taken with writes paused) can, and the
   -- message says so. Without this check the loss was silent: no error, no log row, a source dropped short.
   if not v_track then
-    execute format('select count(*), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_rel) into v_src_n, v_src_h;
+    execute format('select count(*), coalesce(sum(%s), 0) from %s', v_fp_q, p_hypertable) into v_src_n, v_src_h;
   else
     -- UNTRACKED WRITES (#654). The capture trigger is origin-only (TimescaleDB refuses ENABLE ALWAYS on a
     -- hypertable and on its chunks), so a write under session_replication_role = replica never reached the
@@ -2181,8 +2230,6 @@ begin
            string_agg('d.' || quote_ident(attname), ', ' order by attnum)
       into v_scols_q, v_dcols_q
       from pg_attribute where attrelid = p_hypertable and attnum > 0 and not attisdropped and attgenerated = '';
-    v_nomatch_q := format('not exists (select 1 from %I.%I d where %s = %s and row(%s)::text = row(%s)::text)',
-                        v_nsp, v_dest, v_dkey_q, v_skey_q, v_dcols_q, v_scols_q);
     v_src_n := 0; v_unmatched := 0;
     for k in
       select r.oid::regclass as rel,
@@ -2198,6 +2245,10 @@ begin
       if k.cmp is not null then
         execute format('select exists (select 1 from %s s where %s)', k.cmp::text, v_fresh) into v_fresh_batch;
       end if;
+      -- #1366: the copy rendered here, after the compressed chunk's read (which can wait for its lock), and each
+      -- branch's first statement uses it
+      v_nomatch_q := format('not exists (select 1 from %s d where %s = %s and row(%s)::text = row(%s)::text)',
+                          v_dest_oid, v_dkey_q, v_skey_q, v_dcols_q, v_scols_q);
       if k.cmp is null then
         execute format('select count(*), count(x.kt), min(x.kt) from (select case when %s then case when %s then row%s::text end end as kt from only %s s offset 0) x',
                        v_fresh, v_nomatch_q, v_skey_q, k.rel::text) into v_n, v_m, v_kt;
@@ -2205,9 +2256,9 @@ begin
         execute format('select count(*), count(x.kt), min(x.kt) from (select case when %s then row%s::text end as kt from %s s offset 0) x',
                        v_nomatch_q, v_skey_q, k.rel::text) into v_n, v_m, v_kt;
       else
-        execute format('select count(*) from %s', k.rel::text) into v_n;
         execute format('select count(x.kt), min(x.kt) from (select case when %s then case when %s then row%s::text end end as kt from only %s s offset 0) x',
                        v_fresh, v_nomatch_q, v_skey_q, k.rel::text) into v_m, v_kt;
+        execute format('select count(*) from %s', k.rel::text) into v_n;
       end if;
       v_src_n := v_src_n + v_n;
       v_unmatched := v_unmatched + v_m;
@@ -2217,7 +2268,7 @@ begin
     -- scan under the lock on this path only (the append-only path takes it with its count above): the
     -- scan above reads relation by relation for xmin's sake, and the fingerprint has to match the one the
     -- destination carried in over the whole table through TimescaleDB's own decompression.
-    execute format('select coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_rel) into v_src_h;
+    execute format('select coalesce(sum(%s), 0) from %s', v_fp_q, p_hypertable) into v_src_h;
   end if;
   -- Two refusals guard the swap, the specific one first. A row the capture trigger never saw (#654) is named by
   -- its key below; the count-and-fingerprint comparison after it (#460, #653) catches everything else, so a
@@ -2367,9 +2418,8 @@ begin
   -- which after a RENAME of the hypertable is an operator's function, or nothing. #1057: whether or not the
   -- delta is still there: the records go below, and a function left behind them would be named by nothing
   -- (a delta dropped by hand leaves its capture function recorded, and the cutover runs append-only).
-  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then
-    execute format('drop function %s', v_trgfn_oid::regprocedure::text);
-  end if;
+  -- #1366: and its drop checked by that oid, which a function or schema renamed during the DROP's wait cannot fake
+  perform pgpm._from_hypertable_drop_fn(v_trgfn_oid, format('from_hypertable_cutover(%I.%I), dropping the capture function,', v_nsp, v_rel));
   -- #955: the copy is the table now and the delta and its function are gone: none of them is scratch any more
   delete from pgpm.scratch where parent_oid = p_hypertable::oid;
   execute format('alter table %I.%I rename to %I', v_nsp, v_dest, v_rel);
@@ -2420,8 +2470,10 @@ begin
   end loop;
   commit;
 
-  -- handoff: an ordinary plain table under the original name is exactly transmute's input.
-  v_orig := format('%I.%I', v_nsp, v_rel)::regclass;
+  -- handoff: an ordinary plain table under the original name is exactly transmute's input. #1366: the copy, by its
+  -- oid, which the swap made that table: the name read at the start denotes whatever a schema renamed during one
+  -- of the swap's waits put under it, and transmute converted that table instead.
+  v_orig := v_dest_oid;
   -- transmute is a PROCEDURE since #275 (it commits between adding the monolith bound, validating it, and
   -- the cutover, so the O(rows) scan is not held under ACCESS EXCLUSIVE). The commit above at :684 means
   -- this runs in a fresh transaction, so its internal commits are legal here.
@@ -2436,8 +2488,9 @@ begin
   -- pgpm.dropped_fk and transmute's cutover moved those records onto the parent (#563), so
   -- restore_incoming_fks re-adds each NOT VALID (O(1), and enforcing every new write immediately) and
   -- validate_incoming_fks does the scan in its own transaction, with the orphan reporting, the validate
-  -- back-off, and status().fks_suspended / fks_unvalidated all coming for free. Re-resolved by name because
-  -- after transmute v_orig's oid is the monolith child, not the parent.
+  -- back-off, and status().fks_suspended / fks_unvalidated all coming for free. After transmute v_orig's oid is
+  -- the monolith child, not the parent: the parent is found as the monolith's, by oid (#1366), not by the name
+  -- read at the start, which a schema renamed during transmute's waits could hand to a namesake.
   --
   -- The window from the drop above to this re-add is real and bounded by the swap plus one transmute. It
   -- cannot be closed by re-adding inside the cutover -- transmute would then refuse the incoming key -- so
@@ -2453,12 +2506,13 @@ begin
   -- is a fail_restore_incoming_fk or fail_validate_incoming_fk row with the lock timeout as its reason,
   -- the key left recorded in pgpm.dropped_fk, and the cutover goes on; maintain's every-tick restore and
   -- validate (or a direct call) finish it. bench/hypertable_handoff_fk_lock_timeout.sh guards the VALIDATE.
+  v_orig := (select i.inhparent::regclass from pg_inherits i where i.inhrelid = v_dest_oid);
   if v_in_names is not null then
     perform set_config('lock_timeout', p_lock_timeout, true);
-    perform pgpm.restore_incoming_fks(format('%I.%I', v_nsp, v_rel)::regclass);
+    perform pgpm.restore_incoming_fks(v_orig);
     commit;
     perform set_config('lock_timeout', p_lock_timeout, true);   -- `set local` did not survive the COMMIT
-    perform pgpm.validate_incoming_fks(format('%I.%I', v_nsp, v_rel)::regclass);
+    perform pgpm.validate_incoming_fks(v_orig);
     commit;
   end if;
 
@@ -2466,12 +2520,11 @@ begin
   -- (#563) and transmute seeds the parent from that sequence, so this only ever confirms it; it stays as
   -- the backstop that advances, never rewinds, the parent's sequence to the source's captured next value.
   -- "Advances" is in the sequence's own direction (#640): downward for a negative INCREMENT, which the swap
-  -- now carries. (Re-resolve the parent by name: after transmute, v_orig's oid is the monolith child, not
-  -- the parent.)
+  -- now carries. (On the parent found above, by oid.)
   if v_ident_cols is not null then
     for v_i in 1 .. array_length(v_ident_cols, 1) loop
       if v_ident_next[v_i] is not null then
-        v_pseq := pg_get_serial_sequence(format('%I.%I', v_nsp, v_rel), v_ident_cols[v_i]::text)::regclass;
+        v_pseq := pg_get_serial_sequence(v_orig::text, v_ident_cols[v_i]::text)::regclass;
         if v_pseq is not null
            and sign((select seqincrement from pg_sequence where seqrelid = v_pseq))
                * (v_ident_next[v_i] - pgpm._seq_next(v_pseq)) > 0 then

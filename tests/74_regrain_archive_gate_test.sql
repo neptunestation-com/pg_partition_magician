@@ -16,7 +16,8 @@ select plan(13);
 
 -- ============================ archive_fn SET: aged rows must survive the regrain ============================
 create table public.ag74 (id bigint primary key, payload text);
-insert into public.ag74 select g, repeat('x',100) from generate_series(1, 2000) g;
+-- 100 characters a row as before (the byte budgets below are sized to it), each row its own (#1374)
+insert into public.ag74 select g, lpad(g::text, 100, 'x') from generate_series(1, 2000) g;
 call pgpm.transmute('public.ag74', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.ag74 values (20000, 'frontier');   -- pushes the horizon to 3000: the child is fully aged
 -- A deliberately tiny byte budget, so coverage is INCOMPLETE when the regrain runs. That is the whole
@@ -47,9 +48,15 @@ begin
 end $$;
 
 -- THE assertion. Behavioural: the rows are still readable through the parent. A structural check that a
--- child exists would not catch a regrain that materialized the wrong thing.
-select is((select count(*)::int from public.ag74), 2001,
-  'a regrain does NOT destroy aged rows while archive coverage is incomplete');
+-- child exists would not catch a regrain that materialized the wrong thing. By identity (#1374): the rows
+-- lost and the rows the fixture never wrote, each named, both none; a count of 2001 accepts a swap of one.
+select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.ag74 t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 2000) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'a regrain does NOT destroy aged rows while archive coverage is incomplete');
 
 select is((select count(*)::int from pgpm.log
             where parent_table = 'public.ag74'::regclass and action = 'regrain_aged'),
@@ -113,7 +120,7 @@ select is(
 -- loss is a subset of a child that otherwise looks correctly regrained. It is also the case that makes
 -- "wait for coverage" unimplementable, since a straddling child is never write-blocked and so never archived.
 create table public.pa74 (id bigint primary key, payload text);
-insert into public.pa74 select g, repeat('x',100) from generate_series(1, 2000) g;
+insert into public.pa74 select g, lpad(g::text, 100, 'x') from generate_series(1, 2000) g;
 call pgpm.transmute('public.pa74', 'id', 1000, p_retain => 99000::bigint, p_paused => false);
 insert into public.pa74 values (20000, 'frontier');   -- horizon 1000, child [0,3000): straddles it
 update pgpm.config set archive_byte_budget = 2000,
@@ -132,10 +139,21 @@ begin
   end loop;
 end $$;
 
-select is((select count(*)::int from public.pa74 where id < 1000), 999,
-  'a PARTIALLY aged child keeps the rows below the horizon instead of silently dropping them');
-select is((select count(*)::int from public.pa74), 2001,
-  'and the rest of it regrains normally, so nothing is lost either side of the boundary');
+-- by identity, as above (#1374): first the aged rows below the horizon, then every row
+select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from (select * from public.pa74 where id < 1000) t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 999) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'a PARTIALLY aged child keeps the rows below the horizon instead of silently dropping them');
+select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.pa74 t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 2000) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'and the rest of it regrains normally, so nothing is lost either side of the boundary');
 
 -- ============================ no archive_fn: the cheap skip is unchanged ============================
 -- Documented behaviour, not an oversight: with nothing to archive, retire's gate is a no-op, so

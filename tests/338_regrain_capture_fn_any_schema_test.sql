@@ -264,11 +264,15 @@ select is((select array_agg(n.nspname || '.' || p.proname || '=' || left(p.prosr
   array['public.b338_pgpm_regrain_capture=select 2338', 'public.e338_pgpm_regrain_capture=select 5338',
         's338_a.a338_pgpm_regrain_capture=select 1338', 's338_d.d338_pgpm_regrain_capture=select 4338'],
   'exactly the operator''s four functions remain under the capture names, by schema and body');
-select is((select array_agg(id order by id) from public.a338 where id in (1, 120, 121)), array[1, 120]::bigint[],
+-- every row by id and payload, not the endpoints alone (#1375): a table that lost its middle rows kept 1 and N
+select is((select array_agg(id || ':' || payload order by id) from public.a338),
+  (select array_agg(g || ':a' order by g) from generate_series(1, 120) g),
   '(A) the restored table keeps its rows, 1 to 120');
-select is((select array_agg(id order by id) from public.b338 where id in (1, 70, 71)), array[1, 70]::bigint[],
+select is((select array_agg(id || ':' || payload order by id) from public.b338),
+  (select array_agg(g || ':b' order by g) from generate_series(1, 70) g),
   '(B) the restored table keeps its rows, 1 to 70');
-select is((select array_agg(id order by id) from public.d338 where id in (1, 90, 91)), array[1, 90]::bigint[],
+select is((select array_agg(id || ':' || payload order by id) from public.d338),
+  (select array_agg(g || ':d' order by g) from generate_series(1, 90) g),
   '(D) the uninstalled table keeps its rows, 1 to 90');
 select lives_ok($$ insert into public.e338 values (61, 'after') $$,
   '(E) the uninstalled table takes a write');

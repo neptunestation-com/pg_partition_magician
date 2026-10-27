@@ -14,6 +14,11 @@
 #     c.oid, 0)).identity = v_rel`), or by a set operation over a name that stands alone in its select list
 #     (`select c.relname, c.oid ... intersect select v_rel, c2.oid ...`) passed too: no name column's token
 #     stands where the rule refused one, and no regclass is rendered.
+#   * #1386 (review pass 13): a name column cast to regclass alone in a select list, `select c.relname::regclass
+#     into v_x` or `cast(c.relname as regclass)`, passed, because the checker took every cast around a name as
+#     part of the value that may stand alone; `regclass(c.relname)` was refused. The cast is the lookup by name.
+#     Its sibling: a regclass rendered as text and cast back (`c.oid::regclass::text::regclass`) was taken whole
+#     as the rendering, which may stand alone too.
 # The checker's --selftest carries these shapes, but a selftest lives in the file it tests; these fixtures are the
 # guard's own, planted in the REAL module of this checkout, so a mutant of the checker is judged by code it did
 # not write.
@@ -38,6 +43,10 @@
 #                                                  refuses a name in a, which nothing compares (PR #1323's review)
 #   archive_child_by_oid_identity_any_field     -- every field of pg_identify_object() is a name, so `.type =
 #                                                  'table'` is refused (PR #1323's review)
+#   archive_child_by_oid_name_cast_alone        -- a cast to regclass around a name column is part of the value
+#                                                  that may stand alone in a select list (#1386)
+#   archive_child_by_oid_rendered_recast_alone  -- a rendered regclass cast back to regclass is part of the
+#                                                  rendering, which may stand alone (#1386's sibling)
 #
 # Usage: lint_child_by_oid_cast_spellings.sh <container> <db> [checker.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and are
@@ -145,6 +154,28 @@ report(clean("  v_x := v_oid::regclass; v_x := v_oid::pg_catalog.regclass; v_x :
 report(clean(f"  v_x := ({BUILT})::oid::regclass; v_x := cast(({BUILT})::oid as regclass);\n"
              f"  v_x := regclass(({BUILT})::int8);"),
        "LIVENESS: a value cast to a number, then to regclass, is clean")
+
+# --- #1386: a name column cast to regclass where it would otherwise stand alone ------------------------------------
+# the cast is the lookup by name (the relname resolved through search_path), so it is no part of the value that
+# may stand alone in a select list; the call spelling was always refused, and a cast to text alone is still clean
+ROW = "from pg_class c where c.oid = p_parent;"
+report(refused(f"  select regclass(c.relname) into v_x {ROW}", "c.relname stands in an expression"),
+       "LIVENESS: regclass(c.relname) alone in a select list is refused")
+NAMED = "c.relname is cast to regclass"
+for expr in ("c.relname::regclass", "cast(c.relname as regclass)", "c.relname::pg_catalog.regclass",
+             "(c.relname)::text::regclass"):
+    report(refused(f"  select {expr} into v_x {ROW}", NAMED), f"select {expr} into a local is refused", "#1386")
+report(refused(f"  select format('%s', c.relname::regclass) into v_said {ROW}", NAMED),
+       "format('%s', c.relname::regclass) is refused", "#1386")
+report(clean(f"  select c.relname::text, cast(c.relname as varchar) into v_rel, v_said {ROW}\n"
+             "  raise notice '% %', v_rel, v_said;"),
+       "LIVENESS: a name column cast to text alone is clean")
+# ... and its sibling: a regclass rendered as text, alone, is clean; cast back to regclass it is the name resolved
+report(clean(f"  select c.oid::regclass::text into v_said {ROW}\n  raise notice '%', v_said;"),
+       "LIVENESS: c.oid::regclass::text alone in a select list is clean")
+RECAST = "a regclass rendered as text (c.oid :: regclass :: text) is cast to regclass"
+for expr in ("c.oid::regclass::text::regclass", "cast(c.oid::regclass::text as regclass)"):
+    report(refused(f"  select {expr} into v_x {ROW}", RECAST), f"select {expr} into a local is refused", "#1386")
 
 
 # --- #1180: a relation found by its name with no name column's token where rule 1 refused one ----------------------

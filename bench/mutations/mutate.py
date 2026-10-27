@@ -335,7 +335,9 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
   -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
   -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
-  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');   -- #1335 b10: by oid, pinning the name
+  -- #1367: through the preflight's name, which every name the cutover makes is derived from and which nothing held
+  -- still between the phases: a RENAME committed since was undone by the renames below. Refused, not followed.
+  perform pgpm._lock_named_or_raise(p_parent, 'access share', false, v_nsp, v_rel, 'transmute');
   perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
@@ -368,6 +370,7 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
       end if;
       raise;
   end;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the CREATE's wait for a holder
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
   -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
@@ -647,8 +650,8 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
                                      and l.retired_at is null
                                      and not exists (select 1 from pgpm.part p
                                                       where p.parent_table = l.parent_table and p.child_name = l.child_name))
-     select o.child_name, count(*) as chunks, coalesce(min(case when o.named then o.lo::%1$s end)::text, min(o.lo)) as lo,
-            coalesce(max(case when o.named then o.hi::%1$s end)::text, max(o.hi)) as hi
+     select o.child_name, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
+            coalesce(pgpm._typed_text(max(case when o.named then o.hi::%1$s end)), max(o.hi)) as hi
        from orphan o
       where case when o.named then exists (select 1 from pgpm.part t
                                             where t.parent_table = o.parent_table
@@ -2005,8 +2008,8 @@ MUTATIONS = {
         "check refuses the swap: both cutovers of tests/timescale/db/35 fail, keyless and keyed.",
         [("  v_watermark text;   -- the column's own text (#791), never a timestamptz: see _from_hypertable_ctl_text\n",
           "  v_watermark timestamptz;   -- MUTANT: a naive watermark goes through the session TimeZone\n", 1),
-         ("coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control",
-          "coalesce(sum(%s), 0), max(%I) from %I.%I', v_fp_q, p_control", 1),
+         ("coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %s', v_fp_q, p_control",
+          "coalesce(sum(%s), 0), max(%I) from %s', v_fp_q, p_control", 1),
          ("pgpm._from_hypertable_past(p_control, v_watermark, p_inclusive => true)",
           "pgpm._from_hypertable_past(p_control, v_watermark::text, p_inclusive => true)", 1),
          ("pgpm._from_hypertable_past(p_control, v_watermark), v_fp_q)",
@@ -2657,8 +2660,8 @@ begin
         "included. One site, because the fix is one function: every render goes through it, so removing "
         "the pin puts the defect back everywhere at once. tests/124's render, adapter and stored-bound "
         "identities, all written under SQL, DMY and read back under ISO, MDY, are what catch it.",
-        [("returns text language sql stable set datestyle = 'ISO, MDY' as $$\n  select p_ts::text;\n$$;\n",
-          "returns text language sql stable as $$\n  select p_ts::text;\n$$;\n", 1)],
+        [("returns text language sql stable set datestyle = 'ISO, MDY' as $$\n  select case when abs(",
+          "returns text language sql stable as $$\n  select case when abs(", 1)],
     ),
     "regrain_capture_by_name": (
         "bench/regrain_capture_identity.sh",
@@ -6509,12 +6512,13 @@ $$;''',
     ),
     "transmute_key_immediate": (
         "bench/transmute_key_deferrability.sh",
-        "Issue #731 put back: step 8 re-creates the reused key on the parent as a bare ADD PRIMARY KEY / "
-        "ADD UNIQUE, which still adopts a DEFERRABLE monolith key, so every forward partition's clone is "
+        "Issue #731 put back: step 8 re-creates the reused key on the parent without its deferral clause, "
+        "which still adopts a DEFERRABLE monolith key, so every forward partition's clone is "
         "immediate and a one-statement key swap the table accepted before fails with a duplicate key. Both "
-        "branches (the primary key and the unique constraint) lose the clause, the one site that carries "
-        "it. tests/188's flag, forward-partition and swap assertions on dpk and duq catch it.",
-        [("coalesce(v_key_defer, '')", "''", 2)],
+        "kinds (the primary key and the unique constraint) lose the clause in _transmute_key_ddl, the one "
+        "routine that carries it (#766). tests/188's flag, forward-partition and swap assertions on dpk and duq catch it.",
+        [("  return left(v_def, length(v_def) - length(v_sfx)) || coalesce(' WITH (' || v_with_q || ')', '') || v_sfx;\n",
+          "  return left(v_def, length(v_def) - length(v_sfx)) || coalesce(' WITH (' || v_with_q || ')', '');\n", 1)],
     ),
     # Issue #726, one mutation per site the helper serves, so each is proven caught on its own.
     "orphan_guard_id_label_19_digits": (
@@ -6890,7 +6894,8 @@ select is(
         "plan included: no stale-data witness, no frontier check, no forward partition past the monolith.",
         [
             ("select plan(10);\n", "select plan(7);\n", 1),
-            ("""create temporary table _before_tt as select count(*) as n from public.tt_search;
+            ("""-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_tt as select * from public.tt_search;
 
 -- LIVENESS WITNESS: the drought is really present. The frontier and forward-partition checks below are
 -- of the form "obtain still reaches past now()", which would also pass against a fixture that was never
@@ -6900,7 +6905,8 @@ select cmp_ok(
   '>', interval '2 months',
   'the newest backfilled cuid is well outside the 2-month (p_obtain x step) lookahead about to be configured'
 );
-""", """create temporary table _before_tt as select count(*) as n from public.tt_search;
+""", """-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_tt as select * from public.tt_search;
 """, 1),
             ("""
 -- The check above holds on the day of the transmute even with text_time dropped from _frontier_native's
@@ -6945,7 +6951,8 @@ select ok(
 -- property carrying over to both.
 """, 1),
             ("select plan(15);\n", "select plan(9);\n", 1),
-            ("""create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+            ("""-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ulid as select * from public.tt_ulid;
 
 -- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
 select cmp_ok(
@@ -6953,7 +6960,8 @@ select cmp_ok(
   '>', interval '2 months',
   'ULID: the newest backfilled row is well outside the 2-month (p_obtain x step) lookahead'
 );
-""", """create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+""", """-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ulid as select * from public.tt_ulid;
 """, 1),
             (""");
 select ok(
@@ -6970,7 +6978,8 @@ select ok(
 );
 """, """);
 """, 1),
-            ("""create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+            ("""-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ksuid as select * from public.tt_ksuid;
 
 -- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
 select cmp_ok(
@@ -6979,7 +6988,8 @@ select cmp_ok(
   '>', interval '2 months',
   'KSUID: the newest backfilled row is well outside the 2-month (p_obtain x step) lookahead'
 );
-""", """create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+""", """-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ksuid as select * from public.tt_ksuid;
 """, 1),
             (""");
 select ok(
@@ -7326,11 +7336,11 @@ select ok(
         "key and the reused unique constraint. tests/208's name, upsert and adoption assertions in parts A "
         "to D catch it.",
         [("    execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_name, 'pgpm_key_' || v_key_idx);\n",
-          "    null;\n", 1),
-         ("add constraint %I primary key (%s)%s', v_parent::text, v_key_name,",
-          "add primary key (%s)%s', v_parent::text,", 1),
-         ("add constraint %I unique (%s)%s', v_parent::text, v_key_name,",
-          "add unique (%s)%s', v_parent::text,", 1)],
+          "", 1),
+         ("    execute format('alter table only %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);\n",
+          "    execute format('alter table only %s add %s', v_parent::text, v_key_def);\n", 1),
+         ("(select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.conname = v_key_name)",
+          "(select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.contype in ('p', 'u'))", 1)],
     ),
     "untransmute_key_name_kept": (
         "bench/cutover_key_name.sh",
@@ -7354,8 +7364,8 @@ select ok(
         "the name (ON CONFLICT ON CONSTRAINT <name> fails with 42704) and a DEFERRABLE one is immediate on "
         "every forward partition. One site, the constraint branch switched off, which leaves exactly the "
         "pre-fix loop; tests/225's name, upsert, deferral and definition assertions catch it.",
-        [("      if found then\n        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then\n",
-          "      if false then\n        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then\n", 1)],
+        [("      if found then\n        execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_ucon_name,",
+          "      if false then\n        execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_ucon_name,", 1)],
     ),
     "untransmute_unique_names_one": (
         "bench/cutover_secondary_unique_constraint.sh",
@@ -8481,7 +8491,7 @@ select ok(
         "check then refuses the swap). tests/timescale/db/47 part D catches it.",
         [("from pg_temp.pgpm_dbatch", "from pgpm_dbatch", 4),
          ("      analyze pg_temp.pgpm_htail;\n", "      analyze pgpm_htail;\n", 1),
-         ("select %s from pg_temp.pgpm_htail s where", "select %s from pgpm_htail s where", 1)],
+         ("select %2$s from pg_temp.pgpm_htail s where", "select %2$s from pgpm_htail s where", 1)],
     ),
     "transmute_null_arguments_accepted": (
         "bench/null_arguments_refused.sh",
@@ -8971,7 +8981,9 @@ select ok(
         "tests/timescale/db/49 stage B catches it (the refusal is not its own).",
         [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends)\n"
           "  if v_dest is null then\n",
-          "  v_dest := v_rel || '_pgpm_dest';   -- MUTANT: by name\n  if to_regclass(format('%I.%I', v_nsp, v_dest)) is null then\n", 1)],
+          "  v_dest := (select c.relname from pg_class c where c.oid = p_hypertable) || '_pgpm_dest';\n"
+          "  if to_regclass(format('%I.%I', (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+          " where c.oid = p_hypertable), v_dest)) is null then\n", 1)],
     ),
     "hypertable_cutover_dest_by_name": (
         "bench/scratch_relations.sh",
@@ -8995,10 +9007,8 @@ select ok(
         "Pre-#955 from_hypertable_cutover: the swap drops <rel>_pgpm_delta_fn() by the hypertable's CURRENT name, "
         "so after a RENAME since the copy it drops an operator's function of the new name and leaves the "
         "copy's. tests/timescale/db/49 stage B catches it.",
-        [("  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
-          "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n"
-          "  end if;\n",
-          "  execute format('drop function if exists %I.%I()', v_nsp, v_rel || '_pgpm_delta_fn');   -- MUTANT: by name\n", 1)],
+        [("  perform pgpm._from_hypertable_drop_fn(v_trgfn_oid, format('from_hypertable_cutover(%I.%I), dropping the capture function,', v_nsp, v_rel));\n",
+          "  execute format('drop function if exists %I.%I()', v_nsp, v_rel || '_pgpm_delta_fn');\n", 1)],
     ),
     "hypertable_swap_keeps_scratch_record": (
         "bench/scratch_relations.sh",
@@ -9470,6 +9480,60 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         [("  p_covered := p_reach is not null and pgpm._native_gt(p_kind, p_reach, p_lo)\n"
           "               and (p_dead_reach is null or not pgpm._native_gt(p_kind, p_dead_reach, p_lo));\n",
           "  p_covered := p_reach is not null and pgpm._native_gt(p_kind, p_reach, p_lo);\n", 1)],
+    ),
+    # Issue #766 bullets 1 and 2: step 8 declares the reused key with its whole definition.
+    "transmute_key_redeclared_from_columns": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766 put back: step 8 declares the reused key on the parent from its column list (and its "
+        "deferrability) and lets the ADD recurse onto the monolith, the pre-fix shape: a PRIMARY KEY ... INCLUDE "
+        "matches no index of the monolith and fails the cutover with 'multiple primary keys' after phases 1 "
+        "and 2 committed the bound, and a UNIQUE NULLS NOT DISTINCT key is built a second time on the monolith, "
+        "plain on the parent and every forward partition. One site, step 8; 9b's unique constraints keep "
+        "theirs. tests/356 parts A to E catch it.",
+        [("  select c.conname, c.conindid, pgpm._transmute_key_ddl(c.oid)\n",
+          "  select c.conname, c.conindid,\n"
+          "         case c.contype when 'p' then 'primary key' else 'unique' end\n"
+          "         || ' (' || (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x) || ')'\n"
+          "         || case when c.condeferrable and c.condeferred then ' deferrable initially deferred'\n"
+          "                 when c.condeferrable then ' deferrable' else '' end\n", 1),
+         ("    execute format('alter table only %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);\n"
+          "    execute format('alter index %s attach partition %s',\n"
+          "                   (select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.conname = v_key_name),\n"
+          "                   v_key_idx::regclass::text);\n",
+          "    execute format('alter table %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);\n", 1)],
+    ),
+    "regrain_key_include_refused": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766's consequence for regrain: the change capture's nullable-key refusal reads every column of "
+        "the reused key's index, its INCLUDE columns with them, so a parent whose key carries a nullable "
+        "INCLUDE column (which step 8 now gives it) cannot be regrained at all. One clause, the indnkeyatts "
+        "slice in the refusal. tests/356 parts D and E catch it.",
+        [("   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts and not a.attnotnull;\n",
+          "   where i.indexrelid = v_keyidx and not a.attnotnull;\n", 1)],
+    ),
+    "regrain_copy_joins_include_columns": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766's consequence for regrain: the copy's anti-join on the reused key joins every column of its "
+        "index, the INCLUDE columns with them, so a resumed batch re-copies a row whose INCLUDE value is NULL "
+        "and fails on the copy's key. One clause, the indnkeyatts slice in regrain_step's equijoin. tests/356 "
+        "parts D and E catch it.",
+        [("      join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "     where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;\n",
+          "      join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "     where i.indexrelid = v_keyidx;\n", 1)],
+    ),
+    "regrain_capture_keys_include_columns": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766's consequence for regrain: the change capture's delta, and the drift check that compares "
+        "it, are keyed by every column of the reused key's index, the INCLUDE columns with them, so a change "
+        "to an INCLUDE value of a row already copied is reconciled under the wrong key and the run fails on "
+        "the copy's key. Both sites, so capture and drift still agree. tests/356 part E catches it.",
+        [("    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;\n",
+          "    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "   where i.indexrelid = v_keyidx;\n", 1),
+         ("   where i.indexrelid = p_keyidx and k.ord <= i.indnkeyatts;\n",
+          "   where i.indexrelid = p_keyidx;\n", 1)],
     ),
 }
 
@@ -12392,8 +12456,8 @@ MUTATIONS["mark_gone_chunks_casts_unnamed"] = (
     "Pre-#1336 _mark_gone_chunks (P1-02): the archive_chunk_retired row's range casts every gone chunk's bounds, so a "
     "pre-#500 render ('15/10/2025 00:00:00 UTC' under SQL, DMY) raises out of it, and out of every archive step of the "
     "parent, every tick. One clause, the lo's guard. tests/346 part F catches it.",
-    [("            coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,\n",
-      "            min(lo::%1$s)::text as lo,\n", 1)],
+    [("            coalesce(pgpm._typed_text(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)), min(lo)) as lo,\n",
+      "            pgpm._typed_text(min(lo::%1$s)) as lo,\n", 1)],
 )
 MUTATIONS["mark_retired_chunks_unnamed_placed"] = (
     _G1336,
@@ -12406,9 +12470,9 @@ MUTATIONS["mark_retired_chunks_unnamed_placed"] = (
 )
 
 # Issue #1336, the sibling of bullet 8 (PR #1351 left it): a RETIRED chunk's bound that names no instant by itself is
-# read at its widest by pgpm._native_bound_reach (a lo at UTC+14, a hi at UTC-12, under MDY and DMY), so the
-# partitions _over_retired_chunks holds, and the archive step, retain() and scripts/archive_partition_whole.sql leave
-# alone, include every one its text could reach. bench/over_retired_chunks_unnamed_widest.sh runs tests/347.
+# read at its widest by pgpm._native_bound_reach (a lo 169 hours east, a hi 168 west since #1363, under MDY and
+# DMY), so the partitions _over_retired_chunks holds, and the archive step, retain() and
+# scripts/archive_partition_whole.sql leave alone, include every one its text could reach. bench/over_retired_chunks_unnamed_widest.sh runs tests/347.
 _G1336W = "bench/over_retired_chunks_unnamed_widest.sh"
 MUTATIONS["over_retired_chunks_unnamed_grid_clock"] = (
     _G1336W,
@@ -12440,6 +12504,66 @@ MUTATIONS["over_retired_chunks_unnamed_session_zone"] = (
       "                                      extract(epoch from l.hi::timestamptz) as hi_k,\n", 1)],
 )
 
+
+# Issue #1363: a retired chunk's bound that names no instant reaches every offset a session can take, 168 hours west
+# and 169 east of UTC (a POSIX zone to 167:59:60, a DST name an hour east of it), not the -12 to +14 of today's
+# civil zones; and what a session that far out renders (an offset past 15:59:59) is written in UTC by _ts_text,
+# never named by _native_named, and read exactly by _native_bound_reach. bench/native_bound_reach_every_offset.sh
+# runs tests/354.
+_G1363 = "bench/native_bound_reach_every_offset.sh"
+MUTATIONS["native_bound_reach_civil_zones"] = (
+    _G1363,
+    "Pre-#1363 _native_bound_reach (#1354's constants): an offset-less retired hi reaches only UTC-12 and a lo only "
+    "UTC+14, so a hi a session at 'XYZ167:59:60' or in Asia/Manila's LMT wrote reads below its own lo, the partition "
+    "re-created over the chunk is not held, and the archive step PUTs it over the retired chunk's object. One "
+    "clause, the reach. tests/354 parts A to C catch it.",
+    [("  return v + case when p_latest then 604800 else -608400 end;\n",
+      "  return v + case when p_latest then 43200 else -50400 end;\n", 1)],
+)
+MUTATIONS["native_bound_reach_sixteen_hours"] = (
+    _G1363,
+    "Issue #1363's plausible-but-wrong fix: the reach is the +/-15:59:59 an offset literal is limited to, 16 hours "
+    "either side, which covers every LMT tzdata has but not a session SET to a POSIX zone or an interval past it, "
+    "so the partition over a chunk such a session wrote is archived over the retired object. One clause, the "
+    "reach. tests/354 parts A to C catch it.",
+    [("  return v + case when p_latest then 604800 else -608400 end;\n",
+      "  return v + case when p_latest then 57600 else -57600 end;\n", 1)],
+)
+MUTATIONS["native_bound_reach_dst_hour"] = (
+    _G1363,
+    "PR #1397's first head (its verification's P1-02): an offset-less lo reaches 168 hours east, the furthest POSIX "
+    "offset, but a DST name with no offset of its own is an hour east of that, so a lo a session at "
+    "'XYZ-167:59:60DEF' wrote in July starts an hour late, the partition over the chunk's first hour is not held, "
+    "and the archive step PUTs it over the retired object. One clause, the lo's reach. tests/354 parts A to C "
+    "catch it.",
+    [("  return v + case when p_latest then 604800 else -608400 end;\n",
+      "  return v + case when p_latest then 604800 else -604800 end;\n", 1)],
+)
+MUTATIONS["ts_text_unreadable_offset"] = (
+    _G1363,
+    "Pre-#1363 _ts_text (PR #1397's verification, P1-03): an instant is always rendered in the caller's zone, so "
+    "from a session at 'XYZ20' the archive step records a hi ending '-20', which timestamptz input refuses, and every "
+    "later archive step of the parent raises. One clause, the UTC render. tests/354 part E catches it.",
+    [("  select case when abs(coalesce(extract(timezone from p_ts), 0)) < 57600 then p_ts::text\n"
+      "              else pgpm._ts_text_utc(p_ts) end;\n",
+      "  select p_ts::text;\n", 1)],
+)
+MUTATIONS["native_named_any_offset"] = (
+    _G1363,
+    "Pre-#1363 _native_named (PR #1397's verification, V-03): any two-digit offset counts as naming its instant, so "
+    "a ledger hi a session at UTC-20 rendered ('2025-12-19 10:00:00-20') is cast, and once its partition is dropped "
+    "by hand _mark_gone_chunks raises out of every archive step of the parent. One clause, the offset's range. "
+    "tests/354 part F catches it.",
+    [("                                     || '[+-](0[0-9]|1[0-5])(:[0-5][0-9]){0,2}( BC)?)$');",
+      "                                     || '[+-][0-9]{2}(:[0-9]{2}){0,2}( BC)?)$');", 1)],
+)
+MUTATIONS["native_bound_reach_unreadable_offset_widened"] = (
+    _G1363,
+    "Issue #1363's plausible-but-wrong half: a bound whose offset input refuses is left unnamed but not read as the "
+    "instant it names, so its parse fails and it reaches without bound, holding every partition past its other "
+    "bound for good. One clause, the exact reading. tests/354 part F catches it.",
+    [("  elsif p_kind <> 'id' and v_m is not null then\n", "  elsif false then\n", 1)],
+)
 
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
 # wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
@@ -12844,9 +12968,8 @@ MUTATIONS["hypertable_drain_appends_reads_before_copy_lock"] = (
     "copy, so called while a cutover holds SHARE on the copy and waits for the source it holds a read of both, "
     "and the two deadlock (tests/timescale/db/64 (D): the drain waits on the source, one of them dies 40P01). "
     "One clause: the procedure's first lock on the copy.",
-    [("  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);\n"
-      "  -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.\n",
-      "  -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.\n", 1)],
+    [("  v_copy := pgpm._from_hypertable_lock_copy(p_hypertable, 'from_hypertable_drain_appends');\n",
+      "  v_copy := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');\n", 1)],
 )
 MUTATION_SRC["hypertable_drain_appends_reads_before_copy_lock"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_appends_reads_before_copy_lock"] = "timescale"
@@ -13076,10 +13199,10 @@ MUTATIONS["hypertable_cutover_capture_fn_drop_tracking_only"] = (
     "Pre-#1057 from_hypertable_cutover: the swap drops the recorded capture function only on the tracking path, "
     "so a copy whose delta was dropped by hand is cut over append-only and its capture function outlives the "
     "records the swap deletes. tests/timescale/db/65 catches it (b65's function survives).",
-    [("  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
-      "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n",
-      "  if v_track and v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
-      "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n", 1)],
+    [("  perform pgpm._from_hypertable_drop_fn(v_trgfn_oid, format('from_hypertable_cutover(%I.%I), dropping the capture function,', v_nsp, v_rel));\n",
+      "  if v_track then\n"
+      "    perform pgpm._from_hypertable_drop_fn(v_trgfn_oid, format('from_hypertable_cutover(%I.%I), dropping the capture function,', v_nsp, v_rel));\n"
+      "  end if;\n", 1)],
 )
 MUTATION_SRC["hypertable_cutover_capture_fn_drop_tracking_only"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_cutover_capture_fn_drop_tracking_only"] = "timescale"
@@ -13448,6 +13571,44 @@ MUTATIONS["ci_drops_lint_failure"] = (
     [('    *) ci_failed="$ci_failed lint" ;;\n', "    *) ;;\n", 1)],
 )
 MUTATION_SRC["ci_drops_lint_failure"] = "test.sh"
+# Issue #1382: the guard runs the lint track itself, run_lint() and its `lint` block out of test.sh with each job a
+# stub, so what run_lint does with a job's failure is judged, not the spelling of its loop. Both mutate test.sh.
+MUTATIONS["run_lint_drops_job_failure"] = (
+    "bench/ci_runs_lint_jobs.sh",
+    "run_lint's failure arm prints FAIL for the job and records nothing, so the lint track ends `lint track: PASS` "
+    "and exits 0 with a job red, and `./test.sh ci` prints PASS over a red Lint summary. The pre-#1382 guard read "
+    "run_lint's list and stubbed the whole track, so it passed this. One site, the arm.",
+    [('      failed="$failed $job"\n', "", 1)],
+)
+MUTATION_SRC["run_lint_drops_job_failure"] = "test.sh"
+MUTATIONS["run_lint_job_without_errexit"] = (
+    "bench/ci_runs_lint_jobs.sh",
+    "run_lint runs each job's function in a child bash without -e, so a job whose first command fails and whose "
+    "last passes is reported PASS: the reason the child shell exists (GitHub runs a run: block with bash -e). The "
+    "pre-#1382 guard never ran run_lint, so it passed this. One clause, the -e.",
+    [('if bash -e -o pipefail -c "$(declare -f "$fn"); $fn"; then\n',
+      'if bash -o pipefail -c "$(declare -f "$fn"); $fn"; then\n', 1)],
+)
+MUTATION_SRC["run_lint_job_without_errexit"] = "test.sh"
+# Issue #1381: every job of a summarised workflow is gated by its summary (bench/summary_gates_every_job.sh). Both
+# mutate lint.yml; the guard reads the mutant in place of the workflow of the same name.
+MUTATIONS["lint_summary_misses_core_growth"] = (
+    "bench/summary_gates_every_job.sh",
+    "Pre-#1381: lint.yml's Lint summary neither needs nor judges the core-growth job, so a red "
+    "scripts/core_growth.py --selftest leaves the one lint check main requires green ('Every lint job passed.'), "
+    "and test.sh's run_lint, held to the same needs, never runs it. One clause at its two sites, the need and its "
+    "check.",
+    [("minifier, core-growth, track-filters,", "minifier, track-filters,", 1),
+     ('          [ "${{ needs.core-growth.result }}" = "success" ] || { echo "core-growth failed"; exit 1; }\n', "", 1)],
+)
+MUTATION_SRC["lint_summary_misses_core_growth"] = ".github/workflows/lint.yml"
+MUTATIONS["lint_summary_waits_unjudged"] = (
+    "bench/summary_gates_every_job.sh",
+    "lint.yml's Lint summary needs the core-growth job and never reads its result: it waits for the job and prints "
+    "'Every lint job passed.' whatever it did, so a red selftest still lands. One site, the check.",
+    [('          [ "${{ needs.core-growth.result }}" = "success" ] || { echo "core-growth failed"; exit 1; }\n', "", 1)],
+)
+MUTATION_SRC["lint_summary_waits_unjudged"] = ".github/workflows/lint.yml"
 
 # Issue #1182: bench/throws_pinned.sh recognises a site by the procedure its statement CALLs, not by the text
 # `call pgpm.`. Two mutations, one per guard: the first is a test-file mutation like its siblings (the real guard
@@ -13470,13 +13631,84 @@ MUTATIONS["throws_pinned_site_by_spelling"] = (
     "bench/throws_pinned_sites.sh",
     "Pre-#1182 bench/throws_pinned.sh: a statement is a site only when its text matches `call\\s+pgpm\\.`, so an "
     "unpinned throws_ok around call \"pgpm\".transmute, CALL PGPM . \"transmute\", a commented or unqualified call, "
-    "or a format() with the schema as %I is never probed and the file passes on a pinned neighbour. One site, the "
-    "exact pre-#1182 decision; calls_pgpm and its self-check are left in place (the self-check still passes), so "
-    "only a run over files can tell.",
-    [("        if not calls_pgpm(args[0]):\n",
-      "        if not re.search(r\"\\bcall\\s+pgpm\\.\", args[0], re.I):\n", 1)],
+    "a format() with the schema as %I, or a statement assembled by || is never probed and the file passes on a "
+    "pinned neighbour. One clause, the exact pre-#1182 decision put back in front of the site (#1235 removed the "
+    "decision altogether, so it is added here rather than swapped), and only a run over files can tell.",
+    [("        args, _end = split\n        kind = m.group(1).lower()\n",
+      "        args, _end = split\n"
+      "        if not re.search(r\"\\bcall\\s+pgpm\\.\", args[0], re.I):\n"
+      "            continue\n"
+      "        kind = m.group(1).lower()\n", 1)],
 )
 MUTATION_SRC["throws_pinned_site_by_spelling"] = "bench/throws_pinned.sh"
+
+# Issue #1235: bench/throws_pinned.sh probes EVERY throws_*, whatever its statement, and its closing summary
+# restates the per-site verdicts rather than being one. One test-file mutation for the real guard on a real file,
+# and four that put a reading by text (or the unprefixed summary) back into the guard, for
+# bench/throws_pinned_sites.sh.
+MUTATIONS["throws_ok_helper_unpinned"] = (
+    "bench/throws_pinned.sh",
+    "A throws_ok($$ call pg_temp.mk72(...) $$, NULL, desc) added to tests/72 beside its pinned throws_like: a test's "
+    "own helper procedure around pgpm.transmute, the pg_temp.mk and mk_archive_table shape. A helper that does not "
+    "refuse dies with the transmute's 2D000 inside pgTAP and the NULL accepts it. Pre-#1235 bench/throws_pinned.sh "
+    "probed only a statement that CALLed a pgpm procedure by name, so this was no site and the file passed on the "
+    "pinned neighbour alone; the neighbour is there for the reason throws_ok_one_argument gives.",
+    [("select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n",
+      "select throws_ok($$ call pg_temp.mk72('public.ev72t') $$, NULL,\n"
+      "  'an unpinned refusal: through a helper of the test');\n"
+      "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
+)
+MUTATION_SRC["throws_ok_helper_unpinned"] = "tests/72_transmute_attributes_test.sql"
+MUTATIONS["throws_pinned_site_by_name"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh: a statement is a site only when it names pgpm, a reading by the name its CALL "
+    "spells, so an unpinned throws_ok around a test's own helper (call pg_temp.mk, select pg_temp.mk_fn), a "
+    "statement held in a psql variable (:'stmt') or a U&\"!0070gpm\" UESCAPE '!' name is no site and the file passes "
+    "on its pinned neighbour (B07-01, B07-02, B07-04, F8-06). One clause in front of the site.",
+    [("        args, _end = split\n        kind = m.group(1).lower()\n",
+      "        args, _end = split\n"
+      "        if \"pgpm\" not in args[0].lower():\n"
+      "            continue\n"
+      "        kind = m.group(1).lower()\n", 1)],
+)
+MUTATION_SRC["throws_pinned_site_by_name"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_comment_by_spelling"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh: a throws_* is skipped as commented out when a `--` appears anywhere before it "
+    "on its line, so select is(x, 'a -- b'); select throws_ok($$ call pgpm.transmute(...) $$, NULL, desc) is no site "
+    "and the file passes on its pinned neighbour.",
+    [("        if commented(src, m.start()):\n",
+      "        if \"--\" in src[src.rfind(\"\\n\", 0, m.start()) + 1:m.start()]:\n", 1)],
+)
+MUTATION_SRC["throws_pinned_comment_by_spelling"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_quoted_form"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh: the assertion is read by its unquoted name only, so select "
+    "\"throws_ok\"($$ call pgpm.transmute(...) $$, NULL, desc), the same function to the server, is no site and the "
+    "file passes on its pinned neighbour.",
+    [("CALL = re.compile(r'\"?\\bthrows_(' + \"|\".join(re.escape(f) for f in forms) + r')\"?\\s*\\(', re.I)\n",
+      "CALL = re.compile(r'\\bthrows_(' + \"|\".join(re.escape(f) for f in forms) + r')\\s*\\(', re.I)\n", 1)],
+)
+MUTATION_SRC["throws_pinned_quoted_form"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_var_in_comment"] = (
+    "bench/throws_pinned_sites.sh",
+    "bench/throws_pinned.sh's psql_var() reading a pattern's /* */ comments as text, so throws_ok($$ call "
+    "pgpm.transmute(...) $$, NULL /* :expected */, desc) reads as a pattern built from a psql variable, is reported "
+    "unevaluable and never probed, and the file passes on its pinned neighbour (#1235, review thread on PR #1395). "
+    "One clause, the block-comment skip.",
+    [("        elif text.startswith(\"/*\", i):\n            depth, i = 1, i + 2   # nested, as the server reads them\n",
+      "        elif False:\n            depth, i = 1, i + 2   # nested, as the server reads them\n", 1)],
+)
+MUTATION_SRC["throws_pinned_var_in_comment"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_summary_not_restated"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1235 bench/throws_pinned.sh (B06-02): the closing FAIL summary is a plain verdict rather than a restated "
+    "`N ran, M failed`, so a run whose only failure is its LIVENESS: zero-site premise reads to discriminate.sh's "
+    "starved() as a defect check and is certified as a catch. One clause, the restated tail.",
+    [("of ${sites:-none}: $judged ran, $((accepts + malformed)) failed\"\n",
+      "of ${sites:-none}\"\n", 1)],
+)
+MUTATION_SRC["throws_pinned_summary_not_restated"] = "bench/throws_pinned.sh"
 
 # Pass 11's three novel seeds (#1226), catalogued after the pass with a guard that fails against each: no test
 # caught them while they were planted, and every finder had to find them by reading.
@@ -14042,7 +14274,8 @@ MUTATIONS["archive_endpoint_empty_host_unrefused"] = (
 MUTATION_SRC["archive_endpoint_empty_host_unrefused"] = "pgpm_archive/install.sql"
 MUTATIONS["archive_configure_refusal_shows_userinfo"] = (
     "bench/archive_configure_endpoint.sh",
-    "archive._configure_shown quotes every value, one holding an '@' included, so a refusal of archive.configure "
+    "archive._configure_hides hides nothing, so archive._configure_shown quotes every value, one holding an '@' "
+    "included, and a refusal of archive.configure "
     "prints the password of an endpoint whose credentials the credentials check does not recognise "
     "('//user:password@host', 'http:/user:password@host', 'http:///user:password@host', a password holding a '/' "
     "before a query string), and of a URL with credentials typed as the bucket, into the client's error and the "
@@ -14566,6 +14799,32 @@ MUTATIONS["archive_recorded_bounds_unread"] = (
       "        null;\n", 1)],
 )
 MUTATION_SRC["archive_recorded_bounds_unread"] = "pgpm_archive/install.sql"
+# #1368: archive.configure's p_prefix refusal asks archive._configure_hides, the decision the endpoint and bucket
+# refusals take through archive._configure_shown, so it prints no value holding an '@'. Caught by
+# tests/archive/db/55 through bench/archive_configure_prefix_shown.sh.
+MUTATIONS["archive_prefix_refusal_shows_userinfo"] = (
+    "bench/archive_configure_prefix_shown.sh",
+    "Pre-#1368 archive.configure: the p_prefix refusal (a '.' or '..' segment) never asks whether its value holds "
+    "an '@', so a prefix typed as 'user:password@host/../' puts the password in the client's error and the server "
+    "log, against pgpm_archive/README.md's 'no refusal archive.configure raises quotes a value that holds an @'. "
+    "One clause, the question. tests/archive/db/55 catches it (each spelling's refusal prints the password).",
+    [("    if archive._configure_hides(p_prefix) then\n", "    if false then\n", 1)],
+)
+MUTATION_SRC["archive_prefix_refusal_shows_userinfo"] = "pgpm_archive/install.sql"
+# #1369: archive._grid_bound reads a uuidv7 or text_time bound as the start of the unit the column's encoding
+# keeps, as it reads a date column's as the day. Caught by tests/archive/db/56 through
+# bench/archive_direct_call_encoded_unit.sh (against the archive image and MinIO).
+MUTATIONS["archive_encoded_bound_read_as_instant"] = (
+    "bench/archive_direct_call_encoded_unit.sh",
+    "Pre-#1369 archive._grid_bound: a uuidv7 or text_time bound is read as its instant, not as the start of the "
+    "unit the column's encoding keeps, so a direct strategy call's [2024-01-02 00:00:00, 00:00:00.0005) on a "
+    "uuidv7 grid passes the empty-range check, encodes both bounds to one uuid, reads no row and PUTs an empty "
+    "object at lo's chunk key, and a lo inside a unit is keyed by the instant, a key no tick gives the chunk. One "
+    "clause, the unit. tests/archive/db/56 catches it in parts A to C (the sub-unit ranges are not refused, and "
+    "the objects land at the instant's key).",
+    [("  if p_kind in ('uuidv7', 'text_time') then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_encoded_bound_read_as_instant"] = "pgpm_archive/install.sql"
 
 # Issue #1271: _regrain_capture_names finds the recorded capture function by its oid wherever it lives and returns
 # its own schema (fn_nsp), which untransmute and uninstall.sql drop it in. Caught by tests/338 through
@@ -14584,11 +14843,12 @@ MUTATIONS["regrain_capture_fn_in_delta_schema"] = (
 MUTATIONS["untransmute_capture_fn_dropped_in_delta_schema"] = (
     "bench/regrain_capture_fn_any_schema.sh",
     "The resolver fixed but untransmute's drop site not: the function is resolved wherever it lives and then "
-    "dropped by name in the DELTA's schema, so after a move the recorded function survives and an operator's "
-    "function of the capture's name beside the delta is dropped in its place. One site, the schema of the drop. "
+    "looked up for its drop by name in the DELTA's schema, so after a move the recorded function survives and an "
+    "operator's function of the capture's name beside the delta is dropped in its place. One site, the schema of "
+    "the lookup untransmute drops by (#1367 moved the drop onto the oid that lookup finds). "
     "tests/338 parts A and B catch it (the recorded function survives, the operator's is gone).",
-    [("  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cfnsp, v_cfn); end if;\n",
-      "  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cnsp, v_cfn); end if;\n", 1)],
+    [("    v_cfn_reg := to_regprocedure(format('%I.%I()', v_cfnsp, v_cfn));\n",
+      "    v_cfn_reg := to_regprocedure(format('%I.%I()', v_cnsp, v_cfn));\n", 1)],
 )
 # The same issue's other exit, pgpm_core/uninstall.sql, which the wrapper takes as the file under test for these
 # two (it recognises them by MUTATION_SRC, as bench/recorded_identity.sh does).
@@ -14771,6 +15031,69 @@ MUTATION_SRC["archive_child_by_oid_cast_case_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_data_read_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_identity_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_set_operation_unread"] = _G1287_SRC
+# Issue #1386 (review pass 13, F13-03): the value a name may stand alone as is widened over every cast around it,
+# a cast to regclass included, so `select c.relname::regclass into v_x` (the relname resolved through search_path)
+# passes rule 1 while `regclass(c.relname)` is refused. One site, the stop at a cast to a name type.
+MUTATIONS["archive_child_by_oid_name_cast_alone"] = (
+    _G1287,
+    "Pre-#1386 scripts/check_archive_child_by_oid.py: widen() takes a cast to regclass around a name column as part "
+    "of the value that may stand alone in a select list, so `select c.relname::regclass into v_x` and `select "
+    "cast(c.relname as regclass) into v_x`, a relation found by its name, pass rule 1. One site, widen()'s stop.",
+    [("    while True:\n        if name_cast(toks, s, e):\n            return s, e\n", "    while True:\n", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_name_cast_alone"] = _G1287_SRC
+MUTATIONS["archive_child_by_oid_rendered_recast_alone"] = (
+    _G1287,
+    "#1386's sibling in scripts/check_archive_child_by_oid.py: rendered_regclass() widens a rendering over a cast "
+    "back to regclass, so `select c.oid::regclass::text::regclass into v_x`, the rendered name resolved again, is "
+    "one rendering standing alone and passes rule 1. One site, the rendering's stop.",
+    [("            if rendered and name_cast(toks, s, e):\n"
+      "                break                                 # the rendered name resolved again: no part of it (#1386)\n",
+      "", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_rendered_recast_alone"] = _G1287_SRC
+# Issue #1387 (review pass 13, F13-04 and F8-07): scripts/check_changelog_residue.py reads two versions of one
+# bullet as residue only when word for word the same, and a bullet only over its indented lines. One mutation per
+# clause of the fix; bench/lint_changelog_residue_spellings.sh catches both, on residue planted in the real file.
+MUTATIONS["changelog_residue_near_copy_unread"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: two bullets are compared for whole-text identity only, so two "
+    "versions of one reworded bullet kept side by side (#1161's bullet beside its older round, which says "
+    "`set_regrain` refuses where the bullet says it warns) pass. One site, the near-copy check.",
+    [("    for i, j, r in near_copies(bs):\n", "    for i, j, r in []:\n", 1)],
+)
+MUTATION_SRC["changelog_residue_near_copy_unread"] = "scripts/check_changelog_residue.py"
+MUTATIONS["changelog_residue_lazy_line_unread"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: bullets() goes on only over lines that start with a space, so a "
+    "stale tail glued after a bullet unindented, which Markdown renders as more of the same list item, is no "
+    "bullet's text and its repeated run passes. One site, the continuation test.",
+    [("        elif cur is not None and (line.startswith(\"  \") if gap else\n"
+      "                                  line.startswith(\" \") or not INTERRUPTS.match(line)):\n",
+      "        elif cur is not None and (line.startswith(\"  \") if gap else line.startswith(\" \")):\n", 1)],
+)
+MUTATION_SRC["changelog_residue_lazy_line_unread"] = "scripts/check_changelog_residue.py"
+MUTATIONS["changelog_residue_paragraph_unread"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: a blank line ends a bullet, so a stale tail kept after it as an "
+    "indented paragraph, which Markdown renders as the same list item's, is no bullet's text and its repeated run "
+    "passes. One site, the blank line's gap.",
+    [("        elif cur is not None and not line.strip():\n            gap = True\n",
+      "        elif cur is not None and not line.strip():\n            cur = None\n", 1)],
+)
+MUTATION_SRC["changelog_residue_paragraph_unread"] = "scripts/check_changelog_residue.py"
+MUTATIONS["changelog_residue_fence_ends_item"] = (
+    "bench/lint_changelog_residue_spellings.sh",
+    "Pre-#1387 scripts/check_changelog_residue.py: a code fence ends the bullet it stands in, so a stale tail kept "
+    "as a paragraph of the item after a code block fenced inside it is no bullet's text and its repeated run "
+    "passes. One site, the fence's handling of the item.",
+    [("            if cur is not None and line.startswith(\"  \"):\n"
+      "                gap = True                            # a code block inside the item: its text goes on after it\n"
+      "            else:\n"
+      "                cur = None\n",
+      "            cur = None\n", 1)],
+)
+MUTATION_SRC["changelog_residue_fence_ends_item"] = "scripts/check_changelog_residue.py"
 
 
 # Issues #1285 and #1286 (pass 12 G27): tests/72 asked only the role its policy names what it reads through the
@@ -14864,6 +15187,97 @@ MUTATIONS["archive_extres_parquet_by_prefix"] = (
       "                    order by lo::numeric)\n", 1)],
 )
 MUTATION_SRC["archive_extres_parquet_by_prefix"] = "tests/archive/db/44_archive_extension_resolution_test.sql"
+# pass 13 G13 (#1376): four more archive test files that judged a Parquet object by less than identity, each back
+# to the shape that passed. Judged by bench/archive_fn_s3_readback.sh, each file against DROP LAST (the strategy
+# PUTs every row of the chunk but the last, while recording them all).
+MUTATIONS["archive_schema_zone_parquet_by_size"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/26 Part B: the t26a Parquet object is judged by being larger than the 3-row t26b "
+    "file, so an object holding 10 (or 19) of t26a's 20 rows at t26a's key passes. One site, the Part B "
+    "assertion, back to its size comparison.",
+    [("""select is((select string_agg(f.tbl || ':' || coalesce((t26.object(f.tbl::regclass, :'p' || f.tbl || '_0.parquet') = f.file)::text, 'no object'),
+                             ', ' order by f.tbl) from t26_pq_file f),
+          't26a.pq:true, t26b.pq:true',
+  'each object is byte for byte the Parquet file of its own chunk: t26a''s 20 rows, not the 3-row file that used to share its key');
+""", """select ok(t26.bytes('t26a.pq', :'p' || 't26a.pq_0.parquet') > t26.bytes('t26b.pq', :'p' || 't26b.pq_0.parquet'),
+  'the t26a object is the larger, 20-row file, not the 3-row file that used to share its key');
+""", 1)],
+)
+MUTATION_SRC["archive_schema_zone_parquet_by_size"] = "tests/archive/db/26_archive_key_schema_zone_test.sql"
+MUTATIONS["archive_recorded_chunk_rerun_by_length"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/42: the CONTROL after the documented Parquet re-run asks only octet_length > 0, "
+    "and the F5-03 check compares with that capture, so a re-run that left 35 (or 69) of the chunk's 70 rows "
+    "at its key passes. One site, the CONTROL's predicate.",
+    [("""select ok((select b from t42_pq_rerun) = archive._pq_to_parquet_range('t42.pq', 'id', '0', '100',
+                                            (select compress from archive.config where parent_table = 't42.pq'::regclass)),
+""", """select ok((select octet_length(b) > 0 from t42_pq_rerun),
+""", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_rerun_by_length"] = "tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql"
+MUTATIONS["archive_recorded_rows_rerun_by_length"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/48: the CONTROL after the Parquet re-runs asks only octet_length > 0, and the "
+    "later identity checks compare with that capture, so a re-run that left 35 (or 69) of the chunk's 70 rows "
+    "at its key, the only copy after retire(), passes. One site, the CONTROL's predicate.",
+    [("""select ok((select b from t48_pq_rerun) = archive._pq_to_parquet_range('t48.pq', 'id', '0', '100',
+                                            (select compress from archive.config where parent_table = 't48.pq'::regclass)),
+""", """select ok((select octet_length(b) > 0 from t48_pq_rerun),
+""", 1)],
+)
+MUTATION_SRC["archive_recorded_rows_rerun_by_length"] = "tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql"
+MUTATIONS["archive_direct_bounds_parquet_by_status"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1376 tests/archive/db/54 Part B: the Parquet object at the 2 January key is judged by its GET status "
+    "alone, so an object holding id 1 without id 2 passes. One site, Part B's object assertion.",
+    [("""select ok(t54.object('t54.pq', :'p' || 't54.pq_2024010200000000.parquet')
+          = archive._pq_to_parquet_range('t54.pq', 'ts', '2024-01-02 00:00:00+00', '2024-01-03 00:00:00+00',
+                                         (select compress from archive.config where parent_table = 't54.pq'::regclass)),
+""", """select ok(t54.status('t54.pq', 'GET', :'p' || 't54.pq_2024010200000000.parquet') = 200,
+""", 1)],
+)
+MUTATION_SRC["archive_direct_bounds_parquet_by_status"] = "tests/archive/db/54_archive_direct_call_bounds_session_test.sql"
+# pass 13 G13 (#1388): the independent-reader checks of the Parquet writer, each site back to the shape that passed
+# a wrong file. Judged by bench/verify_parquet_tests_see_rows.sh, which runs each test function against a writer
+# that adds a row (or misaligns a tie) with no database or reader behind it.
+MUTATIONS["verify_parquet_timestamptz_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_timestamptz: the rows are compared one by one over the expected "
+    "list and the counts never, so a file holding a spurious extra row passes. One site, the count check.",
+    [('    ok = same_count("timestamptz", expected, arrow_rows, duck_rows)\n', '    ok = True\n', 1)],
+)
+MUTATION_SRC["verify_parquet_timestamptz_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_uuid_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_uuid: as test_timestamptz, a file holding a spurious extra row "
+    "passes. One site, the count check.",
+    [('    ok = same_count("uuid", expected, arrow_rows, duck_rows)\n', '    ok = True\n', 1)],
+)
+MUTATION_SRC["verify_parquet_uuid_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_uuid_nullable_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_uuid_nullable: as test_timestamptz, a file holding a spurious "
+    "extra row passes. One site, the count check.",
+    [('    ok = same_count("uuid nullable", expected, arrow_rows, duck_rows)\n', '    ok = True\n', 1)],
+)
+MUTATION_SRC["verify_parquet_uuid_nullable_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_naive_rows_uncounted"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet.py test_timestamp_naive (the sibling of F8-05's three): its rows are "
+    "compared over the expected wall clocks only, so a file holding a spurious extra row passes. One site, the "
+    "count check.",
+    [('    if not same_count("timestamp naive", expected_ts, arrow_rows, duck_rows):\n        ok = False\n', '', 1)],
+)
+MUTATION_SRC["verify_parquet_naive_rows_uncounted"] = "scripts/verify_parquet.py"
+MUTATIONS["verify_parquet_range_keyless_one_column"] = (
+    "bench/verify_parquet_tests_see_rows.sh",
+    "Pre-#1388 scripts/verify_parquet_range.py test_range_keyless_archived: the rows tied on ts differ in one "
+    "column alone, so a writer that reads each column in its own order (the #462 misalignment) writes the rows a "
+    "correct one does and passes. One site, the tied row's n made the same as its twin's.",
+    [("""              "('2026-01-10', 'b', 1), ('2026-01-10', 'a', 2), ('2026-01-20', 'c', 3)")\n""",
+      """              "('2026-01-10', 'b', 1), ('2026-01-10', 'a', 1), ('2026-01-20', 'c', 3)")\n""", 1)],
+)
+MUTATION_SRC["verify_parquet_range_keyless_one_column"] = "scripts/verify_parquet_range.py"
 # #1283 (pass 12 G25): five timescale files asked for leftover pgpm.scratch records by casting the table's name
 # to regclass after the cutover, when it names the migrated table, not the hypertable the records are keyed by.
 # Judged by bench/hypertable_tests_scratch_by_hypertable_oid.sh, each the check's pre-fix query under its
@@ -14957,6 +15371,524 @@ MUTATIONS["fh_conservation_by_count"] = (
 )
 MUTATION_SRC["fh_conservation_by_count"] = "bench/run_fh.sh"
 
+# pass 13 G12 (#1374, #1375): core tests that asserted conservation by count (or by a sample of ids: tests/338,
+# 261, 319 and 108) where the claim is which rows, parents or constraint. Each mutation is one site's pre-fix shape,
+# and bench/tests_identity_not_count.sh plants the wrong state that shape accepts right before that site's assertion.
+MUTATIONS["t51_unique_constraint_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/51: 'the UNIQUE constraint survived the round trip' counts the table's UNIQUE "
+    "constraints (one), so a round trip that hands uq_rt back without uq_rt_key (ts, id), another UNIQUE "
+    "standing, passes. The guard drops uq_rt_key and adds UNIQUE (body) before the assertion.",
+    [("""select is(
+  (select array_agg(conname || ' ' || pg_get_constraintdef(oid) order by conname) from pg_constraint
+    where conrelid = 'public.uq_rt'::regclass and contype in ('p', 'u')),
+  array['uq_rt_key UNIQUE (ts, id)'], 'the UNIQUE constraint survived the round trip');
+""",
+      """select is(
+  (select count(*)::int from pg_constraint where conrelid = 'public.uq_rt'::regclass and contype = 'u'),
+  1, 'the UNIQUE constraint survived the round trip');
+""", 1),
+    ],
+)
+MUTATION_SRC["t51_unique_constraint_by_count"] = "tests/51_unique_constraint_untransmute_test.sql"
+MUTATIONS["t51_round_trip_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/51: 'all rows conserved through the round trip' is count(*) = 25, which a table that "
+    "lost row 1 and holds a row 26 the source never had satisfies. The guard makes that swap before the "
+    "assertion.",
+    [("""select is(
+  (select array_agg(id || ':' || body || ':' || extract(epoch from newest - ts)::bigint order by id)
+     from public.uq_rt, (select max(ts) as newest from public.uq_rt) n),
+  (select array_agg(g || ':b' || g || ':' || (g - 1) * 86400 order by g) from generate_series(1, 25) g),
+  'all rows conserved through the round trip');
+""",
+      """select is((select count(*)::int from public.uq_rt), 25, 'all rows conserved through the round trip');
+""", 1),
+    ],
+)
+MUTATION_SRC["t51_round_trip_rows_by_count"] = "tests/51_unique_constraint_untransmute_test.sql"
+MUTATIONS["t52_keyless_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/52: the keyless table's 'all rows conserved through the parent' is count(*) = 40, which "
+    "a table holding device 1 twice and no device 40 satisfies. The guard plants that state before the "
+    "assertion.",
+    [("""select is(
+  (select array_agg(device || ':' || (ts::date - d0) || ':' || val order by device, ts, val)
+     from public.kl, (select min(ts)::date - 1 as d0 from public.kl) m),
+  (select array_agg(g || ':' || g || ':' || (g * 1.5)::float8 order by g) from generate_series(1, 40) g),
+  'all rows conserved through the parent');
+""",
+      """select is((select count(*)::int from public.kl), 40, 'all rows conserved through the parent');
+""", 1),
+    ],
+)
+MUTATION_SRC["t52_keyless_rows_by_count"] = "tests/52_keyless_transmute_test.sql"
+MUTATIONS["t67_rename_tick_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/67: 'the rename tick moved no rows and lost none' is count(*) = 401, which a table that "
+    "lost row 1 and holds a row 500 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.rnd t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 400) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'the rename tick moved no rows and lost none');
+""",
+      """select is((select count(*)::int from public.rnd), 401,
+  'the rename tick moved no rows and lost none');
+""", 1),
+    ],
+)
+MUTATION_SRC["t67_rename_tick_rows_by_count"] = "tests/67_regrain_name_collision_test.sql"
+MUTATIONS["t69_cancelled_source_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/69: after regrain_cancel 'the source still holds every row' is count(*) = 251, which a "
+    "ca4 that lost row 10 and holds a row 2505 satisfies. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.ca4),
+  (select array_agg(g * 10 || ':p' || g order by g) from generate_series(1, 250) g) || '20000:frontier'::text,
+  'and the parent is untouched: the source still holds every row');
+""",
+      """select is((select count(*)::int from public.ca4), 251,
+  'and the parent is untouched: the source still holds every row');
+""", 1),
+    ],
+)
+MUTATION_SRC["t69_cancelled_source_rows_by_count"] = "tests/69_regrain_capture_apparatus_test.sql"
+MUTATIONS["t70_resumed_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/70: the resumed conversion's 'with every row intact' is count(*) = 2500, which a ph1 "
+    "that lost row 1 and holds a row 4999 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.ph1 t
+     full join (select g::bigint as id, 'v' || g as v from generate_series(1, 2500) g) e on e.id = t.id and e.v = t.v
+    where e.id is null or t.id is null),
+  null::text[], 'with every row intact');
+""",
+      """select is((select count(*)::int from public.ph1), 2500, 'with every row intact');
+""", 1),
+    ],
+)
+MUTATION_SRC["t70_resumed_rows_by_count"] = "tests/70_transmute_phases_test.sql"
+MUTATIONS["t74_aged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/74: 'a regrain does NOT destroy aged rows' is count(*) = 2001, which an ag74 that lost "
+    "aged row 1 and holds a row 2001 satisfies. The guard makes that swap (past the write block) before the "
+    "assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.ag74 t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 2000) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'a regrain does NOT destroy aged rows while archive coverage is incomplete');
+""",
+      """select is((select count(*)::int from public.ag74), 2001,
+  'a regrain does NOT destroy aged rows while archive coverage is incomplete');
+""", 1),
+    ],
+)
+MUTATION_SRC["t74_aged_rows_by_count"] = "tests/74_regrain_archive_gate_test.sql"
+MUTATIONS["t74_partly_aged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/74: the partly aged child's rows below the horizon, count(*) = 999 where id < 1000, "
+    "which a pa74 that lost row 5 and holds a row 0 satisfies. The guard makes that swap before the assertion "
+    "and undoes it after.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from (select * from public.pa74 where id < 1000) t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 999) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'a PARTIALLY aged child keeps the rows below the horizon instead of silently dropping them');
+""",
+      """select is((select count(*)::int from public.pa74 where id < 1000), 999,
+  'a PARTIALLY aged child keeps the rows below the horizon instead of silently dropping them');
+""", 1),
+    ],
+)
+MUTATION_SRC["t74_partly_aged_rows_by_count"] = "tests/74_regrain_archive_gate_test.sql"
+MUTATIONS["t74_regrained_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/74: 'nothing is lost either side of the boundary' is count(*) = 2001, which a pa74 that "
+    "lost row 1500 and holds a row 2500 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.pa74 t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 2000) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'and the rest of it regrains normally, so nothing is lost either side of the boundary');
+""",
+      """select is((select count(*)::int from public.pa74), 2001,
+  'and the rest of it regrains normally, so nothing is lost either side of the boundary');
+""", 1),
+    ],
+)
+MUTATION_SRC["t74_regrained_rows_by_count"] = "tests/74_regrain_archive_gate_test.sql"
+MUTATIONS["t79_status_parents_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/79: 'status() returns a row for EVERY managed table' compares status()'s row count with "
+    "config's, which a status() listing one table twice and another not at all satisfies. The guard puts such "
+    "a status() in place for the assertion.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.status()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'status() returns a row for EVERY managed table -- one dead parent no longer takes them all down');
+""",
+      """select is((select count(*)::int from pgpm.status()), (select count(*)::int from pgpm.config),
+  'status() returns a row for EVERY managed table -- one dead parent no longer takes them all down');
+""", 1),
+    ],
+)
+MUTATION_SRC["t79_status_parents_by_count"] = "tests/79_status_survives_dropped_parent_test.sql"
+MUTATIONS["t79_orphan_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/79: the orphan's 'with every one of its rows intact' is count(*) = 5000, which an orphan "
+    "that lost row 1 and holds a row 5001 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.orph79_p0000000000000000000_to_0000000000000006000 t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 5000) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'with every one of its rows intact');
+""",
+      """select is((select count(*)::int from public.orph79_p0000000000000000000_to_0000000000000006000), 5000,
+  'with every one of its rows intact');
+""", 1),
+    ],
+)
+MUTATION_SRC["t79_orphan_rows_by_count"] = "tests/79_status_survives_dropped_parent_test.sql"
+MUTATIONS["t80_converted_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/80: 'every row survived the conversion' is count(*) = 501, which an ofk that lost row 1 "
+    "and holds a row 999 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || b.id, 'stray ' || t.id) order by coalesce(b.id, t.id))
+     from (select * from public.ofk where payload <> 'valid reference') t
+     full join _ofk_before b on b.id = t.id and b.ref_id = t.ref_id and b.payload = t.payload
+    where b.id is null or t.id is null)
+  || (select array_agg('inserted ' || ref_id) from public.ofk where payload = 'valid reference'),
+  array['inserted 2'], 'every row survived the conversion, plus the one valid insert');
+""",
+      """select is((select count(*)::int from public.ofk), 501,
+  'every row survived the conversion, plus the one valid insert');
+""", 1),
+    ],
+)
+MUTATION_SRC["t80_converted_rows_by_count"] = "tests/80_transmute_outgoing_fk_test.sql"
+MUTATIONS["t88_text_time_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/88: 'row count conserved' compares count(*) with a snapshot of the count, which a "
+    "tt_search that lost its 'oldest' row and holds an invented one satisfies. The exact pre-fix shape: the "
+    "snapshot of the count and the comparison with it. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(r::text order by r::text collate "C") from public.tt_search r),
+  (select array_agg(b::text order by b::text collate "C") from _before_tt b),
+  'row count conserved across the text_time migration, and every row as it was'
+);
+""",
+      """select is(
+  (select count(*) from public.tt_search)::bigint,
+  (select n from _before_tt)::bigint, 'row count conserved across the text_time migration'
+);
+""", 1),
+     ("""create temporary table _before_tt as select * from public.tt_search;
+""",
+      """create temporary table _before_tt as select count(*) as n from public.tt_search;
+""", 1),
+    ],
+)
+MUTATION_SRC["t88_text_time_rows_by_count"] = "tests/88_text_time_transmute_test.sql"
+MUTATIONS["t91_ulid_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/91: the ULID table's 'row count conserved' compares count(*) with a snapshot of the "
+    "count, which a tt_ulid that lost its 'oldest' row and holds an invented one satisfies. The exact pre-fix "
+    "shape: the snapshot of the count and the comparison with it. The guard makes that swap.",
+    [("""select is(
+  (select array_agg(r::text order by r::text collate "C") from public.tt_ulid r),
+  (select array_agg(b::text order by b::text collate "C") from _before_ulid b),
+  'ULID: row count conserved across the migration, and every row as it was'
+);
+""",
+      """select is(
+  (select count(*) from public.tt_ulid)::bigint, (select n from _before_ulid)::bigint,
+  'ULID: row count conserved across the migration'
+);
+""", 1),
+     ("""create temporary table _before_ulid as select * from public.tt_ulid;
+""",
+      """create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+""", 1),
+    ],
+)
+MUTATION_SRC["t91_ulid_rows_by_count"] = "tests/91_text_time_ulid_ksuid_transmute_test.sql"
+MUTATIONS["t91_ksuid_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/91: the KSUID table's 'row count conserved' compares count(*) with a snapshot of the "
+    "count, which a tt_ksuid that lost its 'oldest' row and holds an invented one satisfies. The exact "
+    "pre-fix shape: the snapshot of the count and the comparison with it. The guard makes that swap.",
+    [("""select is(
+  (select array_agg(r::text order by r::text collate "C") from public.tt_ksuid r),
+  (select array_agg(b::text order by b::text collate "C") from _before_ksuid b),
+  'KSUID: row count conserved across the migration, and every row as it was'
+);
+""",
+      """select is(
+  (select count(*) from public.tt_ksuid)::bigint, (select n from _before_ksuid)::bigint,
+  'KSUID: row count conserved across the migration'
+);
+""", 1),
+     ("""create temporary table _before_ksuid as select * from public.tt_ksuid;
+""",
+      """create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+""", 1),
+    ],
+)
+MUTATION_SRC["t91_ksuid_rows_by_count"] = "tests/91_text_time_ulid_ksuid_transmute_test.sql"
+MUTATIONS["t105_progress_parents_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/105: 'progress() with no argument returns one row per managed table' compares row "
+    "counts, which a progress() listing one table twice and another not at all satisfies. The guard puts such "
+    "a progress() in place for the assertion.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.progress()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'progress() with no argument returns one row per managed table');
+""",
+      """select is((select count(*)::int from pgpm.progress()), (select count(*)::int from pgpm.config),
+  'progress() with no argument returns one row per managed table');
+""", 1),
+    ],
+)
+MUTATION_SRC["t105_progress_parents_by_count"] = "tests/105_progress_freeze_test.sql"
+MUTATIONS["t105_progress_dead_parent_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/105: the dead-parent case's 'a row for EVERY managed table' compares row counts, which a "
+    "progress() listing one table twice and another not at all satisfies. The guard puts such a progress() in "
+    "place.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.progress()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'progress() still returns a row for EVERY managed table with a dead parent among them');
+""",
+      """select is((select count(*)::int from pgpm.progress()), (select count(*)::int from pgpm.config),
+  'progress() still returns a row for EVERY managed table with a dead parent among them');
+""", 1),
+    ],
+)
+MUTATION_SRC["t105_progress_dead_parent_by_count"] = "tests/105_progress_freeze_test.sql"
+MUTATIONS["t108_status_parents_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/108: 'status() still returns a row for every managed table' compares row counts, which a "
+    "status() listing one table twice and another not at all satisfies. The guard puts such a status() in "
+    "place.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.status()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'status() still returns a row for every managed table');
+""",
+      """select ok((select count(*) from pgpm.status()) = (select count(*) from pgpm.config),
+  'status() still returns a row for every managed table');
+""", 1),
+    ],
+)
+MUTATION_SRC["t108_status_parents_by_count"] = "tests/108_retain_sign_test.sql"
+MUTATIONS["t115_overshoot_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/115: 'overshoot: all 7 rows are still in the monolith' is count(*) = 7 where id < 1000, "
+    "which a monolith that lost row 3 and holds a row 8 satisfies. The guard makes that swap (past the write "
+    "block) and undoes it after.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.ac115 where id < 1000),
+  (select array_agg(g || ':p' || g order by g) from generate_series(1, 7) g),
+  'overshoot: all 7 rows are still in the monolith');
+""",
+      """select is((select count(*)::int from public.ac115 where id < 1000), 7,
+  'overshoot: all 7 rows are still in the monolith');
+""", 1),
+    ],
+)
+MUTATION_SRC["t115_overshoot_rows_by_count"] = "tests/115_archive_contract_test.sql"
+MUTATIONS["t115_wedged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/115: 'and still holds all 7 rows' is count(*) = 7 where id < 1000, which a monolith that "
+    "lost row 3 and holds a row 8 satisfies. The guard makes that swap (past the write block) and undoes it "
+    "after.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.ac115 where id < 1000),
+  (select array_agg(g || ':p' || g order by g) from generate_series(1, 7) g),
+  'and still holds all 7 rows: four bad strategies and five ticks archived nothing and dropped nothing');
+""",
+      """select is((select count(*)::int from public.ac115 where id < 1000), 7,
+  'and still holds all 7 rows: four bad strategies and five ticks archived nothing and dropped nothing');
+""", 1),
+    ],
+)
+MUTATION_SRC["t115_wedged_rows_by_count"] = "tests/115_archive_contract_test.sql"
+MUTATIONS["t121_aged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/121: '(a) all 999 rows below the old horizon survive' is count(*) = 999 where id < 1000, "
+    "which an rl121 that lost row 500 and holds a row 0 satisfies. The guard makes that swap (past capture) "
+    "and undoes it.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from (select * from public.rl121 where id < 1000) t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 999) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], '(a) all 999 rows below the old horizon survive');
+""",
+      """select is((select count(*)::int from public.rl121 where id < 1000), 999,
+  '(a) all 999 rows below the old horizon survive');
+""", 1),
+    ],
+)
+MUTATION_SRC["t121_aged_rows_by_count"] = "tests/121_regrain_recheck_aged_at_swap_test.sql"
+MUTATIONS["t295_history_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/295: 'the rest of the history is intact' is count(*) = 241 over a key (id, pgpm_seq) "
+    "whose ids repeat, which a ps295 that lost (110, 11) and holds a twin (120, 999) satisfies. The guard "
+    "makes that swap.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id || ':' || e.pgpm_seq, 'stray ' || t.id || ':' || t.pgpm_seq)
+                    order by coalesce(e.id, t.id), coalesce(e.pgpm_seq, t.pgpm_seq))
+     from (select * from public.ps295 where id >= 100 and id < 3000) t
+     full join (select g * 10::bigint as id, g::bigint as pgpm_seq, 'x' as payload from generate_series(10, 250) g) e
+       on e.id = t.id and e.pgpm_seq = t.pgpm_seq and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'and the rest of the history is intact (ids 100 to 2500)');
+""",
+      """select is(
+  (select count(*)::int from public.ps295 where id >= 100 and id < 3000), 241,
+  'and the rest of the history is intact (ids 100 to 2500)');
+""", 1),
+    ],
+)
+MUTATION_SRC["t295_history_rows_by_count"] = "tests/295_regrain_key_column_named_pgpm_seq_test.sql"
+MUTATIONS["t338_restored_rows_endpoints_a"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/338: '(A) the restored table keeps its rows, 1 to 120' looks at ids 1, 120 and 121 only, "
+    "so an a338 that lost rows 2 to 119 passes. The guard deletes them before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.a338),
+  (select array_agg(g || ':a' order by g) from generate_series(1, 120) g),
+  '(A) the restored table keeps its rows, 1 to 120');
+""",
+      """select is((select array_agg(id order by id) from public.a338 where id in (1, 120, 121)), array[1, 120]::bigint[],
+  '(A) the restored table keeps its rows, 1 to 120');
+""", 1),
+    ],
+)
+MUTATION_SRC["t338_restored_rows_endpoints_a"] = "tests/338_regrain_capture_fn_any_schema_test.sql"
+MUTATIONS["t338_restored_rows_endpoints_b"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/338: '(B) the restored table keeps its rows, 1 to 70' looks at ids 1, 70 and 71 only, so "
+    "a b338 that lost row 35 passes. The guard deletes it before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.b338),
+  (select array_agg(g || ':b' order by g) from generate_series(1, 70) g),
+  '(B) the restored table keeps its rows, 1 to 70');
+""",
+      """select is((select array_agg(id order by id) from public.b338 where id in (1, 70, 71)), array[1, 70]::bigint[],
+  '(B) the restored table keeps its rows, 1 to 70');
+""", 1),
+    ],
+)
+MUTATION_SRC["t338_restored_rows_endpoints_b"] = "tests/338_regrain_capture_fn_any_schema_test.sql"
+MUTATIONS["t338_uninstalled_rows_endpoints_d"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/338: '(D) the uninstalled table keeps its rows, 1 to 90' looks at ids 1, 90 and 91 only, "
+    "so a d338 that lost row 45 passes. The guard deletes it before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.d338),
+  (select array_agg(g || ':d' order by g) from generate_series(1, 90) g),
+  '(D) the uninstalled table keeps its rows, 1 to 90');
+""",
+      """select is((select array_agg(id order by id) from public.d338 where id in (1, 90, 91)), array[1, 90]::bigint[],
+  '(D) the uninstalled table keeps its rows, 1 to 90');
+""", 1),
+    ],
+)
+MUTATION_SRC["t338_uninstalled_rows_endpoints_d"] = "tests/338_regrain_capture_fn_any_schema_test.sql"
+MUTATIONS["t93_fan_out_by_ledger_rows"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/93: archive_batch = null's fan-out across every eligible partition is count(*) = 3 "
+    "ledger rows, which three chunks of fewer partitions satisfy. The guard credits [6000, 7000)'s chunk to "
+    "the monolith before the assertion: three rows, two partitions.",
+    [("""select is(
+  (select array_agg(l.child_name order by l.lo::numeric) from pgpm.archive_ledger l
+    where l.parent_table = 'public.ab93'::regclass),
+  (select array_agg(p.child_name order by p.lo::numeric) from pgpm.part p
+    where p.parent_table = 'public.ab93'::regclass and p.lo::numeric in (0, 6000, 7000)),
+  'archive_batch = null restores fan-out across every eligible partition in one tick');
+""",
+      """select is(
+  (select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  3, 'archive_batch = null restores fan-out across every eligible partition in one tick');
+""", 1),
+    ],
+)
+MUTATION_SRC["t93_fan_out_by_ledger_rows"] = "tests/93_archive_batch_test.sql"
+MUTATIONS["t108_rows_after_regrain_sampled"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/108: 'the rest remain' looks at five sentinel ids only, so an rs108r that lost row 40000 "
+    "and holds a row 55000 passes. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.rs108r t
+     full join (select g::bigint as id, 'x' as payload from generate_series(30000, 50000) g
+                union all select 65000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'the rows below the legitimate horizon are gone and the rest remain');
+""",
+      """select is(
+  (select array_agg(id order by id) from public.rs108r where id in (1, 29999, 30000, 50000, 65000)),
+  array[30000, 50000, 65000]::bigint[],
+  'the rows below the legitimate horizon are gone and the rest remain');
+""", 1),
+    ],
+)
+MUTATION_SRC["t108_rows_after_regrain_sampled"] = "tests/108_retain_sign_test.sql"
+MUTATIONS["t261_rows_after_swap_sampled_a"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/261: (A)'s 'every row reads as inserted after the swap' looks at seven ids only, so an "
+    "rt261 that lost row 120 and holds a row 250 passes. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || note order by id) from public.rt261),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
+          'every row reads as inserted after the swap');
+""",
+      """select is((select array_agg(id || ':' || note order by id) from public.rt261 where id in (1, 45, 50, 55, 150, 200, 450)),
+          array['1:old1', '45:old45', '50:old50', '55:old55', '150:old150', '200:old200', '450:frontier'],
+          'every row reads as inserted after the swap');
+""", 1),
+    ],
+)
+MUTATION_SRC["t261_rows_after_swap_sampled_a"] = "tests/261_regrain_step_retarget_in_flight_test.sql"
+MUTATIONS["t261_rows_after_swap_sampled_b"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/261: (B)'s 'every row reads as inserted after it' looks at six ids only, so an rh261 "
+    "that lost row 75 and holds a row 299 passes. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || note order by id) from public.rh261),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
+          'every row reads as inserted after it');
+""",
+      """select is((select array_agg(id || ':' || note order by id) from public.rh261 where id in (1, 19, 20, 21, 150, 200)),
+          array['1:old1', '19:old19', '20:old20', '21:old21', '150:old150', '200:old200'],
+          'every row reads as inserted after it');
+""", 1),
+    ],
+)
+MUTATION_SRC["t261_rows_after_swap_sampled_b"] = "tests/261_regrain_step_retarget_in_flight_test.sql"
+MUTATIONS["t319_rows_after_swap_sampled"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/319: '(A) every row reads as inserted after the swap' looks at seven ids only, so an "
+    "ra319 that lost row 120 and holds a row 250 passes. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || note order by id) from public.ra319),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
+          '(A) every row reads as inserted after the swap');
+""",
+      """select is((select array_agg(id || ':' || note order by id) from public.ra319 where id in (1, 49, 50, 51, 199, 200, 450)),
+          array['1:old1', '49:old49', '50:old50', '51:old51', '199:old199', '200:old200', '450:frontier'],
+          '(A) every row reads as inserted after the swap');
+""", 1),
+    ],
+)
+MUTATION_SRC["t319_rows_after_swap_sampled"] = "tests/319_set_regrain_restated_target_test.sql"
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the
@@ -14968,6 +15900,13 @@ MUTATION_SRC["fh_conservation_by_count"] = "bench/run_fh.sh"
 # would silently stop balancing the mutation it was measured for.
 MUTATION_COST_DEFAULT = 2
 MUTATION_COST = {
+    # bench/throws_pinned_sites.sh, measured 2026-10-22 on the core image: about 16 s, 17 runs of the guard.
+    "throws_pinned_site_by_spelling": 16,
+    "throws_pinned_site_by_name": 16,
+    "throws_pinned_comment_by_spelling": 16,
+    "throws_pinned_quoted_form": 16,
+    "throws_pinned_var_in_comment": 16,
+    "throws_pinned_summary_not_restated": 16,
     "archive_lz77_hash_scratch": 240,
     "archive_deflate_raises": 112,
     "archive_deflate_six_arrays": 94,
@@ -15490,6 +16429,200 @@ MUTATIONS["unanchored_stranger_direct_only"] = (
     [('     and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_rel)\n          or exists (select 1 from pg_partition_ancestors(p_rel::regclass) a   -- #1365: at any level, as retire() asks\n                      where a.relid = p_parent::oid and a.relid <> p_rel))\n',
       '     and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_rel))\n', 1)],
 )
+
+# Issues #1364, #1355, #1367: bench/transmute_by_oid.sh runs tests/351, 352 and 353. transmute, transmute_abort and
+# the incoming-key helpers named the tables they acted on by names rendered before a lock wait, and transmute's
+# cutover made its names from its unlocked preflight's reading of the table's name. One mutation per lock, per check.
+MUTATIONS["transmute_abort_drop_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "Pre-#1364 transmute_abort: the DROP of pgpm_monolith_bound is named before its own wait for ACCESS EXCLUSIVE, "
+    "with no lock by the claim's oid first, so a schema swapped while it waits behind a reader sends it to a "
+    "namesake: the namesake loses its constraint of that name, the claim is deleted and the abort logged, and the "
+    "claimed table keeps its write-rejecting bound. One clause, the lock. tests/351 catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', false, 'transmute_abort');\n", "", 1)],
+)
+MUTATIONS["transmute_bound_add_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "Pre-#1355 _transmute phase 1: the ADD of pgpm_monolith_bound is named before its own wait for ACCESS EXCLUSIVE "
+    "behind a reader, so a schema swapped during the wait puts the write-rejecting CHECK on a namesake and commits "
+    "it. One clause, the lock by oid before the ADD. tests/352 part A catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, 'transmute');\n", "", 1)],
+)
+MUTATIONS["transmute_validate_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "_transmute phase 2's VALIDATE named before its own wait for SHARE UPDATE EXCLUSIVE, the #1355 shape: a schema "
+    "swapped during the wait validates a namesake's constraint of the bound's name and leaves the table's NOT VALID. "
+    "One clause, the lock by oid before the VALIDATE. tests/352 part B catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_parent, 'share update exclusive', true, 'transmute');\n", "", 1)],
+)
+MUTATIONS["transmute_preflight_read_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "_transmute's preflight without its first lock through the name it read: its first read of the table waits behind "
+    "an ACCESS EXCLUSIVE holder and reads a namesake a schema swap put under the name, so the bound is sized from the "
+    "namesake's rows, committed on the table, and its VALIDATE fails, leaving the claim and the bound. One clause. "
+    "tests/352 part C catches it.",
+    [("  perform pgpm._lock_named_or_raise(p_parent, 'access share', true, v_nsp, v_rel, 'transmute');\n", "", 1)],
+)
+MUTATIONS["transmute_cutover_lock_follows_rename"] = (
+    "bench/transmute_by_oid.sh",
+    "Pre-#1367 _transmute cutover: its first lock follows the table by oid instead of refusing a name that stopped "
+    "denoting it, so a RENAME committed between phase 2 and the cutover is undone by the cutover's renames, made from "
+    "the preflight's name. One clause, the lock's name. tests/353 part A catches it.",
+    [("  perform pgpm._lock_named_or_raise(p_parent, 'access share', false, v_nsp, v_rel, 'transmute');\n",
+      "  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');\n", 1)],
+)
+MUTATIONS["transmute_cutover_schema_unasked"] = (
+    "bench/transmute_by_oid.sh",
+    "The schema is not asked again after the cutover's waits for other objects' locks (#1367): a schema swapped "
+    "while 7a waits for an outgoing key's referenced table sends the trigger and policy replays, which name the "
+    "table in the schema the preflight read, to a namesake, and the conversion commits without them. One clause, "
+    "_nsp_held_or_raise's question. tests/353 part B catches it.",
+    [("  if (select n.nspname from pg_namespace n where n.oid = p_nspoid) is distinct from p_nsp then\n",
+      "  if false then\n", 1)],
+)
+MUTATIONS["incoming_key_effect_unchecked"] = (
+    "bench/transmute_by_oid.sh",
+    "An incoming key's ADD, DROP or VALIDATE on its referencing table is not checked by its effect on that table's "
+    "oid: restore_incoming_fks's ADD, waiting behind a writer while the referencing table's schema is swapped, puts "
+    "the key on a namesake and marks the record restored. One clause, _con_effect_or_raise's check. tests/353 part C "
+    "catches it.",
+    [("  perform pgpm._effect_or_raise(\n"
+      "    coalesce((select p_state <> 'absent' and (p_state <> 'validated' or c.convalidated)\n"
+      "                     and (p_ref is null or c.confrelid = p_ref)\n"
+      "                from pg_constraint c where c.conrelid = p_rel and c.conname = p_con), p_state = 'absent'),\n"
+      "    p_rel, p_what);\n", "  null;\n", 1)],
+)
+
+# Issue #1370 (and #814's second bullet): the archive step's log rows over an aggregated range render it as canonical
+# native text. bench/archive_log_bounds_canonical.sh runs tests/357 against the mutant.
+MUTATIONS["archive_log_bounds_session_render"] = (
+    "bench/archive_log_bounds_canonical.sh",
+    "Pre-#1370 rendering: pgpm._typed_text renders without its DateStyle pin, so _mark_gone_chunks' "
+    "archive_chunk_retired row and _archive_step's orphan-discard archive_coverage_reset row take the archive tick's "
+    "DateStyle and zone ('01/12/2026 05:30:00 IST' under SQL, DMY in Asia/Kolkata), text that names no instant and "
+    "reads back elsewhere as 12 January or not at all. One clause, the SET. tests/357 parts A and B catch it.",
+    [("returns text language sql stable set datestyle = 'ISO, MDY' as $$\n  select p_val::text;\n",
+      "returns text language sql stable as $$\n  select p_val::text;\n", 1)],
+)
+# Issue #1371: the ATTACH every skip_archive remedy spells carries the bounds encoded for the control column.
+# bench/archive_remedy_encoded_bounds.sh runs tests/358 against the mutant.
+MUTATIONS["archive_remedy_bounds_unencoded"] = (
+    "bench/archive_remedy_encoded_bounds.sh",
+    "Pre-#1371 remedies: pgpm._attach_back_sql spells pgpm.part's native bounds in FOR VALUES, so on a uuidv7 grid "
+    "the ATTACH the three skip_archive remedies tell the operator to type is refused (invalid input syntax for type "
+    "uuid) and on a text_time grid its bounds hold none of the table's rows. One clause, the encoding. tests/358 parts "
+    "U and T catch it.",
+    [("    pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, "
+      "cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
+      "    pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, "
+      "cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));\n",
+      "    p_lo, p_hi);\n", 1)],
+)
+
+# Issue #1366: the hypertable module reaches what pgpm recorded by oid after a lock wait (the capture function's drops
+# checked by its oid, the drains' locks on the copy and the source by oid, the cutover's reads and writes of the copy
+# and the source by their oids' renderings). bench/hypertable_by_oid_after_wait.sh runs tests/timescale/db/346 against
+# a mutant module; one mutation per clause.
+MUTATIONS["hypertable_capture_fn_drop_unchecked"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "_from_hypertable_drop_fn does not ask whether the recorded oid is gone after its DROP FUNCTION: the DROP waits "
+    "for the function's lock and looks the name up again once granted, so a function or schema renamed aside with a "
+    "namesake committed during the wait makes the cutover (and the copy's re-run) drop the operator's function and "
+    "leave pgpm's behind with its record deleted. One clause. tests/timescale/db/346 parts A and B catch it.",
+    [("""  if exists (select 1 from pg_proc f where f.oid = p_fn) then
+    raise exception 'pg_partition_magician: % reached another function than the one pgpm recorded (oid %): the function or its schema was renamed while the DROP waited for its lock, and another function stood under the name; rolled back. Re-run it',
+      p_what, p_fn;
+  end if;
+""", "", 1)],
+)
+MUTATION_SRC["hypertable_capture_fn_drop_unchecked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_capture_fn_drop_unchecked"] = "timescale"
+MUTATIONS["hypertable_drain_delta_step_source_unlocked"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_drain_delta_step reconciles its batch from the source without locking it by oid first: the "
+    "reconcile's INSERT ... SELECT waits for the source behind a holder and, after a schema swap, reads a namesake, "
+    "so the copy takes the namesake's row for a key the batch consumed. One clause. tests/timescale/db/346 part C "
+    "catches it.",
+    [("  perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_delta_step');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_step_source_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_step_source_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_copy_unlocked"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "_from_hypertable_lock_copy hands the drains the recorded copy without locking it: the append drain's watermark "
+    "read then waits for the copy under the name it rendered and, after a schema swap, reads an empty namesake, whose "
+    "NULL watermark makes the step copy every source row into the copy a second time. One clause. "
+    "tests/timescale/db/346 part D catches it.",
+    [("  if v_copy is not null and pgpm._lock_oid(v_copy, 'row exclusive', true) then\n",
+      "  if v_copy is not null then\n", 1)],
+)
+MUTATION_SRC["hypertable_drain_copy_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_copy_unlocked"] = "timescale"
+MUTATIONS["hypertable_cutover_baseline_by_name"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_cutover reads its conservation baseline and the append-only watermark from the copy by the name "
+    "read at its start: a schema swapped to an empty namesake copy while the cutover waits for the copy's lock, and "
+    "swapped back while it waits for the source, gives a zero baseline and a NULL watermark, so a keyless catch-up "
+    "re-inserts every copied row and the conservation check agrees. One clause. tests/timescale/db/346 part E "
+    "catches it.",
+    [("pgpm._from_hypertable_ctl_text(max(%I)) from %s', v_fp_q, p_control, v_dest_oid)\n",
+      "pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_baseline_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_baseline_by_name"] = "timescale"
+MUTATIONS["hypertable_cutover_reconcile_by_name"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_cutover's change-tracking reconcile deletes the dirty keys from the copy by the name read at "
+    "its start: a schema swapped while the cutover waits for the delta sends the delete to a namesake copy, and the "
+    "copy pgpm recorded keeps its stale rows. One clause. tests/timescale/db/346 part F catches it.",
+    [("    execute format('with w as (delete from %s d where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',\n"
+      "                   v_dest_oid, v_dkey_q, v_subsel_q, v_fp_q) into v_n, v_h;\n",
+      "    execute format('with w as (delete from %I.%I d where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',\n"
+      "                   v_nsp, v_dest, v_dkey_q, v_subsel_q, v_fp_q) into v_n, v_h;\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_reconcile_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_reconcile_by_name"] = "timescale"
+MUTATIONS["hypertable_cutover_nomatch_by_name"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_cutover's untracked-write check (#654) compares the source's fresh rows with the copy named by "
+    "the name read at its start: after a schema swap during its wait for the delta it compares them with a namesake "
+    "copy, refusing a sound swap or passing a wrong one. One clause. tests/timescale/db/346 part F catches it.",
+    [("      v_nomatch_q := format('not exists (select 1 from %s d where %s = %s and row(%s)::text = row(%s)::text)',\n"
+      "                          v_dest_oid, ",
+      "      v_nomatch_q := format('not exists (select 1 from %I.%I d where %s = %s and row(%s)::text = row(%s)::text)',\n"
+      "                          v_nsp, v_dest, ", 1)],
+)
+MUTATION_SRC["hypertable_cutover_nomatch_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_nomatch_by_name"] = "timescale"
+# Issue #1356: the drains' residual probes and the append step's watermark probe lock their relation by oid before
+# they name it. bench/hypertable_drain_probe_by_oid.sh runs tests/timescale/db/347 against a mutant module.
+MUTATIONS["hypertable_drain_appends_probe_unlocked"] = (
+    "bench/hypertable_drain_probe_by_oid.sh",
+    "from_hypertable_drain_appends asks whether anything is past the watermark without locking the source by oid "
+    "first: the EXISTS waits for the source under the name it rendered and, after a schema swap to an empty namesake, "
+    "reads it as converged. One clause. tests/timescale/db/347 part A catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_appends');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_appends_probe_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_appends_probe_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_delta_probe_unlocked"] = (
+    "bench/hypertable_drain_probe_by_oid.sh",
+    "from_hypertable_drain_delta asks whether anything is left in the delta without locking it by oid first: the "
+    "EXISTS waits for the delta under the name it rendered and, after a schema swap to an empty namesake, reads it "
+    "as converged. One clause. tests/timescale/db/347 part B catches it.",
+    [("    perform pgpm._lock_oid_or_raise(v_delta, 'row exclusive', true, 'from_hypertable_drain_delta');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_probe_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_probe_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_appends_step_source_unlocked"] = (
+    "bench/hypertable_drain_probe_by_oid.sh",
+    "from_hypertable_drain_appends_step probes the source for its batch's upper bound without locking it by oid "
+    "first: the probe waits for the source under the name it rendered and, after a schema swap to an empty "
+    "namesake, returns its input watermark (nothing past it). One clause. tests/timescale/db/347 part C catches it.",
+    [("  perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_appends_step');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_appends_step_source_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_appends_step_source_unlocked"] = "timescale"
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:

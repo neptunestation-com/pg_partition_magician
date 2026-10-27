@@ -24,7 +24,7 @@ select plan(37);
 -- 1000 rows over a step of 250: monolith [0, 1250), five sub-ranges. Frontier sentinel 5000 with retain
 -- 4000 puts the horizon at 1000, so [0, 250) .. [750, 1000) are aged and only [1000, 1250) is copied.
 create table public.rl121 (id bigint primary key, payload text);
-insert into public.rl121 select g, 'x' from generate_series(1, 1000) g;
+insert into public.rl121 select g, 'p' || g from generate_series(1, 1000) g;
 call pgpm.transmute('public.rl121', 'id', 250, p_retain => 4000, p_regrain_batch => 1000);
 select pgpm.obtain('public.rl121');
 insert into public.rl121 values (5000, 'frontier');
@@ -32,9 +32,9 @@ insert into public.rl121 values (5000, 'frontier');
 select child_name as amono from pgpm.part
   where parent_table = 'public.rl121'::regclass and attached order by lo::numeric limit 1 \gset
 select is(:'amono'::text, 'rl121_p0000000000000000000_to_0000000000000001250'::text,
-  'GUARD (a): the monolith is [0, 1250), five sub-ranges of 250, as this file assumes');
+  'GUARD: (a) the monolith is [0, 1250), five sub-ranges of 250, as this file assumes');
 select is((select pgpm._retain_boundary(c) from pgpm.config c where c.parent_table = 'public.rl121'::regclass),
-  '1000', 'GUARD (a): the horizon sits at 1000, so exactly four sub-ranges are aged');
+  '1000', 'GUARD: (a) the horizon sits at 1000, so exactly four sub-ranges are aged');
 
 select is(pgpm.regrain_step('public.rl121', :'amono', '250'), 'prepared', '(a) tick 1 installs capture');
 select is(pgpm.regrain_step('public.rl121', :'amono', '250'), 'copied:1',
@@ -45,7 +45,7 @@ select is(
   (select array_agg(lo || '..' || hi order by lo::numeric) from pgpm.log
     where parent_table = 'public.rl121'::regclass and action = 'regrain_aged'),
   array['0..250', '250..500', '500..750', '750..1000'],
-  'LIVENESS (a): four regrain_aged rows, for [0,250) [250,500) [500,750) [750,1000), by identity');
+  'LIVENESS: (a) four regrain_aged rows, for [0,250) [250,500) [500,750) [750,1000), by identity');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.rl121'::regclass), '1250',
   '(a) the cursor is at hi: the next tick is the swap');
 select is((select array_agg(id order by id) from public.rl121 where id in (1, 250, 500, 750, 999)),
@@ -67,8 +67,14 @@ select ok((select attached from pgpm.part where parent_table = 'public.rl121'::r
 select is((select array_agg(id order by id) from public.rl121 where id in (1, 250, 500, 750, 999)),
   array[1, 250, 500, 750, 999]::bigint[],
   '(a) and every sampled aged row is still visible through the parent, by identity');
-select is((select count(*)::int from public.rl121 where id < 1000), 999,
-  '(a) all 999 rows below the old horizon survive');
+-- by identity (#1374): the rows lost and the rows the fixture never wrote, each named, both none
+select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from (select * from public.rl121 where id < 1000) t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 999) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], '(a) all 999 rows below the old horizon survive');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.rl121'::regclass), '1250',
   '(a) the cursor is untouched, so the run stays resumable rather than restarting');
 select is(
@@ -92,7 +98,7 @@ select is(pgpm.regrain_step('public.rl121', :'amono', '250'), 'swapped:1',
 select is(
   (select count(*)::int from pgpm.log where parent_table = 'public.rl121'::regclass
      and action = 'regrain' and method = 'copy_swap_drop'),
-  1, 'WITNESS (a): the swap ran (one regrain / copy_swap_drop row)');
+  1, 'LIVENESS: (a) the swap ran (one regrain / copy_swap_drop row)');
 select is((select array_agg(id order by id) from public.rl121 where id < 1250), array[1000]::bigint[],
   '(a) after the legitimate swap only the copied row remains below 1250: the aged rows went with the source');
 
@@ -109,23 +115,23 @@ create temp table rp121_pre as select id from public.rp121 where id < 1250;   --
 select child_name as pmono from pgpm.part
   where parent_table = 'public.rp121'::regclass and attached order by lo::numeric limit 1 \gset
 select is(:'pmono'::text, 'rp121_p0000000000000000000_to_0000000000000001250'::text,
-  'GUARD (b): the monolith is [0, 1250) as this file assumes');
+  'GUARD: (b) the monolith is [0, 1250) as this file assumes');
 select is((select pgpm._retain_boundary(c) from pgpm.config c where c.parent_table = 'public.rp121'::regclass),
-  '0', 'GUARD (b): the horizon sits at 0, so [0, 250) is NOT aged when its copy starts');
+  '0', 'GUARD: (b) the horizon sits at 0, so [0, 250) is NOT aged when its copy starts');
 
 select is(pgpm.regrain_step('public.rp121', :'pmono', '250'), 'prepared', '(b) tick 1 installs capture');
 select is(pgpm.regrain_step('public.rp121', :'pmono', '250'), 'copied:100', '(b) tick 2 copies the first batch of [0, 250)');
 
 -- WITNESS: the child is genuinely partial, 100 of the 249 rows its range holds in the source.
 select is((select count(*)::int from public.rp121_p0000000000000000000), 100,
-  'WITNESS (b): the fine child for [0, 250) holds 100 rows mid-copy');
+  'LIVENESS: (b) the fine child for [0, 250) holds 100 rows mid-copy');
 select is((select count(*)::int from rp121_pre where id < 250), 249,
-  'WITNESS (b): while its range holds 249 in the source, so the child is a strict subset');
+  'LIVENESS: (b) while its range holds 249 in the source, so the child is a strict subset');
 
 -- The frontier advances and the range ages out from under the half-copied child.
 insert into public.rp121 values (5500, 'frontier moved');
 select is((select pgpm._retain_boundary(c) from pgpm.config c where c.parent_table = 'public.rp121'::regclass),
-  '500', 'WITNESS (b): the horizon is now 500, so [0, 250) is entirely below it');
+  '500', 'LIVENESS: (b) the horizon is now 500, so [0, 250) is entirely below it');
 
 -- THE assertion, tick by tick: the skip does not fire on a sub-range that already has a child.
 select is(pgpm.regrain_step('public.rp121', :'pmono', '250'), 'copied:100',
@@ -149,7 +155,7 @@ end $$;
 select is(
   (select count(*)::int from pgpm.log where parent_table = 'public.rp121'::regclass
      and action = 'regrain' and method = 'copy_swap_drop'),
-  1, 'WITNESS (b): the swap ran');
+  1, 'LIVENESS: (b) the swap ran');
 
 -- LIVENESS for the negative that follows: a neighbouring childless range WAS skipped as aged under the
 -- same horizon, so [0, 250) was below it too and only its existing child kept the skip from firing.
@@ -157,7 +163,7 @@ select is(
   (select array_agg(lo || '..' || hi order by lo::numeric) from pgpm.log
     where parent_table = 'public.rp121'::regclass and action = 'regrain_aged'),
   array['250..500'],
-  'LIVENESS (b): exactly one regrain_aged row, for [250, 500), the childless aged range');
+  'LIVENESS: (b) exactly one regrain_aged row, for [250, 500), the childless aged range');
 select is(
   (select count(*)::int from pgpm.log where parent_table = 'public.rp121'::regclass
      and action = 'regrain_aged' and lo = '0'),
@@ -180,7 +186,7 @@ select is(
   (select array_agg(p.lo || '..' || p.hi order by p.lo::numeric) from pgpm.part p
     where p.parent_table = 'public.rp121'::regclass and p.attached and p.hi::numeric <= 1250),
   array['0..250', '500..750', '750..1000', '1000..1250'],
-  'WITNESS (b): four fine children are attached below 1250 ([250, 500) went with the source)');
+  'LIVENESS: (b) four fine children are attached below 1250 ([250, 500) went with the source)');
 select is(
   (select coalesce(array_agg(p.child_name::text order by p.lo::numeric), '{}') from pgpm.part p
     where p.parent_table = 'public.rp121'::regclass and p.attached and p.hi::numeric <= 1250

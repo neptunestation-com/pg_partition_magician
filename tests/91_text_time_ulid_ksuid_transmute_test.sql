@@ -16,7 +16,8 @@ insert into public.tt_ulid (id, body) values
   (pgpm._ts_to_text_time(now() - interval '13 months', '', 10, 32, 'ms', '0123456789ABCDEFGHJKMNPQRSTVWXYZ'), 'oldest'),
   (pgpm._ts_to_text_time(now() - interval '11 months', '', 10, 32, 'ms', '0123456789ABCDEFGHJKMNPQRSTVWXYZ'), 'newest');
 
-create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ulid as select * from public.tt_ulid;
 
 -- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
 select cmp_ok(
@@ -42,8 +43,9 @@ select is(
   'text_time', 'ULID: config: control_kind = text_time'
 );
 select is(
-  (select count(*) from public.tt_ulid)::bigint, (select n from _before_ulid)::bigint,
-  'ULID: row count conserved across the migration'
+  (select array_agg(r::text order by r::text collate "C") from public.tt_ulid r),
+  (select array_agg(b::text order by b::text collate "C") from _before_ulid b),
+  'ULID: row count conserved across the migration, and every row as it was'
 );
 
 select pgpm.resume('public.tt_ulid');
@@ -85,7 +87,8 @@ insert into public.tt_ksuid (id, body) values
   (pgpm._ts_to_text_time(now() - interval '11 months', '', 27, 62, 's',
      '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 128, timestamptz '2014-05-13 16:53:20+00'), 'newest');
 
-create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ksuid as select * from public.tt_ksuid;
 
 -- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
 select cmp_ok(
@@ -105,8 +108,9 @@ select is(
   'text_time', 'KSUID: config: control_kind = text_time'
 );
 select is(
-  (select count(*) from public.tt_ksuid)::bigint, (select n from _before_ksuid)::bigint,
-  'KSUID: row count conserved across the migration'
+  (select array_agg(r::text order by r::text collate "C") from public.tt_ksuid r),
+  (select array_agg(b::text order by b::text collate "C") from _before_ksuid b),
+  'KSUID: row count conserved across the migration, and every row as it was'
 );
 
 select pgpm.resume('public.tt_ksuid');

@@ -164,10 +164,23 @@ $$;
 -- password holding a '/' before a query string) had its password printed by whichever refusal did fire, into the
 -- client's error and the server log. Every refusal there that quotes p_endpoint or p_bucket quotes it through
 -- this, so none prints a value that holds an '@', whichever check raises it and however the URL is spelled.
+-- Whether a value is hidden is asked of archive._configure_hides, the one place that decides it, which the p_prefix
+-- refusal asks too (#1368): it printed its value raw, so 'user:pw@host/../' put the password in the error. That
+-- refusal cannot hand its value here, since scripts/check_archive_object_keys.py reads quote_literal of a prefix
+-- as a second place a key is assembled; it quotes the value in its own message when this would quote it.
+create or replace function archive._configure_hides(p_value text)
+returns boolean language plpgsql immutable set search_path = pg_catalog, pg_temp as $$
+begin
+  if p_value like '%@%' then
+    return true;
+  end if;
+  return false;
+end;
+$$;
 create or replace function archive._configure_shown(p_value text)
 returns text language plpgsql immutable set search_path = pg_catalog, pg_temp as $$
 begin
-  if p_value like '%@%' then
+  if archive._configure_hides(p_value) then
     return 'a value holding an ''@'' (not shown here: what precedes an ''@'' may be a password)';
   end if;
   return quote_literal(p_value);
@@ -210,8 +223,12 @@ begin
   -- the HTTP client resolves it before sending and the request's signature, taken over the key as spelled, then no
   -- longer matches. The other spellings a store reads as one object (a leading '/', an empty segment) are taken
   -- out where every key is assembled and claimed, archive._owned_key, which refuses a stored dot segment too.
+  -- Shown as archive._configure_shown would show it (#1368): not at all when it holds an '@', quoted otherwise.
   if p_prefix ~ '(^|/)\.{1,2}/' then
-    raise exception 'archive.configure: p_prefix % has a "." or ".." segment; no store can be addressed with one (the HTTP client resolves it before sending, and the request''s signature no longer matches). Spell the prefix without it',
+    if archive._configure_hides(p_prefix) then
+      raise exception 'archive.configure: p_prefix, a value holding an ''@'' (not shown here: what precedes an ''@'' may be a password), has a "." or ".." segment; no store can be addressed with one (the HTTP client resolves it before sending, and the request''s signature no longer matches). Spell the prefix without it';
+    end if;
+    raise exception 'archive.configure: p_prefix ''%'' has a "." or ".." segment; no store can be addressed with one (the HTTP client resolves it before sending, and the request''s signature no longer matches). Spell the prefix without it',
       p_prefix;
   end if;
   -- archive.to_s3 fills each multipart part until it holds part_bytes, so a size of zero or less
@@ -3222,13 +3239,18 @@ $$;
 -- another than the one a tick gives that chunk, and ['2024-01-02 03:00', '2024-01-02 18:00') was a range to
 -- the empty-range check and no row to the read, which PUT an empty object at the 2 January cell's key. A
 -- timestamp or timestamptz column compares the literal whole, so its reading is the instant itself.
+-- A uuidv7 or text_time column drops the rest too (#1369): the read compares it with pgpm._encode of the bound,
+-- which keeps the encoding's unit (a millisecond for uuidv7, a second for ObjectId) and drops what is below it,
+-- so its reading is the start of the unit, the bound encoded and decoded again. Read as the instant, a range
+-- inside one millisecond passed the empty-range check, both bounds encoded to one uuid, the read found no row,
+-- and the call PUT an empty object at lo's chunk key; and a lo inside a unit was keyed by the instant.
 --
 -- Rendered by pgpm._ts_text in the CALLER's zone, as every native time text pgpm hands a strategy is: the
 -- offset in the text makes the instant exact, and archive._object_stem's own pin is what takes the zone out
 -- of the key (#551).
 create or replace function archive._grid_bound(p_parent regclass, p_column name, p_kind text, p_tz text, p_text text)
 returns text language plpgsql as $$
-declare v_at timestamptz;
+declare v_at timestamptz; c pgpm.config;
 begin
   if p_kind = 'id' then return archive._bound_native('id', p_text, null); end if;
   v_at := archive._bound_native(p_kind, p_text, p_tz)::timestamptz;
@@ -3237,6 +3259,14 @@ begin
                   where a.attrelid = p_parent and a.attname = p_column
                     and a.atttypid = 'date'::regtype and not a.attisdropped) then
     v_at := date_trunc('day', v_at, coalesce(p_tz, 'UTC'));
+  end if;
+  if p_kind in ('uuidv7', 'text_time') then
+    select * into c from pgpm.config where parent_table = p_parent;
+    v_at := pgpm._decode(p_kind,
+              pgpm._encode(p_kind, pgpm._ts_text(v_at), c.text_time_prefix, c.text_time_width, c.text_time_radix,
+                           c.text_time_unit, c.text_time_alphabet, c.text_time_discard_bits, c.text_time_epoch),
+              c.text_time_prefix, c.text_time_width, c.text_time_radix, c.text_time_unit, c.text_time_alphabet,
+              c.text_time_discard_bits, c.text_time_epoch)::timestamptz;
   end if;
   return pgpm._ts_text(v_at);
 end;

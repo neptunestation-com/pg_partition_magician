@@ -37,6 +37,234 @@
   name. A stranger is judged at every level of the parent's partition tree, as `retire()` reads attachment
   (mutation `unanchored_stranger_direct_only`).
 
+- **A retired chunk's offset-less bound reaches every offset a session can take** (#1363). `pgpm._native_bound_reach`
+  widened a retired ledger row's bound that names no instant (a pre-#977 `covered_hi`) only to UTC-12 for a `hi`
+  and UTC+14 for a `lo`, the zones tzdata names today. A session goes further: a POSIX `TimeZone` takes an offset
+  to 167:59:60 either side of UTC (`'XYZ167:59:60'` is UTC-168), a DST name with no offset of its own is an hour
+  east of that (`'XYZ-167:59:60DEF'` is UTC+169 in summer), and tzdata's LMT reaches -15:56:08 (Asia/Manila
+  before 1845). A `hi` such a session wrote read below its own `lo`, the partition re-created over the chunk was
+  not held, and the archive step PUT it over the retired chunk's object, the only copy of the dropped rows. The
+  reach is now 168 hours west for a `hi` and 169 east for a `lo`, so such a chunk can hold the week of partitions
+  next to it until the operator writes the bound with its offset, the remedy `skip_archive_retired_range` names
+  (its text now says how wide the reach is). A session that far out also renders an instant with an offset
+  `timestamptz` input refuses past 15:59:59: `pgpm._ts_text` wrote it into the ledger from an archive step run
+  there, and `pgpm._native_named` took such text for a castable bound, so every later archive step of the parent
+  raised. `pgpm._ts_text` now renders an instant 16 hours or more from UTC in the caller's zone in UTC,
+  `pgpm._native_named` names only an offset input reads, and a bound with a larger one is read as the instant it
+  names. Test `tests/354` (`tests/347` moved to fixtures a week apart); guard
+  `bench/native_bound_reach_every_offset.sh`; mutations `native_bound_reach_civil_zones`,
+  `native_bound_reach_sixteen_hours`, `native_bound_reach_dst_hour`, `ts_text_unreadable_offset`,
+  `native_named_any_offset` and `native_bound_reach_unreadable_offset_widened`.
+- **Four more archive tests judge a Parquet object by identity** (#1376). `tests/archive/db/26` Part B judged the
+  t26a object by being larger than t26b's 3-row file, so an object holding 10 of t26a's 20 rows passed;
+  `tests/archive/db/42` and `tests/archive/db/48` asked only `octet_length > 0` of the object the documented
+  Parquet re-run left, and every later "still holds its bytes" check compares with that capture, so a re-run that
+  left 35 of the chunk's 70 rows at its key passed the whole file; and `tests/archive/db/54` Part B asked only
+  that an object sits at the 2 January key. Each object is now compared byte for byte with the Parquet file of
+  its own chunk (26 takes the files before the tick retires the rows). `bench/archive_fn_s3_readback.sh` now
+  judges these four files too, against a strategy that PUTs every row of the chunk but the last while recording
+  them all (mutations `archive_schema_zone_parquet_by_size`, `archive_recorded_chunk_rerun_by_length`,
+  `archive_recorded_rows_rerun_by_length` and `archive_direct_bounds_parquet_by_status`). A test change only.
+
+- **The independent-reader checks of the Parquet writer compare row counts and see a misaligned tie** (#1388).
+  `scripts/verify_parquet.py`'s `test_timestamptz`, `test_uuid`, `test_uuid_nullable` and `test_timestamp_naive`
+  compared the file's rows one by one over the expected list and never the counts, so a file holding a spurious
+  extra row passed; each now asks `same_count` first, the count check `check()` shares. And
+  `scripts/verify_parquet_range.py`'s keyless fixture had one column besides the control, so a writer that read
+  each column in its own order wrote the same rows a correct one does; its tied rows now differ in two columns.
+  `bench/verify_parquet_tests_see_rows.sh` runs those test functions against a writer that adds a row, drops one
+  or misaligns the tie (mutations `verify_parquet_timestamptz_rows_uncounted`, `verify_parquet_uuid_rows_uncounted`,
+  `verify_parquet_uuid_nullable_rows_uncounted`, `verify_parquet_naive_rows_uncounted` and
+  `verify_parquet_range_keyless_one_column`).
+
+- **Core tests name the rows, parents and constraint they say survive** (#1374). Twenty-three assertions in
+  `tests/51`, `52`, `67`, `69`, `70`, `74`, `79`, `80`, `88`, `91`, `93`, `105`, `108`, `115`, `121` and `295`
+  asserted conservation by a count: `count(*) = N`, a count compared with a snapshot's, `status()` and
+  `progress()` compared with config by row count, the archive's fan-out by ledger rows. A lost row beside a stray
+  one, a report listing one table twice and another not at all, or three chunks of two partitions satisfies
+  each, and `tests/51` counted one UNIQUE where the claim is `uq_rt_key UNIQUE (ts, id)`. Each now names what it
+  claims: the rows lost and the rows never written (both none), every row as the snapshot took it, the parents
+  `status()` or `progress()` reports against config's, each once, the partitions the ledger credits, or the
+  constraint by name and key. The fixtures of `tests/51`, `67`, `69`, `70`, `74`, `79`, `80`, `115` and `121`,
+  whose rows all carried one payload, now give each row its own, and `tests/52`'s random values are now a
+  function of the row. `bench/tests_identity_not_count.sh` plants each site's wrong state right before its
+  assertion and requires the file to fail against it (23 mutations, one per site, from
+  `t51_unique_constraint_by_count` to `t295_history_rows_by_count` and `t93_fan_out_by_ledger_rows`). Now that a
+  wrapper runs them, `tests/108` and `121` spell their premises at the head (`LIVENESS: (a)`, `fixture:`), where
+  `bench/discriminate.sh`'s `starved()` reads them. A test change only.
+
+- **`tests/338` names every row the restored tables keep** (#1375). '(A) the restored table keeps its rows, 1 to
+  120' and its (B) and (D) siblings looked at ids 1, N and N + 1 only, so a table that lost its middle rows
+  passed; `tests/261` and `319` ('every row reads as inserted after the swap') and `tests/108` ('the rest
+  remain') looked at a handful of ids the same way. Each now compares every row by id and payload.
+  `bench/tests_identity_not_count.sh` judges each with a row between the sampled ids lost (mutations
+  `t338_restored_rows_endpoints_a`, `_b`, `t338_uninstalled_rows_endpoints_d`, `t261_rows_after_swap_sampled_a`,
+  `_b`, `t319_rows_after_swap_sampled` and `t108_rows_after_regrain_sampled`). A test change only.
+
+- **`bench/throws_pinned.sh` probes every `throws_*`, whatever its statement** (#1235). The guard probed only a
+  statement that called a pgpm procedure by a name it could read, so an unpinned `throws_ok(..., NULL, desc)`
+  around a test's own helper that calls `pgpm.transmute` (the `pg_temp.mk` and `mk_archive_table` shape), around
+  a statement held in a psql variable or assembled by `||`, or around a `U&"..." UESCAPE` name accepted the 2D000
+  of a transmute that did not refuse, and the file passed on its pinned neighbour. Any statement can reach a
+  `COMMIT`, so the statement is no longer read: every assertion is re-issued around the committing stand-in and
+  must reject it (832 sites in the tree, up from 308; none accepted it). An assertion after a literal holding `--`
+  on its line, and one whose name is double-quoted, are sites too; a bare `:name` in a pattern reads as
+  unevaluable (one inside a comment does not). The closing summary now restates the per-site verdicts (`N ran,
+  M failed`), so a run that failed only its zero-site premise is refused by `discriminate.sh` as starved rather
+  than certified as a catch. `bench/throws_pinned_sites.sh` plants each shape; mutations
+  `throws_ok_helper_unpinned`, `throws_pinned_site_by_name`, `throws_pinned_comment_by_spelling`,
+  `throws_pinned_quoted_form`, `throws_pinned_var_in_comment` and `throws_pinned_summary_not_restated`.
+
+- **The child-by-oid lint refuses a name column cast to regclass where it stands alone** (#1386).
+  `scripts/check_archive_child_by_oid.py` lets a relation's name stand alone in a select list or a `RAISE`, and
+  took every cast around it as part of that value, a cast to regclass included, so `select c.relname::regclass
+  into v_x` and `cast(c.relname as regclass)`, the name resolved again through `search_path`, passed while
+  `regclass(c.relname)` was refused. A cast to regclass or regtype is now no part of the value, in any spelling,
+  and is refused as the lookup by name it is; the same holds for a regclass rendered as text and cast back
+  (`c.oid::regclass::text::regclass`). A name column cast to text alone is still clean. Lint only; no SQL
+  changed. Guard `bench/lint_child_by_oid_cast_spellings.sh`, mutations `archive_child_by_oid_name_cast_alone`
+  and `archive_child_by_oid_rendered_recast_alone`.
+
+- **The changelog residue check refuses two versions of one bullet that differ, and reads every line Markdown
+  gives a bullet** (#1387). `scripts/check_changelog_residue.py` refused two versions of one bullet kept side by
+  side only when they were word for word the same, so a bullet reworded between rounds and kept twice by a
+  keep-both resolution passed whenever the rounds differed by a word. It now also refuses two bullets at least 80%
+  alike word for word in order (no two distinct bullets in any version of the file in its history are 75% alike).
+  And it read a bullet only over its indented lines, so a stale tail glued on as an unindented line (a lazy
+  continuation) or kept as an indented paragraph after a blank line or after a code block fenced inside the
+  item, each the same list item to Markdown, was no bullet's text and passed; it now reads them all. Lint only.
+  Guard `bench/lint_changelog_residue_spellings.sh`, mutations `changelog_residue_near_copy_unread`,
+  `changelog_residue_lazy_line_unread`, `changelog_residue_paragraph_unread` and
+  `changelog_residue_fence_ends_item`.
+
+- **The hypertable module reaches what pgpm recorded by its oid after a lock wait** (#1366). The cutover and a re-run
+  of `from_hypertable_copy` dropped the recorded capture function by the name its oid rendered to, and `DROP
+  FUNCTION` looks the name up again once it has the function's lock: the function or its schema renamed aside with
+  a namesake committed while the drop waited made it drop the operator's function and leave pgpm's behind, its
+  record deleted. Each drop now goes through `pgpm._from_hypertable_drop_fn`, which requires the oid gone after
+  it and otherwise refuses, rolled back. `from_hypertable_drain_delta_step` read the source in its reconcile
+  without locking it (`row_security_active` takes none), so a schema swap during that read's wait reconciled the
+  batch from a namesake; it locks the source by oid first now. `from_hypertable_drain_appends` locked the copy and
+  read its watermark by the name read at its start, so an empty namesake copy's NULL watermark had the step copy
+  every row a second time; both drains lock the copy by oid (`pgpm._from_hypertable_lock_copy`) and name it by
+  its oid's rendering. And the cutover read its conservation baseline and ran its catch-up and conservation check
+  through the names read at its start: a schema swapped to namesakes while it waited for the copy or the delta,
+  and swapped back while it waited for the source or an incoming key, made a keyless swap commit every copied row
+  twice and a tracking swap commit a stale row, the check agreeing; each of those statements names the copy and
+  the source by their oids' renderings under the cutover's locks, and the handoff gives `transmute` the swapped-in
+  table by its oid. `tests/timescale/db/346` is the acceptance test; `bench/hypertable_by_oid_after_wait.sh` runs
+  it against `hypertable_capture_fn_drop_unchecked`, `hypertable_drain_delta_step_source_unlocked`,
+  `hypertable_drain_copy_unlocked`, `hypertable_cutover_baseline_by_name`, `hypertable_cutover_reconcile_by_name`
+  and `hypertable_cutover_nomatch_by_name`.
+
+- **The hypertable drains never report "converged" from an empty namesake** (#1356). `from_hypertable_drain_appends`
+  and `from_hypertable_drain_delta` asked whether anything was left with an `EXISTS` on the source or the delta
+  named before it waited for its lock, and `from_hypertable_drain_appends_step` read its batch bound from the
+  source the same way, none of them locked by oid first: a schema renamed aside during the wait with an empty
+  namesake committed made the drains return converged and the step return its input watermark while the source
+  and delta pgpm recorded still held undrained rows. Each locks its relation by oid before it names it, so the
+  drains follow the relations pgpm recorded and drain them. `tests/timescale/db/347` is the acceptance test;
+  `bench/hypertable_drain_probe_by_oid.sh` runs it against `hypertable_drain_appends_probe_unlocked`,
+  `hypertable_drain_delta_probe_unlocked` and `hypertable_drain_appends_step_source_unlocked`.
+
+- **The archive step logs an aggregated range as canonical bounds** (#1370, and the second site #814's second
+  bullet names). `pgpm._mark_gone_chunks`' `archive_chunk_retired` row and `_archive_step`'s orphan discard
+  (`archive_coverage_reset`, #511) rendered the range of the chunks they act on as `min(lo::timestamptz)::text`, in
+  the archive tick's DateStyle and zone: under `SQL, DMY` in Asia/Kolkata the row read `01/12/2026 05:30:00 IST`,
+  which names no instant and reads back elsewhere as 12 January or not at all. Both render through
+  `pgpm._typed_text`, `_ts_text`'s rendering for a value whose type the dynamic SQL names at run time.
+  `bench/archive_log_bounds_canonical.sh` runs `tests/357` against `archive_log_bounds_session_render`.
+
+- **Every skip_archive remedy's `ATTACH` attaches as typed on a uuidv7 or text_time grid** (#1371). The remedies of
+  `_archive_unheld_reason` (a row with no oid, a table pgpm's retirement detached) and `_archive_left_reason` (a
+  detach begun under the hold) spelled `FOR VALUES FROM (...) TO (...)` with `pgpm.part`'s native bounds, so on a
+  uuidv7 grid the statement was refused (`invalid input syntax for type uuid`) and on a text_time grid it named
+  bounds none of the table's rows fall in. `pgpm._attach_back_sql` spells all three with the bounds encoded for the
+  column, as `_disown_retirement`'s remedy does. `bench/archive_remedy_encoded_bounds.sh` runs `tests/358`, which
+  types each remedy out of its log row, against `archive_remedy_bounds_unencoded`.
+- **`transmute_abort` drops the bound on the table its claim names** (#1364). It rendered the table's name and
+  then waited for `ACCESS EXCLUSIVE` behind a reader, and the `DROP CONSTRAINT` resolved the name again once
+  granted: a schema renamed during the wait, with a same-named schema and table put in its place, sent the drop
+  to that table, while the abort deleted the claim and logged `bound dropped, table restored`, and the claimed
+  table kept its write-rejecting bound with nothing left to record it. The abort now locks the table by the
+  claim's oid first (`pgpm._lock_oid_or_raise`, which follows a rename) and names it under that lock. Test
+  `tests/351`; guard `bench/transmute_by_oid.sh`; mutation `transmute_abort_drop_unlocked`.
+
+- **`transmute`'s phases reach the table they identified, by oid** (#1355). Phase 1's `ADD CONSTRAINT
+  pgpm_monolith_bound ... NOT VALID` named the table before waiting for its `ACCESS EXCLUSIVE` behind a
+  reader, so a schema swapped during the wait put the write-rejecting bound on a same-named table and
+  committed it; phase 2's `VALIDATE` validated a namesake's constraint of that name the same way. Each phase
+  now locks the table by oid before its statement, and the preflight takes the table's first lock through the
+  name it read (`pgpm._lock_named_or_raise`), refusing, with nothing committed, a name that stopped denoting
+  the table while it waited. The same mechanism's other sites are checked by their effect on the oid
+  (`pgpm._con_effect_or_raise`): the incoming keys `transmute` drops and `untransmute` drops and re-adds, and
+  `restore_incoming_fks`, `validate_incoming_fks` and `suspend_incoming_fks`, each of which waits for the
+  referencing table's lock; a re-add that reached a namesake had marked the record restored, and
+  `_forget_dangling_fks` then forgot the key for good. Test `tests/352` (and `tests/353` part C); guard
+  `bench/transmute_by_oid.sh`; mutations `transmute_bound_add_unlocked`, `transmute_validate_unlocked`,
+  `transmute_preflight_read_unlocked` and `incoming_key_effect_unchecked`.
+
+- **`transmute`'s cutover refuses a table renamed since its preflight** (#1367). The cutover built the staging
+  parent's name, the monolith's and its second `RENAME` from the schema and name the unlocked preflight read,
+  after phases 1 and 2 had let go of the table, so a `RENAME` committed in between was undone: the converted
+  table came back under the old name. Its first lock is now taken through that name, and a table renamed (or
+  whose schema was renamed) since is refused, with the claim and the validated bound kept; `transmute` re-run
+  on the table's name now resumes from them. After each of the cutover's waits for another relation's lock
+  the schema is asked again (`pgpm._nsp_held_or_raise`), and the policies and publication memberships it
+  replays by name, the outgoing keys and the sequences it hands over are checked by oid, so a schema swapped
+  while it waited sends nothing to a namesake; `untransmute` asks the same of its captured statements. Test
+  `tests/353`; guard `bench/transmute_by_oid.sh`; mutations `transmute_cutover_lock_follows_rename` and
+  `transmute_cutover_schema_unasked`.
+
+- **`transmute` carries the reused key with its whole definition** (#766 bullets 1 and 2). The cutover declared
+  the reused primary key or unique constraint on the parent from its column list and deferrability alone, so a
+  `PRIMARY KEY ... INCLUDE` matched no index of the monolith and failed the cutover with "multiple primary keys"
+  after phases 1 and 2 had committed the write-rejecting bound, on every retry, and a `UNIQUE NULLS NOT
+  DISTINCT` key was built a second time on the monolith under the cutover's lock and lost on the parent and
+  every forward partition, which then accepted the duplicate `(NULL, ...)` rows the table refused. The key is
+  now declared with `pgpm._transmute_key_ddl`'s definition (`pg_get_constraintdef`'s, with the index's storage
+  parameters), the routine step 9b's secondary unique constraints already went through, on the parent alone,
+  and the monolith's index is attached under it, so it is adopted in place and nothing is built. A regrain of
+  such a parent reads the key's KEY columns only: its INCLUDE columns were refused as nullable key columns,
+  joined on by the copy and keyed into the change capture. `tests/356` is the acceptance test;
+  `bench/transmute_reused_key_shape.sh` runs it against `transmute_key_redeclared_from_columns`,
+  `regrain_key_include_refused`, `regrain_copy_joins_include_columns` and `regrain_capture_keys_include_columns`.
+
+- **A direct strategy call reads a uuidv7 or text_time bound at the column's unit** (#1369). `archive._grid_bound`
+  read a bound as the control column makes of it only for a `date` column. A `uuidv7` or `text_time` column drops
+  what is below its encoding's unit too (a millisecond, or a second for ObjectId and KSUID), so a direct
+  `archive_to_s3_ndjson` or `archive_to_s3_parquet` call for `[2024-01-02 00:00:00, 00:00:00.0005)` on a uuidv7 grid
+  passed the empty-range check, encoded both bounds to one uuid, read no row, and PUT an empty object at `lo`'s
+  chunk key, reporting 0 rows; and a `lo` inside a unit was keyed by the instant, a key no tick gives the chunk. The
+  bound is now read as the start of its unit, so such a range is refused as empty and a `lo` inside a unit is keyed
+  by the unit's start. `bench/archive_direct_call_encoded_unit.sh` runs `tests/archive/db/56` (mutation
+  `archive_encoded_bound_read_as_instant`).
+
+- **`archive.configure`'s `p_prefix` refusal no longer prints a value holding an `@`** (#1368). The refusal of a
+  prefix with a `.` or `..` segment printed the value raw, so `'user:password@host/../'` put the password in the
+  client's error and the server log, which `pgpm_archive/README.md` says no `archive.configure` refusal does. It
+  now asks `archive._configure_hides`, the decision the endpoint and bucket refusals take through
+  `archive._configure_shown`: a value holding an `@` is not shown, and one without is quoted as given.
+  `bench/archive_configure_prefix_shown.sh` runs `tests/archive/db/55` (mutation
+  `archive_prefix_refusal_shows_userinfo`).
+
+- **Every job of a summarised workflow gates its summary** (#1381). `lint.yml`'s `core-growth` job (the
+  `scripts/core_growth.py --selftest` that fails a size measure gone blind) was in neither the `Lint summary`'s
+  `needs` nor its result checks, so a red selftest left the one lint check `main` requires green, printing "Every
+  lint job passed.", and `./test.sh lint`, held to the same `needs`, never ran it. The summary now needs and judges
+  it, and the lint track runs it. `bench/summary_gates_every_job.sh` holds each of the three required summaries to
+  its workflow's jobs: every other job is needed (test.yml's informational `dbdev-cap` is the one named
+  exception), the summary runs `if: always()`, and its steps, run with the results rendered, pass with every need
+  succeeding and fail with any one failed, cancelled or skipped. Mutations `lint_summary_misses_core_growth` and
+  `lint_summary_waits_unjudged`.
+
+- **`bench/ci_runs_lint_jobs.sh` runs the lint track it vouches for** (#1382). It read `run_lint`'s job list and
+  the `lint_job_` bodies as text and stubbed the whole lint track out of `ci`, so a `run_lint` whose loop called
+  no job, or dropped a job's failure, and reported each PASS passed its "fails when one fails". Its `ci` run now
+  executes `run_lint` and the `lint` track's block out of the `test.sh` under test, each job a stub that fails at
+  its first command when chosen: every job must be called once, and `ci` must fail naming lint with any one of
+  them failing. Mutations `run_lint_drops_job_failure` and `run_lint_job_without_errexit`.
+
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names
   after a wait: `regrain_cancel`'s, an earlier drop's, or the `DROP`'s own for its lock behind a reader. A schema

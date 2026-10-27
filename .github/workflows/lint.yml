@@ -221,11 +221,13 @@ jobs:
             }
           ' pgpm_core/install.sql
 
-  # One stable name for the merge queue and branch protection to require.
+  # One stable name for the merge queue and branch protection to require. It needs and judges EVERY job
+  # above: a job left out of both (core-growth was, #1381) can go red while the required check stays green.
+  # bench/summary_gates_every_job.sh fails the perf track on a job this summary does not gate.
   summary:
     name: Lint summary
     runs-on: ubuntu-latest
-    needs: [markdown-lint, living-docs, quoted-splices, archive-object-keys, minifier, track-filters, review-tooling-selftest, shellcheck, lock-view-selftest, sql-syntax]
+    needs: [markdown-lint, living-docs, quoted-splices, archive-object-keys, minifier, core-growth, track-filters, review-tooling-selftest, shellcheck, lock-view-selftest, sql-syntax]
     if: always()
     steps:
       - run: |
@@ -234,6 +236,7 @@ jobs:
           [ "${{ needs.quoted-splices.result }}" = "success" ] || { echo "quoted-splices failed"; exit 1; }
           [ "${{ needs.archive-object-keys.result }}" = "success" ] || { echo "archive-object-keys failed"; exit 1; }
           [ "${{ needs.minifier.result }}" = "success" ] || { echo "minifier failed"; exit 1; }
+          [ "${{ needs.core-growth.result }}" = "success" ] || { echo "core-growth failed"; exit 1; }
           [ "${{ needs.track-filters.result }}" = "success" ] || { echo "track-filters failed"; exit 1; }
           [ "${{ needs.review-tooling-selftest.result }}" = "success" ] || { echo "review-tooling-selftest failed"; exit 1; }
           [ "${{ needs.shellcheck.result }}" = "success" ] || { echo "shellcheck failed"; exit 1; }

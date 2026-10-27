@@ -14,7 +14,7 @@
 # parentheses do not balance outside code spans (a fragment that opened mid-parenthesis).
 #   LIVENESS  the check read the changelog's bullets (at least 100 of the tree's, so a parser that stopped
 #             seeing them is a failure, not a clean sweep), and the changelog has an `[Unreleased]` section;
-#   CONTROL   the check's own self-test: a clean sample passes, and each of four re-breaks of it fails.
+#   CONTROL   the check's own self-test: a clean sample passes, and each of seven re-breaks of it fails.
 #
 # The mutation it is required to fail against (bench/mutations/mutate.py):
 #   changelog_1161_stale_tail -- CHANGELOG.md's #1161 bullet with its pre-#1277 stale second tail put back
