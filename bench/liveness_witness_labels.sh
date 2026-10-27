@@ -320,7 +320,8 @@ render() {
 # heredoc that reads as Python (a def or an import) but does not parse, so a scan cannot skip one silently.
 pycalls() {
   python3 - "$@" <<'PY'
-import ast, builtins, contextlib, io, re, sys, textwrap
+import ast, builtins, contextlib, io, re, sys, textwrap, warnings
+warnings.simplefilter("ignore", SyntaxWarning)   # a shell heredoc's `\$` is not this scan's to judge
 mode, args = sys.argv[1], sys.argv[2:]
 frag = re.compile(args.pop()) if mode == "floor" else None
 PREMISE = re.compile(r'\b(?:liveness(?:\s+witness(?:es)?)?|witness(?:es)?|precondition|setup|fixture|guard)'
