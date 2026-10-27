@@ -16254,7 +16254,7 @@ MUTATIONS["retire_yield_by_relname"] = (
     "parent, after the marked partition was dropped by hand, holds every referenced retirement in the database off, "
     "silently. One clause, the anchor. tests/355 part B catches it.",
     [("\n                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)))\n",
-      "))\n", 1)],
+      "\n                          ))\n", 1)],
 )
 
 # PR #1392 verification (V-01, V-02): the same relname-alone choice in the upgrade's paths. One clause each.
