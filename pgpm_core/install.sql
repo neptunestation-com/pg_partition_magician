@@ -3804,11 +3804,17 @@ $$;
 -- row's is someone else's table (_unanchored_stranger), and this answers null for it, as for a name that denotes
 -- nothing. Every round of #1365's verification found one more step that took that table by the name and dropped
 -- or blocked it (retire(), the write block, regrain's source); routing every step through here closes the class.
--- A name with no pgpm.part row (an archive ledger's chunk of a dropped partition) resolves as it always did.
+-- An unanchored NOT-attached row (a regrain copy) is no partition, so it never resolves to a partition of the parent at
+-- any level, in any schema: regrain_cancel dropped an operator's attached partition carrying the copy row's name and
+-- range as the copy. A name with no pgpm.part row (an archive ledger's chunk of a dropped partition) resolves as it
+-- always did.
 create or replace function pgpm._part_rel(p_parent regclass, p_child name)
 returns regclass language sql stable as $$
   select case when p.parent_table is not null and p.child_oid is null
-               and pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi) then null
+               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)
+                    or (not p.attached   -- a copy is no partition: an unanchored copy row never resolves to one
+                        and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v.rel)
+                             or exists (select 1 from pg_partition_ancestors(v.rel) a where a.relid = p_parent::oid)))) then null
               else v.rel end
     from (select to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child)) as rel) v
     left join pgpm.part p on p.parent_table = p_parent and p.child_name = p_child;
@@ -9608,7 +9614,7 @@ begin
     -- namesake's (refused every tick), and a new copy went where no other partition of the run was.
     v_sub_nsp := coalesce((select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace
                             where c.oid = v_sub_oid), v_src_nsp);
-    v_sub_now := to_regclass(format('%I.%I', v_sub_nsp, v_sub_name));   -- part-row-by-name: a regrain copy's name, checked against its recorded oid just below (#631)
+    v_sub_now := to_regclass(format('%I.%I', v_sub_nsp, v_sub_name));   -- part-row-by-name: a regrain copy's name, checked just below against the oid its row records (#631); a copy row with none is not (pre-existing, filed apart from #1365)
     if v_sub_now is not null and not v_sub_known then
       raise exception 'pg_partition_magician: cannot regrain % -- the fine child for sub-range [%, %) would be %.%, but a relation named %.% already exists and this regrain did not create it (no pgpm.part row of % records it as that sub-range''s copy). Copying into it would put this table''s rows in a relation pgpm does not own. Nothing has been copied into it: rename or drop that relation and re-run, or abandon the regrain with pgpm.regrain_cancel(%).',
         v_child_name, v_sub_lo, v_sub_hi, v_sub_nsp, v_sub_name, v_sub_nsp, v_sub_name, p_parent, p_parent;

@@ -16369,8 +16369,8 @@ MUTATIONS["part_rel_range_unchecked"] = (
     "PR #1392 round 7: pgpm._part_rel answers what an unanchored row's name denotes even when it is a partition of "
     "the parent over another range than the row's, the shape every routed step had before: regrain() of the row "
     "takes the operator's table as its source and drops it. One clause, the range. tests/355 parts P and Q catch it.",
-    [('  select case when p.parent_table is not null and p.child_oid is null\n               and pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi) then null\n              else v.rel end\n',
-      '  select v.rel\n', 1)],
+    [('               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)\n',
+      '               and (false\n', 1)],
 )
 MUTATIONS["regrain_source_by_name"] = (
     "bench/retire_referenced_by_anchor.sh",
@@ -16625,6 +16625,15 @@ MUTATIONS["hypertable_drain_appends_step_source_unlocked"] = (
 )
 MUTATION_SRC["hypertable_drain_appends_step_source_unlocked"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_appends_step_source_unlocked"] = "timescale"
+
+MUTATIONS["copy_row_resolves_to_partition"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 8 (P2-01): pgpm._part_rel lets an unanchored NOT-attached row (a regrain copy) resolve to a "
+    "partition of the parent carrying its name and range, in any schema, so regrain_cancel() drops an operator's "
+    "attached partition, rows and all, as the copy. One clause. tests/355 part S catches it.",
+    [('               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)\n                    or (not p.attached   -- a copy is no partition: an unanchored copy row never resolves to one\n                        and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v.rel)\n                             or exists (select 1 from pg_partition_ancestors(v.rel) a where a.relid = p_parent::oid)))) then null\n',
+      '               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)) then null\n', 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:

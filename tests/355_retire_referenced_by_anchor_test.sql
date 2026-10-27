@@ -61,6 +61,9 @@
 --           sub-partitioned partition of the parent, over another range. retire() takes it for attached at any level
 --           (pg_partition_ancestors), so _part_rel must judge it at any level too: it is withheld, and retire()
 --           drops nothing.
+--   PART S  an unanchored NOT-attached row (a regrain copy an older install left), and an operator's partition of the
+--           parent in another schema carrying the row's name and range: a copy is no partition, so regrain_cancel()
+--           drops no partition as the copy; the operator's table keeps its rows and the stale row is cleared.
 --
 -- ASYMMETRIC FIXTURES. A's cell [100, 200) holds ids 101 and 102, the operator's table one row (5005); B's dropped
 -- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303). C's cell
@@ -68,7 +71,7 @@
 -- 9505; F's dropped cell held 151 and 152, its namesake holds 9701 and 9702; G's namesake 9801 and 9802; H's cells
 -- hold 161 and 162 and 361; I's 171 and 172; J's 381; the operators' tables of K, L, M and N hold two rows each
 -- (9811/9812, 9821/9822, 9831/9832, 9841/9842); O's cell holds 195 and 196 and its parent's frontier row 600; P's
--- operator table holds 9851 and 9852, Q's 9861, R's 9871 and 9872.
+-- operator table holds 9851 and 9852, Q's 9861, R's 9871 and 9872, S's 5005 and 5006.
 --
 -- install.sql is re-run with \ir, relative to this file; the psql variable `install` overrides the path.
 \if :{?install}
@@ -78,7 +81,7 @@
 -- retire() is a function, not a committing procedure; no throws_* here.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(98);
+select plan(103);
 
 -- pg_cron's job table, stood in for (as tests/171 and tests/194 do): the dispatch has to be real for the armed
 -- command to be read and run
@@ -695,5 +698,29 @@ select is(pgpm.retire('public.rr355', :'r_cell'), false, 'R: retire() of the age
 select ok(exists (select 1 from pg_class where oid = :r_ops_oid)
           and (select string_agg(id::text, ',' order by id) from public.rr355 where id >= 9000) = '9871,9872',
   'R: the operator''s table stands under the parent with both its rows');
+
+-- ============================ PART S: a copy row never resolves to a partition ============================
+create schema rs355_ops;
+create table public.rs355 (id bigint primary key, payload text);
+insert into public.rs355 values (101, 'a'), (102, 'b');
+call pgpm.transmute('public.rs355', 'id', 100, p_obtain => 3, p_paused => false);
+-- fixture: the copy row an older install left (not attached, no recorded oid, over a range outside the grid), and
+-- the operator's own partition of the parent, in another schema, under that name and over that range
+insert into pgpm.part (parent_table, child_name, lo, hi, attached, child_oid)
+  values ('public.rs355'::regclass, 'rs355_p5000', '5000', '5100', false, null);
+create table rs355_ops.rs355_p5000 (id bigint primary key, payload text);
+alter table public.rs355 attach partition rs355_ops.rs355_p5000 for values from (5000) to (5100);
+insert into public.rs355 values (5005, 'operator'), (5006, 'operator');
+select 'rs355_ops.rs355_p5000'::regclass::oid as s_ops_oid \gset
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rs355'::regclass and inhrelid = :s_ops_oid)
+          and pgpm._child_nsp('public.rs355', 'rs355_p5000') = 'rs355_ops',
+  'LIVENESS: S''s copy row''s name and range are the operator''s attached partition''s, in another schema');
+select is(pgpm._part_rel('public.rs355', 'rs355_p5000'), null::regclass, 'S: _part_rel resolves the copy row to no partition');
+select ok(pgpm.regrain_cancel('public.rs355') >= 0, 'LIVENESS: S: regrain_cancel ran');
+select ok(exists (select 1 from pg_class where oid = :s_ops_oid)
+          and (select string_agg(id::text, ',' order by id) from public.rs355 where id >= 5000) = '5005,5006',
+  'S: the operator''s partition stands with both its rows');
+select ok(not exists (select 1 from pgpm.part where parent_table = 'public.rs355'::regclass and child_name = 'rs355_p5000' and not attached),
+  'S: the stale copy row is cleared');
 
 select * from finish();
