@@ -6776,6 +6776,7 @@ declare
   v_keyidx oid; v_keycols_q text; v_newvals_q text; v_oldvals_q text; v_bad_q text;
   v_src regclass;   -- the source, as pgpm.part recorded it (#768), never <parent's schema>.<name>
   v_nkeys int; v_oldargs text; v_newargs text;   -- #1051: the capture's insert by the record, its bind parameters
+  v_fn_reg regprocedure;   -- the capture function the CREATE below made, by oid
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -6849,8 +6850,8 @@ begin
   -- from under it. Dropping it takes ACCESS EXCLUSIVE on the source, so every writer in flight there commits
   -- first, through the old trigger, and every writer after this tick fires the new one. At a first prepare
   -- the source carries none, and the lock is the one CREATE TRIGGER below takes anyway.
-  -- by-name-ok: self-refusing: had it reached a namesake, the source keeps the old trigger, and the drop of the
-  --   function it fires (_drop_fn_by_oid, next) fails 2BP01 and the tick rolls back
+  -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; a source that keeps a previous capture
+  --   trigger makes the drop of the function it fires (_drop_fn_by_oid, next) fail 2BP01, and the tick rolls back
   execute format('drop trigger if exists pgpm_regrain_capture on %s', v_src::text);
   perform pgpm._drop_fn_by_oid(cfg.regrain_capture_fn_oid,
                                format('regrain_step(%s), dropping the previous capture function,', p_parent));
@@ -6970,12 +6971,14 @@ begin
     format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
     format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
 
+  -- the function that CREATE made, by its oid: nothing has waited since it
+  v_fn_reg := format('%I.%I()', v_nsp, v_fn)::regprocedure;
   -- #950: owned like the parent too, so the role that owns the parent when the next regrain re-mints capture can
   -- drop it (it used to stay the role's that ran this tick).
   perform pgpm._scratch_mint_fn(p_parent, format('%I.%I()', v_nsp, v_fn)::regprocedure);
   perform pgpm._capture_definer(format('%I.%I()', v_nsp, v_fn)::regprocedure, v_delta_reg);   -- #1073
-  -- by-name-ok: self-refusing (#1353, measured): the ENABLE below renders the relation from its oid again, so a
-  --   CREATE that reached a namesake leaves it no trigger to enable (42704) and the tick rolls back
+  -- by-name-ok: checked by its effect after the ENABLE below: the trigger on v_src, by oid, must fire the function
+  --   this tick made (v_fn_reg), whatever the names led to while the CREATE waited
   execute format('create trigger pgpm_regrain_capture after insert or update or delete on %s for each row execute function %I.%I()',
                  v_src::text, v_nsp, v_fn);
   -- ENABLE ALWAYS (#450). CREATE TRIGGER leaves a trigger origin-only, which a session running as
@@ -6985,9 +6988,14 @@ begin
   -- is a change the reconcile cannot honour. Re-created per regrain, so a regrain begun after the upgrade
   -- gets it without a repair step; one already in flight with an origin-only trigger is restarted, and its
   -- capture re-minted here, by the first tick that resumes it (#892, _regrain_capture_unarmed).
-  -- by-name-ok: the CREATE TRIGGER above took SHARE ROW EXCLUSIVE on the relation, so this waits for nothing of it;
-  --   had that CREATE reached a namesake, this finds no trigger (42704) and the tick rolls back
   execute format('alter table %s enable always trigger pgpm_regrain_capture', v_src::text);
+  -- the schema-swap class: CREATE TRIGGER waits for SHARE ROW EXCLUSIVE on the source behind its writers (on a
+  -- re-mint, which holds nothing of it yet) and looks the function's name up again after that wait, so a schema
+  -- swapped meanwhile hung the source's capture on a namesake function of the derived name, and the record below
+  -- named that function too. The trigger on the source, by oid, must fire the function made above, by oid.
+  perform pgpm._effect_or_raise(exists (select 1 from pg_trigger t where t.tgrelid = v_src and t.tgname = 'pgpm_regrain_capture'
+                                                 and t.tgfoid = v_fn_reg and t.tgenabled = 'A'),
+                                v_src, format('regrain_step(%s), creating the capture trigger,', p_parent));
   -- #449: TRUNCATE fires no row trigger, so it is refused for as long as the row trigger is up (see
   -- _regrain_truncate_guard). Same lock, same tick, torn down wherever the row trigger is.
   -- by-name-ok: a namesake loses only a trigger named pgpm_regrain_truncate_guard; the CREATE below renders v_src
@@ -7005,7 +7013,7 @@ begin
   -- would say and nothing else.
   update pgpm.config
      set regrain_delta_oid      = v_delta_reg::oid,
-         regrain_capture_fn_oid = format('%I.%I()', v_nsp, v_fn)::regprocedure::oid
+         regrain_capture_fn_oid = v_fn_reg::oid
    where parent_table = p_parent;
 end;
 $$;
