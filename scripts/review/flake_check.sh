@@ -81,9 +81,10 @@ if [ -z "$bad" ]; then
   echo "run $RUN: no failed non-summary job in the latest attempt (run conclusion $run_conclusion)"; exit 2
 fi
 
-# runner_not_acquired: every bad job carries the not-acquired annotation
+# runner_not_acquired: every bad job carries the not-acquired annotation, and no step of it ran
 all_runner=1
-while IFS=$'\t' read -r j _status _concl _steps _name; do
+while IFS=$'\t' read -r j _status _concl steps _name; do
+  [ "$steps" = 0 ] || { all_runner=0; break; }
   ann=$(gh api "repos/$REPO/check-runs/$j/annotations" --jq '.[].message' 2>/dev/null)
   grep -qE "was not acquired by Runner of type hosted|not started because it repeatedly failed to be acquired" <<<"$ann" || { all_runner=0; break; }
 done <<<"$bad"
@@ -92,10 +93,20 @@ if [ "$all_runner" = 1 ]; then
   exit 0
 fi
 
-# lost_runner: every bad job has no steps at all
+# lost_runner: every bad job has no steps at all, and a completed one's log is empty or GitHub's BlobNotFound.
+# A zero-step job whose log says something failed before any step (a job container image that does not exist,
+# an error in the workflow itself) is not this flake, and a rerun cannot help it (#1389).
 if ! awk -F'\t' '$4 != 0 { found = 1 } END { exit found ? 1 : 0 }' <<<"$bad"; then
   :
 else
+  while IFS=$'\t' read -r j status _concl _steps name; do
+    [ "$status" = completed ] || continue
+    jlog=$(gh api ${LOG_FLAG[@]+"${LOG_FLAG[@]}"} "repos/$REPO/actions/jobs/$j/logs" 2>/dev/null | sed -e "s/$ESC\[[0-9;]*[A-Za-z]//g")
+    if grep -q '[^[:space:]]' <<<"$jlog" && ! grep -q 'BlobNotFound' <<<"$jlog"; then
+      echo "job $j ($name): no step ran, but its log says: $(grep -m1 '[^[:space:]]' <<<"$jlog" | sed 's/^[^ ]* //' | cut -c1-160); not the lost_runner flake; do not retry"
+      exit 1
+    fi
+  done <<<"$bad"
   echo "run $RUN: known flake lost_runner ($(wc -l <<<"$bad" | tr -d ' ') job(s) with no step run at all: $(awk -F'\t' '{printf "%s%s [%s/%s]", (NR>1?", ":""), $5, $2, $3}' <<<"$bad"); nothing of ours ran; #1048)"
   exit 0
 fi

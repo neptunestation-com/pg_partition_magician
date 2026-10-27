@@ -108,7 +108,11 @@ column gets dropped before the upgrade runs, and so what makes the backfill line
 The list is hardcoded on purpose (deriving it from the backfill lines would make the guard circular
 against its own mutation), so the guard checks it in both directions instead and fails naming any
 backfilled column the list omits -- it had drifted to 15 entries against 25 backfill lines before
-anything checked that way round (#417). Its mutation is `upgrade_degrade_list_drift`.
+anything checked that way round (#417). Its mutation is `upgrade_degrade_list_drift`. A column added to a
+`create table` body with no backfill line at all is in neither the lines nor the list, so the guard also
+installs the release it upgrades from (v0.6.0) alone and fails naming any column a fresh install has on a
+table that release had, which the release lacks and the list omits (#1383). Its mutation is
+`upgrade_create_body_column_no_backfill`.
 
 The same rule applies to anything else an existing database would miss: a new table needs
 `create table if not exists`, a dropped column needs `drop column if exists`, and a changed function

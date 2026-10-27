@@ -30,6 +30,13 @@
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   run_conservation_by_count -- run.sh's 4f compares the counts only (pre-#1282)
 #   fh_conservation_by_count  -- run_fh.sh's 4d compares the counts only (pre-#1282)
+#   fh_conservation_before_regrain_only -- run_fh.sh's post-regrain read (4f) fails nothing (pre-#1384)
+#
+# AND ACROSS THE REGRAIN (issue #1384, F12-03). run_fh.sh's 4d read the cohort after the cutover and step 4e
+# then regrained the migrated monolith (copy, swap, drop the source) with nothing read after it, so a regrain
+# that lost a cohort row was reported CONSERVED. Its 4f now reads the cohort again; this guard runs everything
+# from "# 4d. " to the end of the report with the regrain driver replaced by a lossy regrain (cohort row 5
+# lost, a stranger 50 invented) and requires CONS=fail and a MISMATCH line; an intact one reports CONSERVED.
 #
 # Usage: harness_conservation_identity.sh <container> <db> [harness]
 # With no third argument it judges this checkout's run.sh and run_fh.sh; with one it judges THAT file in
@@ -145,6 +152,64 @@ if [ -n "$anchor" ] && grep -q 'CONS=' <<<"$gate"; then
   else say_ no "run_fh.sh's gate accepts the workload's churn outside the cohort" "CONS=$v (row 8, user 7, deleted)"; fi
 else
   say_ no "LIVENESS: run_fh.sh's anchor region and 4d gate were found" "$RUN_FH"
+fi
+
+# ---- run_fh.sh: the cohort across step 4e's regrain too (#1384)
+# 4d reads the cohort after the cutover; 4e then regrains the migrated monolith (copy into fine children, swap,
+# drop the source), and the run's verdict must cover that too. Everything from "# 4d. " to the end of the report
+# is run with BENCH_REGRAIN=1, its regrain driver (the `$PSQL -f .../regrain_skewed.sql` call) intercepted and
+# replaced by the change under judgement, its load generator and instrumentation stubbed. The verdict is read
+# from CONS and from the report's conservation line. The control: an intact regrain reports CONSERVED.
+tail_region=$(awk '/^# 4d\. /{on=1} on{print} on && /^} > "\$RESULTS\/report\.md"/{exit}' "$RUN_FH")
+# run_regrain <change SQL>: anchor, then 4d..report with the regrain driver making <change SQL>; prints
+# "CONS=<v>|ran=<yes|no>|<the report's conservation line>"
+run_regrain() {
+  # shellcheck disable=SC2034  # the harness settings and anchors the regions read, through eval
+  ( set +u; rm -f "$RESULTS/regrain_ran" "$RESULTS/report.md"
+    BENCH_DIR="$ROOT/bench"; BENCH_FH_INTERVAL="1 month"; BENCH_CLIENTS=1; BENCH_JOBS=1; BENCH_OPS=1
+    BENCH_DRAIN_MAX_SECS=60; BENCH_OBSERVE_INTERVAL=1; BENCH_PHASE_SECS=1; BENCH_PREDRAIN=1; BENCH_DRAIN_BATCH=1
+    BENCH_CHUNK_INTERVAL="1 week"; BENCH_LOCKPROBE=0; have_pgss=0; have_pgfr=0; BG_PIDS=()
+    psql_wrap() {
+      local a
+      for a in "$@"; do
+        case "$a" in *regrain_skewed.sql)
+          : > "$RESULTS/regrain_ran"
+          q "$REGRAIN_SQL" >/dev/null && echo "NOTICE: regrain driver: 1 steps, final=swapped:stand-in"
+          return $? ;;
+        esac
+      done
+      "${P[@]}" -d "$DB" "$@"
+    }
+    pgbench_stub() { sleep 1; }
+    PSQL=psql_wrap; PGBENCH=pgbench_stub; REGRAIN_SQL="$1"
+    pgss_snapshot() { :; }; pctiles() { echo n/a; }; pgbench_log_summary() { echo "n/a|n/a"; }; run_phase() { :; }
+    sleep 30 & load_pid=$!
+    copy_secs=0; DEST_ROWS=0; DELTA_PENDING=0; cut_secs=0; LOCK_WINDOW_S=n/a; AT_LOCK_RESIDUAL=0; CONS=
+    eval "$anchor" >/dev/null 2>&1
+    eval "$tail_region" >/dev/null 2>&1
+    kill "$load_pid" 2>/dev/null
+    ran=no; [ -e "$RESULTS/regrain_ran" ] && ran=yes
+    echo "CONS=${CONS:-unset}|ran=$ran|$(grep -m1 '\*\*conservation\*\*' "$RESULTS/report.md" 2>/dev/null)" )
+}
+if [ -n "$anchor" ] && grep -q 'regrain_skewed\.sql' <<<"$tail_region" && grep -q 'report\.md' <<<"$tail_region"; then
+  say_ ok "LIVENESS: run_fh.sh's 4d..report region, with its regrain driver, was found"
+  fixture "$cohort"
+  v=$(run_regrain "select 1")
+  if grep -q '^CONS=ok|ran=yes|.*CONSERVED' <<<"$v"; then say_ ok "LIVENESS: an intact regrain ran and reports the cohort CONSERVED" "${v%%|-*}"
+  else say_ no "LIVENESS: an intact regrain ran and reports the cohort CONSERVED" "$v"; fi
+
+  fixture "$cohort"
+  v=$(run_regrain "delete from bench.events where id = 5;
+                   insert into bench.events (id, created_at, user_id, kind, payload) values (50, '2026-01-01', 49001, 0, 'stranger')")
+  held=$(ids "user_id >= $ANCHOR_USER_LO")
+  if [ "$held" = "6:1,2,3,4,6,50" ] && grep -q '|ran=yes|' <<<"$v"; then
+    say_ ok "LIVENESS: the regrain ran and the cohort lost 5, holds 50, count 6"
+  else say_ no "LIVENESS: the regrain ran and the cohort lost 5, holds 50, count 6" "got $held; $v"; fi
+  if grep -q '^CONS=fail' <<<"$v" && grep -q 'MISMATCH' <<<"$v" && ! grep -q 'CONSERVED' <<<"$v"; then
+    say_ ok "run_fh.sh fails a regrain that lost cohort row 5 for a stranger 50" "${v%%|-*}"
+  else say_ no "run_fh.sh fails a regrain that lost cohort row 5 for a stranger 50" "$v"; fi
+else
+  say_ no "LIVENESS: run_fh.sh's 4d..report region, with its regrain driver, was found" "$RUN_FH"
 fi
 
 q "drop schema if exists bench cascade" >/dev/null 2>&1

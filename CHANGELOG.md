@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+- **`bench/guards_run_on_clean_code.sh` credits only the tracks `test.sh` runs** (#1385). It counted a guard as
+  run against the unmodified code when any `run_<track>()` body named it, though `test.sh` runs a track only by
+  calling its function, so a guard whose only call sat in a `run_*` function nothing called (run against its
+  mutants alone, the #917 state) passed. A body now counts only when `test.sh` calls its function from the top
+  level, or from a body that is itself called. Mutation `clean_run_in_undispatched_function`.
+
+- **`bench/run_fh.sh` judges its cohort after the regrain too** (#1384). Its conservation gate read the
+  immutable cohort after the cutover and step 4e then regrained the migrated monolith (copy into fine children,
+  swap, drop the source) with nothing read after it, so a regrain that lost or rewrote cohort rows was reported
+  CONSERVED in the section whose window includes it. A new step 4f reads the cohort again by the same digest
+  after the regrain and fails the run on a mismatch, and the report's after-figures are that read's.
+  `bench/harness_conservation_identity.sh` runs the harness from 4d to its report with a lossy regrain in place
+  of the driver. Mutation `fh_conservation_before_regrain_only`.
+
+- **`bench/upgrade_in_place.sh` sees a new column with no backfill line** (#1383). It degrades only the columns
+  its `DEGRADE_COLS` names, and its #417 precondition derives the columns that must be named from the backfill
+  lines, so a column added to a `create table` body with no backfill line at all, the defect its header names
+  first, was in neither: the degraded install kept it and the catalog "matched a fresh install exactly", while an
+  install from before the column, upgraded by the same file, never got it. The guard now also installs the
+  release it upgrades from (v0.6.0) alone and fails, naming it, any column a fresh install has on a table that
+  release had, which the release lacks and the list omits. Mutation `upgrade_create_body_column_no_backfill`.
+
+- **Three review-loop verdicts read what they claim to** (#1389). `land.sh`'s `verify_tree` found a duplicate
+  guard database to renumber by substring, so a duplicate `pgpm_perf33` before a `pgpm_perf332` rewrote the
+  unrelated guard's database and kept the duplicate; it now renumbers the last whole name and stops when a name
+  is still duplicated afterwards. `stop_check.py` judged criterion 4 with Python's `round()`, which rounds half to
+  even, so half a Tier 1 estimated left read as zero; it now needs less than one half. `flake_check.sh` called
+  any job with no step `lost_runner` whatever its log said, so a job failed before its first step by a real error
+  (a container image that does not exist) was rerun as a flake; the signature now needs an empty or
+  `BlobNotFound` log, and `runner_not_acquired` needs no step run as its header says. `bench/review_tooling_verdicts.sh`
+  sections (g), (h) and (i) hold each. Mutations `land_renumber_by_substring`, `land_renumber_unchecked`,
+  `stop_check_capture_half_to_even`, `flake_check_lost_runner_by_steps_only` and
+  `flake_check_not_acquired_steps_unread`.
+
+- **`scripts/screenshot.sh` uses the browser `CHROME=` names** (#1373). Its refusal told the operator to pass
+  the browser's path via `CHROME=...`, and it set `CHROME` empty before its search on every run, so the path
+  passed was discarded and the same refusal came back. A `CHROME` naming an executable is now the browser used,
+  ahead of the search, and one naming no executable is refused by name. `bench/screenshot_chrome_override.sh`
+  runs the script with stand-in browsers, the remedy typed as the refusal gives it. Mutation
+  `screenshot_chrome_reset`.
+
+- **The fix-phase skill's command for the highest guard database gives the highest** (#1372). It sorted
+  `pgpm_perfNNN` on field 3 of a split on `f`, which has no field 3, so sort compared whole lines lexically and
+  printed `pgpm_perf99` where the highest was `pgpm_perf406`: a coordinator following it assigned fixers databases
+  `test.sh` already used. It sorts on field 2, numerically. `bench/fix_phase_assign_commands.sh` runs both of the
+  skill's assignment commands as written, on planted names whose lexical and numeric maxima differ and on this
+  checkout. Mutation `fix_phase_guard_db_sorts_empty_key`.
+
 - **The regrain swap detaches the source it identified** (#1362). `regrain_step`'s swap ran `alter table <parent>
   detach partition <source>` with both names rendered before the `DETACH` waited for `ACCESS EXCLUSIVE` on the
   table behind a reader, and resolved them again once granted: a schema renamed aside during the wait, with a

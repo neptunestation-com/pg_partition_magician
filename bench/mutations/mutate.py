@@ -16493,6 +16493,105 @@ MUTATIONS["truncate_checked_inplace_by_creation"] = (
       "                            + (select a.xmin::text::bigint from pg_attribute a where a.attrelid = p_rel and a.attnum = -1))::text::xid8) = 'in progress'),\n", 1)],
 )
 
+# pass 13 G16 (#1372, #1373, #1389, #1383, #1384, #1385): the review loop's tooling and the bench meta-guards.
+MUTATIONS["fix_phase_guard_db_sorts_empty_key"] = (
+    "bench/fix_phase_assign_commands.sh",
+    "Pre-#1372 fix-phase skill: the command for the highest guard database sorts on field 3 of names split on `f`, "
+    "and `pgpm_perfNNN` has one `f`, so every key is empty and sort compares whole lines lexically: it prints "
+    "pgpm_perf99 where the highest is in the four hundreds, and the coordinator assigns databases test.sh uses. "
+    "One clause, the key.",
+    [("sort -t f -k2,2n | tail -1", "sort -t f -k3 -n | tail -1", 1)],
+)
+MUTATION_SRC["fix_phase_guard_db_sorts_empty_key"] = ".claude/skills/fix-phase/SKILL.md"
+
+MUTATIONS["screenshot_chrome_reset"] = (
+    "bench/screenshot_chrome_override.sh",
+    "Pre-#1373 scripts/screenshot.sh: CHROME is set to the empty string before the browser search, so the CHROME= "
+    "its own refusal tells the operator to pass is discarded, the search finds nothing (or another browser) and "
+    "the same refusal comes back. One clause, the assignment.",
+    [('CHROME="${CHROME:-}"\n', 'CHROME=""\n', 1)],
+)
+MUTATION_SRC["screenshot_chrome_reset"] = "scripts/screenshot.sh"
+MUTATIONS["land_renumber_by_substring"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 land.sh verify_tree: a duplicate guard database is located for renumbering with s.rfind(d), a "
+    "substring search, so when the duplicate (pgpm_perf33) prefixes a name later in test.sh (pgpm_perf332) that "
+    "unrelated guard's database is rewritten and the duplicate kept. One clause, the search. The guard's (g) "
+    "catches it (pgpm_perf332 rewritten; the run stops on the duplicate left).",
+    [('        i = [m.start() for m in re.finditer(re.escape(d) + r"\\b", s)][-1]\n',
+      '        i = s.rfind(d)\n', 1)],
+)
+MUTATION_SRC["land_renumber_by_substring"] = "scripts/review/land.sh"
+MUTATIONS["land_renumber_unchecked"] = (
+    "bench/review_tooling_verdicts.sh",
+    "#1389's re-check dropped: verify_tree does not read the names again after renumbering, so a database three "
+    "PRs took is written back twice while the run reports the guard databases unique. One clause. The guard's (g) "
+    "catches it (the triple written back with a duplicate, exit 0).",
+    [('    if left: print("    guard databases still duplicated after renumbering:", left); sys.exit(1)\n', '', 1)],
+)
+MUTATION_SRC["land_renumber_unchecked"] = "scripts/review/land.sh"
+MUTATIONS["stop_check_capture_half_to_even"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 stop_check.py criterion 4: the Tier 1 capture-recapture estimate is judged with Python's round(), "
+    "which rounds half to even, so 0.5 Tier 1 remaining (estimate 4.5, found 4) reads as rounding to zero and the "
+    "loop as converged. One clause, the comparison. The guard's (h) catches it.",
+    [('        c4_met = all(cr[p]["remaining"] < 0.5 for p in pair)\n',
+      '        c4_met = all(round(cr[p]["remaining"]) == 0 for p in pair)\n', 1)],
+)
+MUTATION_SRC["stop_check_capture_half_to_even"] = "scripts/review/stop_check.py"
+MUTATIONS["flake_check_lost_runner_by_steps_only"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 flake_check.sh lost_runner: the step count alone, so a job GitHub failed before any step with a log "
+    "naming a real error (a job container image that does not exist) is a known flake, exit 0, and land.sh reruns "
+    "it. One clause, the log's test. The guard's (i) catches it.",
+    [("    if grep -q '[^[:space:]]' <<<\"$jlog\" && ! grep -q 'BlobNotFound' <<<\"$jlog\"; then\n",
+      "    if false; then\n", 1)],
+)
+MUTATION_SRC["flake_check_lost_runner_by_steps_only"] = "scripts/review/flake_check.sh"
+MUTATIONS["flake_check_not_acquired_steps_unread"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 flake_check.sh runner_not_acquired: the annotation alone, though its header also requires that no "
+    "step ran, so a job carrying the annotation whose steps ran and failed is retried as a known flake. One "
+    "clause, the step count. The guard's (i) catches it.",
+    [('  [ "$steps" = 0 ] || { all_runner=0; break; }\n', '', 1)],
+)
+MUTATION_SRC["flake_check_not_acquired_steps_unread"] = "scripts/review/flake_check.sh"
+MUTATIONS["fh_conservation_before_regrain_only"] = (
+    "bench/harness_conservation_identity.sh",
+    "Pre-#1384 bench/run_fh.sh: the cohort is judged after the cutover and never after step 4e's regrain (copy, "
+    "swap, drop the source), so a regrain that loses cohort row 5 and invents a stranger 50 is reported CONSERVED. "
+    "One clause, the post-regrain read's failure verdict; the read and its message stay.",
+    [("CONSERVATION FAIL after the regrain: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, "
+      "invented or rewritten). CORRECTNESS DEFECT.\"; CONS=fail; fi\n",
+      "CONSERVATION FAIL after the regrain: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, "
+      "invented or rewritten). CORRECTNESS DEFECT.\"; fi\n", 1)],
+)
+MUTATION_SRC["fh_conservation_before_regrain_only"] = "bench/run_fh.sh"
+MUTATIONS["clean_run_in_undispatched_function"] = (
+    "bench/guards_run_on_clean_code.sh",
+    "#1385: write_block_identity.sh's one clean-code run moved out of run_perf's list into a run_* function of "
+    "its own that test.sh never calls, so no track runs it against the unmodified module and only its mutants "
+    "exercise it (the #917 state). Before #1385 the guard credited any guard named in any run_*() body, called or "
+    "not. Two sites: the list entry, and the function placed before run_discriminate.",
+    [('    "bench/write_block_identity.sh pgpm_wbident"\n', '', 1),
+     ("\nrun_discriminate() {\n",
+      "\nrun_identity_guards() {\n"
+      "  bash \"$(dirname \"$0\")/bench/write_block_identity.sh\" pgpm_test-15 pgpm_wbident || return 1\n"
+      "}\n\nrun_discriminate() {\n", 1)],
+)
+MUTATION_SRC["clean_run_in_undispatched_function"] = "test.sh"
+MUTATIONS["upgrade_create_body_column_no_backfill"] = (
+    "bench/upgrade_in_place.sh",
+    "#1383: a column added to pgpm.config's `create table` body with no `add column if not exists` line at all, "
+    "the defect bench/upgrade_in_place.sh's header names first. A fresh install has it, so the pgTAP suite stays "
+    "green; an install from before it, upgraded by re-running the file, never gets it. Before #1383 the guard "
+    "passed it: DEGRADE_COLS did not name the column and the #417 precondition reads only the backfill lines, so "
+    "the degrade kept it and the catalog matched. Its precondition against the release must fail, by name.",
+    [("create table if not exists pgpm.config (\n  parent_table     regclass    primary key,\n",
+      "create table if not exists pgpm.config (\n  parent_table     regclass    primary key,\n"
+      "  obtain_note      text,\n", 1)],
+)
+
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
         for name, e in late_survivors().items():
