@@ -574,7 +574,7 @@ end $$;
 --
 -- The attached rows are adopted further down, beside pgpm._part_bound_is, which they need (#1365); the monolith's
 -- anchor after them.
-update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.child_name))::oid
+update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.child_name))::oid   -- part-row-by-name: a regrain copy, no partition and no range, adopted in the parent's schema before any resolver exists
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
  where c.oid = p.parent_table and not p.attached and p.child_oid is null;
 
@@ -3715,7 +3715,7 @@ $$;
 -- decoding; nothing between reads child_oid.
 update pgpm.part p set child_oid = i.inhrelid
   from pg_inherits i join pg_class c on c.oid = i.inhrelid
- where i.inhparent = p.parent_table and c.relname = p.child_name
+ where i.inhparent = p.parent_table and c.relname = p.child_name   -- part-row-by-name: paired with the row's range below
    and p.attached and p.child_oid is null
    and pgpm._part_bound_is(p.parent_table, i.inhrelid, p.lo, p.hi);
 
@@ -3763,12 +3763,31 @@ returns name language sql stable as $$
       where p.parent_table = p_parent and p.child_name = p_child),
     (select n.nspname from pgpm.part p
        join pg_inherits i on i.inhparent = p.parent_table
-       join pg_class c on c.oid = i.inhrelid and c.relname = p.child_name
+       join pg_class c on c.oid = i.inhrelid and c.relname = p.child_name   -- part-row-by-name: a schema, paired with the range
        join pg_namespace n on n.oid = c.relnamespace
       where p.parent_table = p_parent and p.child_name = p_child
         and pgpm._part_bound_is(p_parent, i.inhrelid, p.lo, p.hi)
       limit 1),
     (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
+$$;
+
+-- _part_rel: THE RELATION A pgpm.part ROW'S NAME DENOTES, the one place a row's child_name is resolved to a relation
+-- (#1365; scripts/check_part_row_by_name.py fails any other). The name in the row's own schema (_child_nsp), as
+-- every step has always resolved it: on an ANCHORED row the steps that act compare it with child_oid and refuse a
+-- substitute (#421, #428, #518), and a name that denotes nothing is reported as the identity failure it is. On an
+-- UNANCHORED row (no child_oid: an install older than #421, or one its backfill could not resolve) there is nothing
+-- to compare, so the row's range is: a relation that is a partition of the parent over another range than the
+-- row's is someone else's table (_unanchored_stranger), and this answers null for it, as for a name that denotes
+-- nothing. Every round of #1365's verification found one more step that took that table by the name and dropped
+-- or blocked it (retire(), the write block, regrain's source); routing every step through here closes the class.
+-- A name with no pgpm.part row (an archive ledger's chunk of a dropped partition) resolves as it always did.
+create or replace function pgpm._part_rel(p_parent regclass, p_child name)
+returns regclass language sql stable as $$
+  select case when p.parent_table is not null and p.child_oid is null
+               and pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi) then null
+              else v.rel end
+    from (select to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child)) as rel) v
+    left join pgpm.part p on p.parent_table = p_parent and p.child_name = p_child;
 $$;
 
 -- _disown_retirement: clear a retirement mark (retiring_at, retiring_oid, detach_dispatched_oid) that does not vouch
@@ -3967,10 +3986,9 @@ begin
                   (select i.inhdetachpending from pg_inherits i
                     where i.inhparent = p.parent_table and i.inhrelid = c.oid) as pending
              from pgpm.part p
-             join pg_class c on c.oid = coalesce(p.child_oid, to_regclass(format('%I.%I',
-                                  pgpm._child_nsp(p.parent_table, p.child_name), p.child_name))::oid)
+             join pg_class c on c.oid = coalesce(p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)
              join pg_namespace n on n.oid = c.relnamespace
-            where p.retiring_at is not null and c.relname = p.child_name
+            where p.retiring_at is not null and c.relname = p.child_name   -- part-row-by-name: found by oid; a rename drops out
   loop
     if r.pending is false then
       -- attached: a retirement under way, retire()'s to finish. One an older install dispatched (the job armed with
@@ -4237,7 +4255,7 @@ begin
   -- when retiring_oid is set, because that is the only case in which a detach was ever armed -- on
   -- the one-step path there is nothing to disarm and nothing that could be holding the job.
   if r.retiring_oid is not null or r.child_oid is not null then
-    v_now := to_regclass(format('%I.%I', v_nsp, p_child));
+    v_now := pgpm._part_rel(p_parent, p_child);
     v_why := concat_ws(' and ',
       case when r.retiring_oid is not null and v_now::oid is distinct from r.retiring_oid
            then format('not the oid %s this retirement dispatched a detach for', r.retiring_oid) end,
@@ -4255,7 +4273,7 @@ begin
     end if;
   end if;
   -- #1365: a row with no anchor is compared by its range (_unanchored_stranger)
-  v_now := to_regclass(format('%I.%I', v_nsp, p_child));
+  v_now := to_regclass(format('%I.%I', v_nsp, p_child));   -- part-row-by-name: names the stranger _part_rel withholds
   if r.retiring_oid is null and r.child_oid is null and pgpm._unanchored_stranger(p_parent, v_now, r.lo, r.hi) then
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_retain_identity', r.lo, r.hi,
@@ -4287,7 +4305,7 @@ begin
   -- the questions below were asked of the unlocked original, and the one-step DROP took the stranger, rows and all.
   -- So the lock manager is asked (_lock_oid), and a name that stopped denoting v_rel during the wait is refused the
   -- way the identity check above refuses it: it will not go back to meaning the partition on a later tick.
-  v_rel := to_regclass(format('%I.%I', v_nsp, p_child));
+  v_rel := pgpm._part_rel(p_parent, p_child);
   if v_rel is not null and not pgpm._lock_oid(v_rel, 'share update exclusive', true, v_nsp, p_child) then
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_retain_identity', r.lo, r.hi,
@@ -4440,8 +4458,8 @@ begin
            and (p.retiring_at, p.parent_table::text, p.child_name)
              < (coalesce(r.retiring_at, 'infinity'::timestamptz), p_parent::text, p_child)
            and exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid   -- #1365: its anchor's
-                        where i.inhparent = p.parent_table and c.relname = p.child_name
-                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, i.inhrelid)))
+                        where i.inhparent = p.parent_table and c.relname = p.child_name   -- part-row-by-name: found by oid; a rename drops out
+                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)))
       then
         return false;
       end if;
@@ -4656,7 +4674,7 @@ begin
     -- <own schema>.<child>, so the identity check, the disarm, the ATTACH and the constraint drop below
     -- all have to name it there, or a moved parent's recall finds nothing and leaves the detach armed.
     v_nsp := pgpm._child_nsp(p_parent, r.child_name);
-    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
+    v_now := pgpm._part_rel(p_parent, r.child_name);
     v_cmd_q := pgpm._detach_cmd(p_parent, v_nsp, r.child_name);
     if (r.retiring_oid is not null and v_now::oid is distinct from r.retiring_oid)
        or (r.child_oid is not null and v_now::oid is distinct from r.child_oid) then
@@ -4732,7 +4750,7 @@ begin
          where c.conrelid = v_now and c.contype = 'c' and c.conislocal and c.coninhcount = 0
            and pg_get_constraintdef(c.oid) = format('CHECK (%s)', pg_get_partition_constraintdef(v_now))
       loop
-        execute format('alter table %I.%I drop constraint %I', v_nsp, r.child_name, v_check);
+        execute format('alter table %s drop constraint %I', v_now, v_check);
       end loop;
       update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
        where parent_table = p_parent and child_name = r.child_name;
@@ -4886,7 +4904,7 @@ begin
   select p.lo, p.hi, p.child_oid into r
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
   if found and r.child_oid is not null then
-    v_now := to_regclass(format('%I.%I', v_nsp, p_child));
+    v_now := pgpm._part_rel(p_parent, p_child);
     if v_now is not null and v_now::oid <> r.child_oid then
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
@@ -4894,7 +4912,7 @@ begin
                        v_nsp, p_child, v_now::oid::text, r.child_oid));
       return;
     end if;
-  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then
+  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
     insert into pgpm.log (parent_table, action, lo, hi, method)   -- #1365: a row with no anchor, by its range
       values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
               format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
@@ -4902,7 +4920,10 @@ begin
     return;
   end if;
 
-  v_child := format('%I.%I', v_nsp, p_child)::regclass;
+  v_child := pgpm._part_rel(p_parent, p_child);
+  if v_child is null then   -- the error the cast it replaced raised, for _enforce_write_blocks' handler to log (#360)
+    raise exception 'relation "%.%" does not exist', v_nsp, p_child using errcode = '42P01';
+  end if;
   select tgenabled into v_enabled from pg_trigger where tgrelid = v_child and tgname = 'pgpm_write_block';
   if found then
     -- The upgrade path for #450. A block installed by an older pgpm is origin-only, and re-running
@@ -4910,7 +4931,7 @@ begin
     -- one ALTER, once, on the first tick after the upgrade.
     -- And logged (#710, see above).
     if v_enabled <> 'A' then
-      execute format('alter table %I.%I enable always trigger pgpm_write_block', v_nsp, p_child);
+      execute format('alter table %I.%I enable always trigger pgpm_write_block', v_nsp, p_child);   -- part-row-by-name: v_child's name, judged by its effect below
       perform pgpm._effect_or_raise(exists (select 1 from pg_trigger t where t.tgrelid = v_child and t.tgname = 'pgpm_write_block'
                                                  and t.tgenabled = 'A'), v_child, 'the write block''s ENABLE ALWAYS');   -- #1335 b10
       insert into pgpm.log (parent_table, action, lo, hi, method)
@@ -4922,14 +4943,14 @@ begin
     return;
   end if;
   execute format(
-    'create trigger pgpm_write_block before insert or update or delete on %I.%I'
+    'create trigger pgpm_write_block before insert or update or delete on %I.%I'   -- part-row-by-name: v_child's name, judged by its effect below
     || ' for each row execute function pgpm._write_block_raise()', v_nsp, p_child);
   -- ENABLE ALWAYS (#450). CREATE TRIGGER leaves a trigger origin-only, which a session running as
   -- session_replication_role = replica (a logical-replication apply worker, a loader silencing triggers)
   -- skips. That default is for triggers that are replication side effects; this one is retention's
   -- fence, and a row that gets past it lands in a partition whose archive coverage is already complete
   -- and is dropped unarchived.
-  execute format('alter table %I.%I enable always trigger pgpm_write_block', v_nsp, p_child);
+  execute format('alter table %I.%I enable always trigger pgpm_write_block', v_nsp, p_child);   -- part-row-by-name: the same
   -- #1335 b10: CREATE TRIGGER waits for SHARE ROW EXCLUSIVE behind every writer of the partition, and a schema renamed
   -- during that wait puts the block on a namesake, leaving the partition writable under coverage that says otherwise:
   -- the block must be on the partition, by its oid, enabled ALWAYS
@@ -4960,7 +4981,7 @@ returns void language plpgsql as $$
 declare v_nsp name;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
-  execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);
+  execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);   -- part-row-by-name: pgpm's own trigger off whatever holds the name, on purpose (above)
 end;
 $$;
 
@@ -5050,7 +5071,7 @@ begin
       v_eligible := v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);
 
       -- identity first (#518): does the name still mean the relation pgpm recorded?
-      v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
+      v_now := pgpm._part_rel(p_parent, r.child_name);
       v_substituted := r.child_oid is not null and v_now is not null and v_now::oid <> r.child_oid;
 
       -- retired chunks are not this partition's coverage and are never discarded (#1141; see retire()), and a
@@ -5113,13 +5134,11 @@ $$;
 -- by exact name equality, which parses nothing: a parent moved with SET SCHEMA leaves its partitions behind.
 create or replace function pgpm._is_write_blocked(p_parent regclass, p_child name)
 returns boolean language plpgsql as $$
-declare v_nsp_oid oid;
 begin
-  -- #727: the partition's own schema, not the parent's; matched by name = name, never parsed (#512)
-  select n.oid into v_nsp_oid from pg_namespace n where n.nspname = pgpm._child_nsp(p_parent, p_child);
+  -- #1365: the row's relation, from _part_rel (#727: in its own schema, matched by name = name, never parsed, #512)
   return exists (
-    select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
-     where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid
+    select 1 from pg_trigger t
+     where t.tgname = 'pgpm_write_block' and t.tgrelid = pgpm._part_rel(p_parent, p_child)
        and t.tgenabled = 'A'
   );
 end;
@@ -5160,14 +5179,17 @@ end $$;
 -- _run_archive_strategy's null handling below, just reached via a real archive_fn call.
 create or replace function pgpm._archive_noop(p_parent regclass, p_child name, p_lo text, p_hi text)
 returns pgpm.archive_result language plpgsql as $$
-declare cfg pgpm.config; v_nsp name; v_rows bigint; v_result pgpm.archive_result;
+declare cfg pgpm.config; v_rel regclass; v_rows bigint; v_result pgpm.archive_result;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
-  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
-  execute format('select count(*) from %I.%I where %I >= %L and %I < %L',
-                 v_nsp, p_child, cfg.control_column, pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+  v_rel := pgpm._part_rel(p_parent, p_child);   -- #1365: the row's relation (#727: in its own schema)
+  if v_rel is null then
+    raise exception 'relation "%.%" does not exist', pgpm._child_nsp(p_parent, p_child), p_child using errcode = '42P01';
+  end if;
+  execute format('select count(*) from %s where %I >= %L and %I < %L',
+                 v_rel, cfg.control_column, pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
                  cfg.control_column, pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
     into v_rows;
   v_result.covered_hi := p_hi;
@@ -5396,7 +5418,7 @@ begin
                       and (%3$L::name is null or l.child_name = %3$L::name)
                       and ((l.child_oid is not null and not exists (select 1 from pg_class c where c.oid = l.child_oid))
                            or (l.child_oid is null and l.child_name is not null
-                               and to_regclass(format(''%%I.%%I'', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name)) is null))
+                               and pgpm._part_rel(l.parent_table, l.child_name) is null))
                    returning l.child_name, l.child_oid, l.lo, l.hi)
      select child_name, child_oid, count(*) as chunks,
             coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,
@@ -5459,7 +5481,7 @@ begin
    where p.parent_table = l.parent_table and p.child_name = l.child_name
      and l.child_oid is null and l.retired_at is null and p.child_oid is not null
      and not (p.child_oid = any (v_adopted))
-     and to_regclass(format('%I.%I', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name))::oid = p.child_oid
+     and pgpm._part_rel(l.parent_table, l.child_name)::oid = p.child_oid
      and not exists (select 1 from pg_trigger t
                       where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));
   with gone as (
@@ -5525,7 +5547,7 @@ returns boolean language sql stable as $$
     select 1 from pgpm.archive_ledger l join pgpm.config c on c.parent_table = l.parent_table
      where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
        and (l.child_oid is null
-            or l.child_oid = to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)
+            or l.child_oid = pgpm._part_rel(p_parent, p_child)::oid)
        and not (pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)));
 $$;
 create or replace function pgpm._discard_unnamed_coverage(p_parent regclass, p_child name)
@@ -5533,7 +5555,7 @@ returns int language plpgsql as $$
 declare v_rel oid; v_n int; v_lo text; v_hi text;
 begin
   if not pgpm._coverage_unnamed(p_parent, p_child) then return 0; end if;
-  v_rel := to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid;
+  v_rel := pgpm._part_rel(p_parent, p_child)::oid;
   delete from pgpm.archive_ledger l
    where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
      and (l.child_oid is null or l.child_oid = v_rel);
@@ -5577,7 +5599,7 @@ begin
   execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
                  pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,
-                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)
+                 pgpm._part_rel(p_parent, p_child)::oid)
     into v_lo;
   v_lo := coalesce(v_lo, v_child_lo);
 
@@ -5585,9 +5607,12 @@ begin
     return;   -- already fully covered
   end if;
 
+  if pgpm._part_rel(p_parent, p_child) is null then   -- #1365: the row's relation, or the error a read of the name raised
+    raise exception 'relation "%.%" does not exist', v_nsp, p_child using errcode = '42P01';
+  end if;
   execute format(
-    'select avg(pg_column_size(t.*))::numeric from (select * from %I.%I t where t.%I >= %L order by t.%I limit %s) t',
-    v_nsp, p_child, cfg.control_column, pgpm._encode(cfg.control_kind, v_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), cfg.control_column, cfg.archive_probe_sample)
+    'select avg(pg_column_size(t.*))::numeric from (select * from %s t where t.%I >= %L order by t.%I limit %s) t',
+    pgpm._part_rel(p_parent, p_child), cfg.control_column, pgpm._encode(cfg.control_kind, v_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), cfg.control_column, cfg.archive_probe_sample)
     into v_avg;
   if coalesce(v_avg, 0) <= 0 then
     -- no rows remain in [v_lo, child_hi) for this child. Unlike the original (which read ahead of a
@@ -5711,7 +5736,7 @@ begin
   execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
                  pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,
-                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)
+                 pgpm._part_rel(p_parent, p_child)::oid)
     into v_watermark;
 
   return v_watermark is not null and not pgpm._native_gt(cfg.control_kind, v_child_hi, v_watermark);
@@ -5755,15 +5780,15 @@ begin
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.archive_fn is null then return 0; end if;
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
-  v_rel := to_regclass(format('%I.%I', v_nsp, p_child))::oid;
+  v_rel := pgpm._part_rel(p_parent, p_child)::oid;
   if v_rel is null then return 0; end if;
   -- this partition's coverage, as _archive_fully_covered reads it: live, and read from this relation
   for r in select l.lo, l.hi from pgpm.archive_ledger l
             where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
               and (l.child_oid is null or l.child_oid = v_rel) and l.rows_archived = 0
   loop
-    execute format('select exists (select 1 from %I.%I where %I >= %L and %I < %L)',
-                   v_nsp, p_child, cfg.control_column, pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+    execute format('select exists (select 1 from %s where %I >= %L and %I < %L)',
+                   v_rel::regclass, cfg.control_column, pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
                    cfg.control_column, pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
       into v_has;
     continue when not v_has;
@@ -5977,8 +6002,7 @@ begin
                                    then case when not exists (select 1 from pg_class c where c.oid = l.child_oid)
                                              then '', whose relation no longer exists,'' else '''' end
                                    when l.child_name is null
-                                     or to_regclass(format(''%%I.%%I'', pgpm._child_nsp(%2$L::regclass, l.child_name),
-                                                           l.child_name)) is null
+                                     or pgpm._part_rel(%2$L::regclass, l.child_name) is null
                                    then '', whose relation no longer exists,''
                                    else '', which pgpm cannot tie to the relation holding that name now,'' end,
                               coalesce(l.s3_key, ''no object key'')),
@@ -6297,7 +6321,7 @@ begin
       -- things that stall retention. At archive_batch's default of 1 it also stops this parent's
       -- archiving behind it, which is the correct reading: pgpm's catalog is provably wrong about
       -- which relation is which, and retention should not march on past that.
-      v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
+      v_now := pgpm._part_rel(p_parent, r.child_name);
       if r.child_oid is not null and v_now::oid is distinct from r.child_oid then
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'fail_archive_identity', r.lo, r.hi,
@@ -6688,7 +6712,7 @@ create or replace function pgpm._regrain_child_rel(p_parent regclass, p_child na
 returns regclass language sql stable as $$
   select case when p.child_oid is not null
               then (select c.oid::regclass from pg_class c where c.oid = p.child_oid)
-              else to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child)) end
+              else pgpm._part_rel(p_parent, p_child) end
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
 $$;
 
@@ -7475,7 +7499,10 @@ begin
   select child_oid into v_oid from pgpm.part
    where parent_table = p_parent and child_name = p_child and not attached;
   if v_oid is null then
-    execute format('drop table if exists %I.%I', p_nsp, p_child);
+    v_rel := pgpm._part_rel(p_parent, p_child);   -- #1365: never an operator's partition over another range
+    if v_rel is not null then
+      perform pgpm._drop_by_oid(v_rel, format('dropping the regrain copy %I.%I of %s', p_nsp, p_child, p_parent));
+    end if;
   else
     select c.oid::regclass into v_rel from pg_class c where c.oid = v_oid;
     if v_rel is not null then
@@ -7781,7 +7808,7 @@ begin
   select child_oid, lo, hi into v_oid, v_lo, v_hi from pgpm.part
    where parent_table = p_parent and child_name = p_child and not attached;
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #872: the copy's own schema, by its recorded oid
-  v_now := to_regclass(format('%I.%I', v_nsp, p_child));
+  v_now := pgpm._part_rel(p_parent, p_child);
   if v_now is not null and (v_oid is null or v_now::oid = v_oid) then return v_now; end if;
   select format('%I.%I', n.nspname, c.relname) into v_parent_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -9244,7 +9271,7 @@ begin
     || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
     p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
   loop
-    v_copies := v_copies || coalesce(r.child_oid, to_regclass(format('%I.%I', v_nsp, r.child_name))::oid);
+    v_copies := v_copies || coalesce(r.child_oid, pgpm._part_rel(p_parent, r.child_name)::oid);
   end loop;
   --
   -- #824, #817: and not only its columns. The copies cannot be trusted either after DDL that changed the
@@ -15292,7 +15319,7 @@ begin
                     '{}'::text[])
       into v_orphans
       from pgpm.part p
-      join pg_class k on k.relname = p.child_name and k.relkind in ('r', 'p')
+      join pg_class k on k.relname = p.child_name and k.relkind in ('r', 'p')   -- part-row-by-name: a report of every namesake, acts on none
       join pg_namespace n on n.oid = k.relnamespace
      where p.parent_table = r.parent_table;
 
@@ -16297,7 +16324,7 @@ begin
      and not exists (                                            -- a regrain copy is not an absent-row child
            select 1 from pgpm.part cp
             join pgpm.part ap on ap.parent_table = cp.parent_table and ap.attached
-           where cp.parent_table = p_parent and cp.child_name = c.relname
+           where cp.parent_table = p_parent and cp.child_name = c.relname   -- part-row-by-name: a table found by its label mapped to a row, acts on none
              and not pgpm._native_gt(cfg.control_kind, ap.lo, cp.lo)   -- ap.lo <= cp.lo
              and not pgpm._native_gt(cfg.control_kind, cp.hi, ap.hi))  -- cp.hi <= ap.hi
    limit 1;

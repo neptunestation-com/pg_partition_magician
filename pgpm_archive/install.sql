@@ -3475,19 +3475,19 @@ begin
     -- one statement, one snapshot: the parent's schema and the relation of that name in it (#1062)
     select n.nspname, c.oid::regclass into v_nsp, v_now
       from pg_class p join pg_namespace n on n.oid = p.relnamespace
-      left join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child
+      left join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child   -- part-row-by-name: archive's own resolver, compared with child_oid below; reads only
      where p.oid = p_parent;
     if v_now is null then
       raise exception 'pg_partition_magician: %.% does not exist; % resolves p_child in the schema of p_parent, not through search_path',
         quote_ident(v_nsp), quote_ident(p_child), p_caller;
     end if;
-    execute format('lock table %I.%I in access share mode', v_nsp, p_child);
+    execute format('lock table %I.%I in access share mode', v_nsp, p_child);   -- part-row-by-name: checked by oid under the lock
     v_locked := exists (select 1 from pg_locks l
                          where l.locktype = 'relation' and l.relation = v_now::oid and l.pid = pg_backend_pid() and l.granted
                            and l.database = (select d.oid from pg_database d where d.datname = current_database()));
     -- under the lock, by identity again: still p_child in the parent's schema, and the relation held
     select c.oid::regclass into v_held
-      from pg_class p join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child
+      from pg_class p join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child   -- part-row-by-name: the same, under the lock
      where p.oid = p_parent;
     exit when v_locked and v_held = v_now;
     if v_held is distinct from v_now then

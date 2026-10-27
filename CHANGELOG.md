@@ -26,7 +26,12 @@
   `retire_yield_by_relname`, `disown_namesake_mark_kept`, `child_oid_backfill_by_relname`,
   `child_nsp_fallback_by_relname`, `part_bound_raw_quoted_only`, `retire_unanchored_stranger_unchecked`,
   `write_block_unanchored_stranger_unchecked`, `foreign_mark_range_unchecked`, `foreign_mark_detached_vouched`,
-  `retire_foreign_mark_unchecked`, `disown_pass_reached_by_name` and `retire_mark_leaves_unanchored`).
+  `retire_foreign_mark_unchecked`, `disown_pass_reached_by_name`, `retire_mark_leaves_unanchored`,
+  `part_rel_range_unchecked`, `regrain_source_by_name` and `write_block_read_by_name`). Every step that resolves a
+  `pgpm.part` row's relation by its name now does it through one resolver, `pgpm._part_rel`, which withholds from
+  an unanchored row a partition of the parent over another range (regrain's source took and dropped one); and
+  `scripts/check_part_row_by_name.py` (in the `Quoted splices` lint job, with `bench/part_row_by_name_lint.sh` and
+  its mutation `part_row_lint_child_name_only`) fails any new by-name resolution outside it that does not say why.
 
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names

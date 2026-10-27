@@ -52,13 +52,19 @@
 --   PART O  the other side of M: an unanchored row's OWN partition (attached on the row's range) retired by this
 --           retire(), its detach run by the job, is dropped by the next call (retain_drop), never disowned: retire()
 --           anchors the row when it marks it.
+--   PART P  regrain() of an unanchored row whose own partition was dropped by hand, an operator's table under the
+--           name in the parent's schema attached over another range: the operator's table stays, with its rows.
+--           Every step resolves a row's name through pgpm._part_rel, which withholds that table.
+--   PART Q  the same state read by _is_write_blocked: the operator's table carries a pgpm_write_block enabled ALWAYS
+--           (as an older pgpm left one), and it is not the row's block; _part_rel answers null for the row.
 --
 -- ASYMMETRIC FIXTURES. A's cell [100, 200) holds ids 101 and 102, the operator's table one row (5005); B's dropped
 -- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303). C's cell
 -- holds 121 and 122, its namesake 8008; D's cell 131 and 132, its namesake 9009; E's cell 141 and 142, its namesake
 -- 9505; F's dropped cell held 151 and 152, its namesake holds 9701 and 9702; G's namesake 9801 and 9802; H's cells
 -- hold 161 and 162 and 361; I's 171 and 172; J's 381; the operators' tables of K, L, M and N hold two rows each
--- (9811/9812, 9821/9822, 9831/9832, 9841/9842); O's cell holds 195 and 196 and its parent's frontier row 600.
+-- (9811/9812, 9821/9822, 9831/9832, 9841/9842); O's cell holds 195 and 196 and its parent's frontier row 600; P's
+-- operator table holds 9851 and 9852, Q's 9861.
 --
 -- install.sql is re-run with \ir, relative to this file; the psql variable `install` overrides the path.
 \if :{?install}
@@ -68,7 +74,7 @@
 -- retire() is a function, not a committing procedure; no throws_* here.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(89);
+select plan(94);
 
 -- pg_cron's job table, stood in for (as tests/171 and tests/194 do): the dispatch has to be real for the armed
 -- command to be read and run
@@ -616,5 +622,52 @@ select is((select string_agg(action, ',' order by id) from pgpm.log
   'retain_detach,retain_drop', 'O: retain_detach then retain_drop, never disowned or refused');
 select is((select string_agg(id::text, ',' order by id) from public.ro355), '600',
   'O: the table keeps its frontier row and retention took the cell''s two');
+
+-- ============================ PART P: regrain's source for an unanchored row ============================
+create table public.rp355 (id bigint primary key, payload text);
+insert into public.rp355 values (321, 'a'), (322, 'b');
+call pgpm.transmute('public.rp355', 'id', 100, p_obtain => 6, p_paused => true);
+insert into public.rp355 values (650, 'frontier');
+select child_name as p_cell from pgpm.part where parent_table = 'public.rp355'::regclass and lo = '300' and attached \gset
+update pgpm.part set child_oid = null where parent_table = 'public.rp355'::regclass and child_name = :'p_cell';
+drop table public.:"p_cell";
+create table public.:"p_cell" (id bigint primary key, payload text);
+insert into public.:"p_cell" values (9851, 'operator'), (9852, 'operator');
+alter table public.rp355 attach partition public.:"p_cell" for values from (9850) to (9860);
+select to_regclass(format('public.%I', :'p_cell'))::oid as p_ops_oid \gset
+select ok((select child_oid is null from pgpm.part where parent_table = 'public.rp355'::regclass and child_name = :'p_cell')
+          and exists (select 1 from pg_inherits where inhparent = 'public.rp355'::regclass and inhrelid = :p_ops_oid),
+  'LIVENESS: P''s unanchored row''s name denotes the operator''s partition over [9850, 9860)');
+select is(pgpm._part_rel('public.rp355', :'p_cell'), null::regclass, 'P: _part_rel withholds it from the row');
+-- a refusal (a raise) is a correct outcome too: the assertions are on the operator's table
+do $$ begin
+  perform pgpm.regrain('public.rp355', (select child_name from pgpm.part
+                        where parent_table = 'public.rp355'::regclass and lo = '300' and attached), '50');
+exception when others then null;
+end $$;
+select ok(exists (select 1 from pg_class where oid = :p_ops_oid)
+          and exists (select 1 from pg_inherits where inhparent = 'public.rp355'::regclass and inhrelid = :p_ops_oid)
+          and (select string_agg(id::text, ',' order by id) from public.rp355 where id >= 9800) = '9851,9852',
+  'P: after regrain() of the cell, the operator''s table is still a partition with both its rows');
+
+-- ============================ PART Q: _is_write_blocked for an unanchored row ============================
+create table public.rq355 (id bigint primary key, payload text);
+insert into public.rq355 values (331, 'a');
+call pgpm.transmute('public.rq355', 'id', 100, p_obtain => 6, p_paused => true);
+insert into public.rq355 values (650, 'frontier');
+select child_name as q_cell from pgpm.part where parent_table = 'public.rq355'::regclass and lo = '300' and attached \gset
+update pgpm.part set child_oid = null where parent_table = 'public.rq355'::regclass and child_name = :'q_cell';
+drop table public.:"q_cell";
+create table public.:"q_cell" (id bigint primary key, payload text);
+insert into public.:"q_cell" values (9861, 'operator');
+alter table public.rq355 attach partition public.:"q_cell" for values from (9860) to (9870);
+create trigger pgpm_write_block before insert or update or delete on public.:"q_cell"
+  for each row execute function pgpm._write_block_raise();
+alter table public.:"q_cell" enable always trigger pgpm_write_block;
+select ok(exists (select 1 from pg_trigger where tgrelid = to_regclass(format('public.%I', :'q_cell'))
+                   and tgname = 'pgpm_write_block' and tgenabled = 'A'),
+  'LIVENESS: Q''s operator table under the row''s name carries a pgpm_write_block enabled ALWAYS');
+select is(pgpm._is_write_blocked('public.rq355', :'q_cell'), false,
+  'Q: it is not the row''s block: the row''s own partition is gone');
 
 select * from finish();

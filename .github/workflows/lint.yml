@@ -61,6 +61,14 @@ jobs:
         run: |
           python3 scripts/check_quoted_splices.py --selftest
           python3 scripts/check_quoted_splices.py
+      # scripts/check_part_row_by_name.py holds a pgpm.part row's relation to the one resolver, pgpm._part_rel
+      # (#1365): outside it nothing resolves a row's child name by to_regclass, a ::regclass cast, a relname
+      # comparison or DDL run on the rendered name, unless the line says why. Its --selftest runs FIRST, on
+      # fixtures that include the real pre-round-7 sites, and requires at least one reasoned site in the modules.
+      - name: A pgpm.part row's relation is resolved by its name in pgpm._part_rel alone
+        run: |
+          python3 scripts/check_part_row_by_name.py --selftest
+          python3 scripts/check_part_row_by_name.py
 
   archive-object-keys:
     name: Archive object keys
