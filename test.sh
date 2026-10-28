@@ -1374,6 +1374,8 @@ run_perf() {
     "bench/review_tooling_verdicts.sh pgpm_perf394"
     "bench/harness_calls_resolve.sh pgpm_perf389"
     "bench/harness_conservation_identity.sh pgpm_perf390"
+    "bench/retire_referenced_by_anchor.sh pgpm_perf418"
+    "bench/part_row_by_name_lint.sh pgpm_perf419"
     "bench/transmute_reused_key_shape.sh pgpm_perf420"
     "bench/archive_log_bounds_canonical.sh pgpm_perf424"
     "bench/archive_remedy_encoded_bounds.sh pgpm_perf425"
@@ -1653,6 +1655,8 @@ lint_job_living_docs() {
 lint_job_quoted_splices() {
   python3 scripts/check_quoted_splices.py --selftest
   python3 scripts/check_quoted_splices.py
+  python3 scripts/check_part_row_by_name.py --selftest
+  python3 scripts/check_part_row_by_name.py
 }
 lint_job_archive_object_keys() {
   python3 scripts/check_archive_object_keys.py --selftest

@@ -48,7 +48,7 @@ UNTRANSMUTE_FK_NOTICE = (
 # stops matching is one mutate.py refuses to build, which reads as a broken guard rather than a
 # stale pattern until someone goes and looks.
 RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not null then
-    v_now := to_regclass(format('%I.%I', v_nsp, p_child));
+    v_now := pgpm._part_rel(p_parent, p_child);
     v_why := concat_ws(' and ',
       case when r.retiring_oid is not null and v_now::oid is distinct from r.retiring_oid
            then format('not the oid %s this retirement dispatched a detach for', r.retiring_oid) end,
@@ -129,7 +129,7 @@ HT_CAPTURE_ARM_COMMENT = """       and not exists (select 1 from pg_class d
 WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid into r
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
   if found and r.child_oid is not null then
-    v_now := to_regclass(format('%I.%I', v_nsp, p_child));
+    v_now := pgpm._part_rel(p_parent, p_child);
     if v_now is not null and v_now::oid <> r.child_oid then
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
@@ -137,6 +137,12 @@ WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid into r
                        v_nsp, p_child, v_now::oid::text, r.child_oid));
       return;
     end if;
+  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
+    insert into pgpm.log (parent_table, action, lo, hi, method)   -- #1365: a row with no anchor, by its range
+      values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
+              format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
+                     v_nsp, p_child, p_parent, r.lo, r.hi));
+    return;
   end if;
 
 """
@@ -146,7 +152,7 @@ returns void language plpgsql as $$
 declare v_nsp name;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
-  execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);
+  execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);   -- part-row-by-name: pgpm's own trigger off whatever holds the name, on purpose (above)
 end;
 $$;
 """
@@ -746,8 +752,8 @@ ARCHIVE_CHUNK_TIES_BLOCK = """    if not pgpm._native_gt(cfg.control_kind, v_sto
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
-      execute format('select %s from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
-                     v_cval_q, v_nsp, p_child, cfg.control_column,
+      execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',
+                     v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
                                   cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
@@ -1443,7 +1449,7 @@ MUTATIONS = {
         "consulted', not 'the anchor does not exist', and a mutant that dropped the column too "
         "would fail the test file on its liveness witnesses and look like a catch for the wrong "
         "reason.",
-        [("      v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n"
+        [("      v_now := pgpm._part_rel(p_parent, r.child_name);\n"
           "      if r.child_oid is not null and v_now::oid is distinct from r.child_oid then\n"
           "        insert into pgpm.log (parent_table, action, lo, hi, method)\n"
           "          values (p_parent, 'fail_archive_identity', r.lo, r.hi,\n"
@@ -1508,7 +1514,7 @@ MUTATIONS = {
           "from v_oid then\n"
           "    return;\n"
           "  end if;\n"
-          "  execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);\n"
+          "  execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);   -- part-row-by-name: pgpm's own trigger off whatever holds the name, on purpose (above)\n"
           "end;\n"
           "$$;\n", 1)],
     ),
@@ -2252,10 +2258,7 @@ MUTATIONS = {
         "running longest, and no fresh install anywhere in the suite can show it. What must FAIL "
         "here is the child_oid assertion by name; a mutant that dropped the column instead would "
         "fail the catalog hash and look like a catch for the wrong reason.",
-        [("update pgpm.part p set child_oid = i.inhrelid\n"
-          "  from pg_inherits i join pg_class c on c.oid = i.inhrelid\n"
-          " where i.inhparent = p.parent_table and c.relname = p.child_name\n"
-          "   and p.attached and p.child_oid is null;\n", "", 1)],
+        [('update pgpm.part p set child_oid = i.inhrelid\n  from pg_inherits i join pg_class c on c.oid = i.inhrelid\n where i.inhparent = p.parent_table and c.relname = p.child_name   -- part-row-by-name: paired with the row\'s range below\n   and p.attached and p.child_oid is null\n   and pgpm._part_bound_is(p.parent_table, i.inhrelid, p.lo, p.hi);\n', "", 1)],
     ),
     "upgrade_monolith_oid_backfill_noop": (
         "bench/upgrade_in_place.sh",
@@ -2733,11 +2736,11 @@ begin
           "  return exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid\n"
           "                  where t.tgname = 'pgpm_regrain_capture' and c.relname = p_child\n"
           "                    and c.relnamespace = v_nsp::regnamespace);\n", 1),
-         ("declare v_nsp_oid oid;\nbegin\n"
-          "  -- #727: the partition's own schema, not the parent's; matched by name = name, never parsed (#512)\n"
-          "  select n.oid into v_nsp_oid from pg_namespace n where n.nspname = pgpm._child_nsp(p_parent, p_child);\n",
-          "declare v_nsp name;\nbegin\n  v_nsp := pgpm._child_nsp(p_parent, p_child);\n", 1),
-         ("c.relnamespace = v_nsp_oid", "c.relnamespace = v_nsp::regnamespace", 1)],
+         ("    select 1 from pg_trigger t\n"
+          "     where t.tgname = 'pgpm_write_block' and t.tgrelid = pgpm._part_rel(p_parent, p_child)\n",
+          "    select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid\n"
+          "     where t.tgname = 'pgpm_write_block' and c.relname = p_child\n"
+          "       and c.relnamespace = pgpm._child_nsp(p_parent, p_child)::regnamespace\n", 1)],
     ),
     "part_name_silent_truncation": (
         "bench/part_name_length.sh",
@@ -3692,9 +3695,9 @@ $$;''',
         "_archive_fully_covered stays false and retain() never drops the aged partition. tests/125 "
         "catches it twice: the direct _next_archive_chunk call on the frozen monolith dies, and part (C) "
         "finds skip_archive rows where the ledger should cover the aged month.",
-        [("    'with w as (select t.%I as c, %s as c_text from %I.%I t where t.%I >= %L order by t.%I limit %s)\n"
+        [("    'with w as (select t.%I as c, %s as c_text from %s t where t.%I >= %L order by t.%I limit %s)\n"
           "     select (select count(*) from w), (select w.c_text from w order by w.c desc limit 1)',\n"
-          "    cfg.control_column, v_cval_q, v_nsp, p_child, cfg.control_column,\n",
+          "    cfg.control_column, v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,\n",
           "    'select count(*), max(%I)::text from (select %I from %I.%I t where t.%I >= %L order by t.%I limit %s) s',\n"
           "    cfg.control_column, cfg.control_column, v_nsp, p_child, cfg.control_column,\n", 1)],
     ),
@@ -3705,8 +3708,8 @@ $$;''',
         "budget, so a fixture whose partitions each fit one chunk never gets here and a guard would "
         "pass with the defect present; tests/125 part (C) forces the aged month through a 400-byte "
         "budget, asserts that it took several chunks, and so finds the skip_archive rows this puts back.",
-        [("    execute format('select %s from %I.%I t where t.%I > %L order by t.%I asc limit 1',\n"
-          "                   v_cval_q, v_nsp, p_child, cfg.control_column, v_probe_hi_col, cfg.control_column)\n",
+        [("    execute format('select %s from %s t where t.%I > %L order by t.%I asc limit 1',\n"
+          "                   v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column, v_probe_hi_col, cfg.control_column)\n",
           "    execute format('select min(%I)::text from %I.%I t where t.%I > %L',\n"
           "                   cfg.control_column, v_nsp, p_child, cfg.control_column, v_probe_hi_col)\n", 1)],
     ),
@@ -3764,8 +3767,8 @@ $$;''',
         "millisecond, which tests/125_uuidv7_regrain_archive never builds; tests/137's direct pick, its "
         "ledger identity (three chunks, the burst whole in the second) and its retire assertions are what "
         "catch it, through bench/archive_chunk_uuidv7_ties.sh, on PostgreSQL 17.",
-        [("      execute format('select %s from %I.%I t where t.%I >= %L order by t.%I asc limit 1',\n"
-          "                     v_cval_q, v_nsp, p_child, cfg.control_column,\n",
+        [("      execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',\n"
+          "                     v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,\n",
           "      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',\n"
           "                     cfg.control_column, v_nsp, p_child, cfg.control_column,\n", 1),
          ("                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
@@ -4381,8 +4384,13 @@ $$;''',
         "cancel and the unrelated table that took its old name is the one dropped. One site: "
         "_regrain_drop_copy's anchored branch is never taken. tests/172 (B) catches it: the recorded oid "
         "is still in pg_class and the squatter's row is gone.",
-        [("  if v_oid is null then\n    execute format('drop table if exists %I.%I', p_nsp, p_child);\n",
-          "  if true then\n    execute format('drop table if exists %I.%I', p_nsp, p_child);\n", 1)],
+        [("  if v_oid is null then\n"
+          "    v_rel := pgpm._part_rel(p_parent, p_child);   -- #1365: never an operator's partition over another range\n"
+          "    if v_rel is not null then\n"
+          "      perform pgpm._drop_by_oid(v_rel, format('dropping the regrain copy %I.%I of %s', p_nsp, p_child, p_parent));\n"
+          "    end if;\n"
+          "  else\n",
+          "  if true then\n    execute format('drop table if exists %I.%I', p_nsp, p_child);\n  else\n", 1)],
     ),
     "regrain_recreated_copy_oid_stale": (
         "bench/regrain_copy_name_clash.sh",
@@ -5665,7 +5673,7 @@ $$;''',
         "command the job does not hold, pg_cron detaches a partition the policy keeps, and no tick re-attaches "
         "it. One site, the schema the loop resolves in. tests/204 parts A, B and C catch it.",
         [("    v_nsp := pgpm._child_nsp(p_parent, r.child_name);\n"
-          "    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n"
+          "    v_now := pgpm._part_rel(p_parent, r.child_name);\n"
           "    v_cmd_q := pgpm._detach_cmd(p_parent, v_nsp, r.child_name);\n",
           "    select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
           "    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n"
@@ -5679,7 +5687,7 @@ $$;''',
         "recall logs retain_recall over a command that now names the squatter, where it must log "
         "fail_retain_identity. One site, how the loop resolves the name. tests/204 part C catches it.",
         [("    v_nsp := pgpm._child_nsp(p_parent, r.child_name);\n"
-          "    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n",
+          "    v_now := pgpm._part_rel(p_parent, r.child_name);\n",
           "    v_nsp := pgpm._child_nsp(p_parent, r.child_name);\n"
           "    v_now := coalesce(r.retiring_oid, r.child_oid)::regclass;\n", 1)],
     ),
@@ -5696,10 +5704,12 @@ $$;''',
        join pg_class c on c.oid = p.child_oid
        join pg_namespace n on n.oid = c.relnamespace
       where p.parent_table = p_parent and p.child_name = p_child),
-    (select n.nspname from pg_inherits i
-       join pg_class c on c.oid = i.inhrelid
+    (select n.nspname from pgpm.part p
+       join pg_inherits i on i.inhparent = p.parent_table
+       join pg_class c on c.oid = i.inhrelid and c.relname = p.child_name   -- part-row-by-name: a schema, paired with the range
        join pg_namespace n on n.oid = c.relnamespace
-      where i.inhparent = p_parent and c.relname = p_child
+      where p.parent_table = p_parent and p.child_name = p_child
+        and pgpm._part_bound_is(p_parent, i.inhrelid, p.lo, p.hi)
       limit 1),
     (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
 """, """  select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -5715,9 +5725,9 @@ $$;''',
         "retire() drops the partition with a row no strategy was handed. One site, the tgenabled = 'A' "
         "condition. tests/170 catches it on all three paths: maintain's step, a direct retire(), and "
         "_archive_step archiving under an origin-only block.",
-        [("     where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid\n"
+        [("     where t.tgname = 'pgpm_write_block' and t.tgrelid = pgpm._part_rel(p_parent, p_child)\n"
           "       and t.tgenabled = 'A'\n",
-          "     where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid\n", 1)],
+          "     where t.tgname = 'pgpm_write_block' and t.tgrelid = pgpm._part_rel(p_parent, p_child)\n", 1)],
     ),
     "regrain_capture_name_cut": (
         "bench/regrain_capture_name_fits.sh",
@@ -8085,7 +8095,7 @@ select ok(
         "only a detach of a partition the forgotten parent was retiring, so another table's dispatch, armed "
         "after the drop, is clobbered. One site, the partition-name match. tests/246 part B catches it.",
         [("                        and right(v_cmd, length(quote_ident(t.child_name)) + 14)\n"
-          "                          = '.' || quote_ident(t.child_name) || ' concurrently')\n",
+          "                          = '.' || quote_ident(t.child_name) || ' concurrently')   -- part-row-by-name: matches a detach command's text, resolves nothing\n",
           "                        )\n", 1)],
     ),
     "forget_missing_disarm_owned": (
@@ -8408,9 +8418,11 @@ select ok(
         "copies stay where regrain_step made them, so the swap gate refuses every tick ('no longer names the "
         "copy', logged skip_regrain) and the run never swaps. One site, the helper the swap gate, the attach "
         "and the reconcile all ask. tests/239 S2 catches it.",
-        [("  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #872: the copy's own schema, by its recorded oid\n",
+        [("  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #872: the copy's own schema, by its recorded oid\n"
+          "  v_now := pgpm._part_rel(p_parent, p_child);\n",
           "  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
-          "   where c.oid = p_parent;   -- MUTANT: the parent's current schema\n", 1)],
+          "   where c.oid = p_parent;   -- MUTANT: the parent's current schema\n"
+          "  v_now := to_regclass(format('%I.%I', v_nsp, p_child));\n", 1)],
     ),
     "regrain_copy_branch_parent_schema": (
         "bench/recorded_identity.sh",
@@ -10074,7 +10086,7 @@ MUTATION_SRC["archive_chunk_claim_relation_unrecorded"] = "pgpm_archive/install.
 # that puts both back (the defect as reported, the one the issue's reproduction fails against). All are caught by
 # tests/archive/db/45 (bench/archive_to_s3_child_held.sh, against the archive image and MinIO).
 _RESOLVE_HOLD = (
-    "    execute format('lock table %I.%I in access share mode', v_nsp, p_child);\n"
+    "    execute format('lock table %I.%I in access share mode', v_nsp, p_child);   -- part-row-by-name: checked by oid under the lock\n"
     "    v_locked := exists (select 1 from pg_locks l\n"
     "                         where l.locktype = 'relation' and l.relation = v_now::oid and l.pid = pg_backend_pid() and l.granted\n"
     "                           and l.database = (select d.oid from pg_database d where d.datname = current_database()));\n",
@@ -10133,7 +10145,7 @@ MUTATIONS["archive_resolve_child_two_statements"] = (
         "    -- one statement, one snapshot: the parent's schema and the relation of that name in it (#1062)\n"
         "    select n.nspname, c.oid::regclass into v_nsp, v_now\n"
         "      from pg_class p join pg_namespace n on n.oid = p.relnamespace\n"
-        "      left join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child\n"
+        "      left join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child   -- part-row-by-name: archive's own resolver, compared with child_oid below; reads only\n"
         "     where p.oid = p_parent;\n",
         "  loop\n"
         "    v_tries := v_tries + 1;\n"
@@ -10145,7 +10157,7 @@ MUTATIONS["archive_resolve_child_two_statements"] = (
         "                           and l.database = (select d.oid from pg_database d where d.datname = current_database()));\n"
         "    -- under the lock, by identity again: still p_child in the parent's schema, and the relation held\n"
         "    select c.oid::regclass into v_held\n"
-        "      from pg_class p join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child\n"
+        "      from pg_class p join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child   -- part-row-by-name: the same, under the lock\n"
         "     where p.oid = p_parent;\n",
         "    v_locked := true;\n"
         "    v_held := to_regclass(format('%I.%I', v_nsp, p_child));\n", 1)],
@@ -12075,11 +12087,11 @@ MUTATIONS["archive_retired_coverage_counted"] = (
     [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_watermark;\n",
       "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_watermark;\n", 1)],
 )
 MUTATIONS["archive_retired_next_chunk_resumes"] = (
     _G1141,
@@ -12089,11 +12101,11 @@ MUTATIONS["archive_retired_next_chunk_resumes"] = (
     [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n",
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_lo;\n",
       "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n", 1)],
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_lo;\n", 1)],
 )
 MUTATIONS["archive_retired_reoccupied_archived"] = (
     _G1141,
@@ -12154,10 +12166,10 @@ MUTATIONS["archive_successor_coverage_counted"] = (
     "clause, the oid match. tests/309 part G catches it.",
     [("                    and (child_oid is null or child_oid = %L::oid)',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_watermark;\n",
       "                    ',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_watermark;\n", 1)],
 )
 MUTATIONS["archive_successor_next_chunk_resumes"] = (
     _G1141,
@@ -12166,10 +12178,10 @@ MUTATIONS["archive_successor_next_chunk_resumes"] = (
     "tests/309 part G catches it.",
     [("                    and (child_oid is null or child_oid = %L::oid)',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n",
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_lo;\n",
       "                    ',\n"
       "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n", 1)],
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_lo;\n", 1)],
 )
 MUTATIONS["archive_ledger_oid_unrecorded"] = (
     _G1141,
@@ -12449,10 +12461,10 @@ MUTATIONS["archive_fully_covered_grid_zone"] = (
     "that reading. tests/346 part B catches it.",
     [("  if pgpm._coverage_unnamed(p_parent, p_child) then return false; end if;   -- #1336: it proves no reach\n", "", 1),
      ("                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_watermark;\n",
       "                 format('pgpm._ts_text(to_timestamp(max(pgpm._native_bound_key(%L, hi, %L))::float8))',\n"
       "                        cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
-      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
+      "                 pgpm._part_rel(p_parent, p_child)::oid)\n    into v_watermark;\n", 1)],
 )
 MUTATIONS["next_archive_chunk_unnamed_resumed"] = (
     _G1336,
@@ -12913,8 +12925,7 @@ MUTATIONS["upgrade_pass_skips_unanchored"] = (
     "#705 in the install's pass: a row with no recorded oid (one the #421 backfill could not anchor) is found by its "
     "child_oid only, so the pass never reaches it and its unvouched mark is kept. One site, the pass's relation join. "
     "tests/327 part H catches it.",
-    [("             join pg_class c on c.oid = coalesce(p.child_oid, to_regclass(format('%I.%I',\n"
-      "                                  pgpm._child_nsp(p.parent_table, p.child_name), p.child_name))::oid)\n",
+    [("             join pg_class c on c.oid = coalesce(p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)\n",
       "             join pg_class c on c.oid = p.child_oid\n", 1)],
 )
 MUTATIONS["dispatch_witness_reads_log"] = (
@@ -16338,6 +16349,200 @@ MUTATIONS["scratch_owner_follow_unverified"] = (
     [("      perform pgpm._effect_or_raise((select c.relowner from pg_class c where c.oid = r.oid) = v_want, r.oid,\n                                    format('%s, handing a scratch relation to %I,', p_what, v_want_n));\n", "", 1)],
 )
 
+# Issue #1365: bench/retire_referenced_by_anchor.sh runs tests/355. retire()'s referenced path, and its
+# one-detach-in-flight check, read a partition out of pg_inherits by relname alone; each now reads the anchor's.
+MUTATIONS["retire_referenced_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "Issue #1365: retire()'s referenced path picks the partition it retires out of pg_inherits by relname, not as "
+    "the relation the identity check vouched for, the pre-fix shape: an operator's namesake in another schema, "
+    "listed first, is recorded as retiring_oid and its detach dispatched, and every later retire() of the aged cell "
+    "refuses as fail_retain_identity. One clause. tests/355 part A catches it.",
+    [("     where i.inhparent = p_parent and i.inhrelid = v_rel;\n",
+      "     where i.inhparent = p_parent and (select c.relname from pg_class c where c.oid = i.inhrelid) = p_child;\n", 1)],
+)
+MUTATIONS["retire_yield_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "Issue #1365, the sibling in the same function: the one-detach-in-flight check asks whether an older mark's "
+    "partition is still a partition of its parent by relname alone, so a namesake in another schema attached to that "
+    "parent, after the marked partition was dropped by hand, holds every referenced retirement in the database off, "
+    "silently. One clause, the anchor. tests/355 part B catches it.",
+    [("\n                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)))\n",
+      "\n                          ))\n", 1)],
+)
+
+# PR #1392 verification (V-01, V-02): the same relname-alone choice in the upgrade's paths. One clause each.
+MUTATIONS["disown_namesake_mark_kept"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 V-01: pgpm._disown_foreign_mark logs a mark an older retire() recorded on another relation than the "
+    "row's, and disarms the job of its detach, but does not clear it, so the mark is honoured: every later retire() "
+    "of an anchored cell refuses as fail_retain_identity, and an unanchored one detaches the operator's table. One "
+    "statement, the clearing. tests/355 parts C, K, L, M and N catch it.",
+    [("  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null\n   where parent_table = p_parent and child_name = p_child;\n",
+      "  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n", 1)],
+)
+MUTATIONS["child_oid_backfill_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 V-02 and round 2: the #421 child_oid backfill adopts a partition of the parent that carries the row's "
+    "name without asking whether it carries the row's range, the pre-fix shape: an operator's namesake in another "
+    "schema, listed first or the only one, becomes the row's anchor, and retire()'s one-step DROP takes it, rows and "
+    "all. One clause, the bound. tests/355 parts D and F catch it.",
+    [('   and p.attached and p.child_oid is null\n   and pgpm._part_bound_is(p.parent_table, i.inhrelid, p.lo, p.hi);\n',
+      '   and p.attached and p.child_oid is null;\n', 1)],
+)
+MUTATIONS["child_nsp_fallback_by_relname"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392: _child_nsp's fallback for an unanchored row takes the schema of the first partition of the parent that "
+    "carries the name (limit 1, no order) without asking whether it carries the row's range, the pre-fix shape: a "
+    "namesake in another schema is what retire()'s one-step DROP takes. One clause, the bound. tests/355 parts E and "
+    "F catch it.",
+    [('      where p.parent_table = p_parent and p.child_name = p_child\n        and pgpm._part_bound_is(p_parent, i.inhrelid, p.lo, p.hi)\n      limit 1),\n',
+      '      where p.parent_table = p_parent and p.child_name = p_child\n      limit 1),\n', 1)],
+)
+
+# PR #1392 round 3: a bound read by its value whatever its spelling, and an unanchored row compared by its range where
+# it is dropped or write-blocked. One clause each.
+MUTATIONS["part_bound_raw_quoted_only"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 3 (P1-02, P1-03): pgpm._part_bound_raw reads a bound only in its quoted spelling, and "
+    "pg_get_expr writes a non-negative int4 bound bare, FROM (100) TO (200): on an int4 grid the upgrade anchors no "
+    "unanchored row and backfills no monolith, a moved parent's unanchored row is not found in its own schema, and "
+    "adopt_partition refuses the bound. One clause, the bare reading. tests/355 parts H, I and J catch it.",
+    [("              then array[coalesce(replace(m[1], '''''', ''''), m[2]), coalesce(replace(m[3], '''''', ''''), m[4])] end\n",
+      "              then array[replace(m[1], '''''', ''''), replace(m[3], '''''', '''')] end\n", 1)],
+)
+MUTATIONS["retire_unanchored_stranger_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 3 (V-01): retire() does not compare an unanchored row's relation by its range, so an operator's "
+    "table under the row's name in the parent's own schema, attached over another range, is what its one-step DROP "
+    "takes, rows and all. One clause. tests/355 part G catches it.",
+    [('  if r.retiring_oid is null and r.child_oid is null and pgpm._unanchored_stranger(p_parent, v_now, r.lo, r.hi) then\n',
+      '  if r.retiring_oid is null and r.child_oid is null and false then\n', 1)],
+)
+MUTATIONS["write_block_unanchored_stranger_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 3: _install_write_block does not compare an unanchored row's relation by its range, so the write "
+    "block goes on an operator's table under the row's name, attached over another range, and its writes are "
+    "refused. One clause. tests/355 part G catches it.",
+    [("  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger\n",
+      "  elsif false and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger\n", 1)],
+)
+
+# PR #1392 round 4: an unanchored row's mark judged by the relation it marks, over the marks themselves. One clause each.
+MUTATIONS["foreign_mark_range_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4 (P1-02, P1-03): an unanchored row's mark on a partition of the parent is honoured without "
+    "asking whether its bound is the row's range, so the mark an older retire() wrote on an operator's table is kept "
+    "and its detach and drop go ahead. One clause, the range. tests/355 parts K, L and N catch it.",
+    [('              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then not pgpm._part_bound_is(p_parent, m, r.lo, r.hi)\n              else r.detach_dispatched_oid is not null end\n',
+      '              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then false\n              else r.detach_dispatched_oid is not null end\n', 1)],
+)
+MUTATIONS["foreign_mark_detached_vouched"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4: an unanchored row's mark, with the record of its dispatch, on a relation that is no partition "
+    "of the parent any more is honoured, though a detached relation has no range left to vouch for it: the operator's "
+    "table an older retire() marked, detached by the job it armed, is dropped as the cell's. One clause. tests/355 "
+    "part M catches it.",
+    [('              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then not pgpm._part_bound_is(p_parent, m, r.lo, r.hi)\n              else r.detach_dispatched_oid is not null end\n',
+      '              when exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = m)\n                then not pgpm._part_bound_is(p_parent, m, r.lo, r.hi)\n              else false end\n', 1)],
+)
+MUTATIONS["retire_foreign_mark_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4: retire() honours a mark without judging the relation it marks, so a mark no install has "
+    "judged yet (written by an older retire() after the last install run) detaches and drops the operator's table. "
+    "One clause. tests/355 part N catches it.",
+    [('  if r.retiring_at is not null and r.child_oid is null and pgpm._disown_foreign_mark(p_parent, p_child) then\n',
+      '  if false and r.child_oid is null and pgpm._disown_foreign_mark(p_parent, p_child) then\n', 1)],
+)
+MUTATIONS["disown_pass_reached_by_name"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 4 (P1-03): the install pass reaches a mark only through what the row's name resolves to, so a "
+    "mark on an unanchored row whose name resolves to nothing is never judged and the job stays armed with the "
+    "operator's detach. One clause, the join. tests/355 part L catches it.",
+    [('  for r in select p.parent_table, p.child_name from pgpm.part p where p.retiring_at is not null loop\n',
+      "  for r in select p.parent_table, p.child_name from pgpm.part p\n             join pg_class c on c.oid = coalesce(p.child_oid, to_regclass(format('%I.%I',\n                                  pgpm._child_nsp(p.parent_table, p.child_name), p.child_name))::oid)\n            where p.retiring_at is not null loop\n", 1)],
+)
+
+# PR #1392 round 5: retire() anchors an unanchored row when it marks it, so its own retirement is judged by child_oid.
+MUTATIONS["retire_mark_leaves_unanchored"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 5 (V-01): retire() marks an unanchored row's own partition without anchoring the row, so once "
+    "the dispatched detach lands the partition has no bound left to vouch for it, _disown_foreign_mark disowns pgpm's "
+    "own retirement, and every later retire() refuses the table as detached by hand: retention of the cell wedged. "
+    "One clause. tests/355 part O catches it.",
+    [('                           retiring_oid = coalesce(retiring_oid, v_child::oid),\n                           child_oid = coalesce(child_oid, v_child::oid)\n',
+      '                           retiring_oid = coalesce(retiring_oid, v_child::oid)\n', 1)],
+)
+
+# PR #1392 round 7: one resolver for a pgpm.part row's relation by its name, every site routed through it, and a lint
+# (scripts/check_part_row_by_name.py) that keeps any new site out. One clause each.
+MUTATIONS["part_rel_range_unchecked"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 7: pgpm._part_rel answers what an unanchored row's name denotes even when it is a partition of "
+    "the parent over another range than the row's, the shape every routed step had before: regrain() of the row "
+    "takes the operator's table as its source and drops it. One clause, the range. tests/355 parts P and Q catch it.",
+    [('               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)\n',
+      '               and (false\n', 1)],
+)
+MUTATIONS["regrain_source_by_name"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 6 (V-01): _regrain_child_rel resolves an unanchored row's source by its name, not through "
+    "pgpm._part_rel, so regrain() of a row whose partition was dropped by hand detaches and drops the operator's "
+    "table under the name, rows and all. One routed caller reverted. tests/355 part P catches it.",
+    [('              else pgpm._part_rel(p_parent, p_child) end\n',
+      "              else to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child)) end\n", 1)],
+)
+MUTATIONS["write_block_read_by_name"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 7: _is_write_blocked reads the block of whatever holds an unanchored row's name, not of the row's "
+    "relation, so an operator's table carrying a block an older pgpm put on it reads as the row's. A routed reader "
+    "reverted. tests/355 part Q catches it.",
+    [("     where t.tgname = 'pgpm_write_block' and t.tgrelid = pgpm._part_rel(p_parent, p_child)\n",
+      "     where t.tgname = 'pgpm_write_block' and t.tgrelid = to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))\n", 1)],
+)
+MUTATIONS["part_row_lint_first_pair_only"] = (
+    "bench/part_row_by_name_lint.sh",
+    "PR #1392 round 8: scripts/check_part_row_by_name.py takes the child name of a `%I.%I` pair from format()'s second "
+    "argument whatever the pair's position, so a pair later in the list (_next_archive_chunk's reads, _retain_recall's "
+    "ATTACH) passes. One site, the argument the pair's second specifier takes.",
+    [('            out.append(b[3])\n',
+      '            out.append(2)\n', 1)],
+)
+MUTATION_SRC["part_row_lint_first_pair_only"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["part_row_lint_positional_unread"] = (
+    "bench/part_row_by_name_lint.sh",
+    "PR #1392 round 8: the lint reads no positional specifier (`%1$I.%2$I`), so the same resolution spelled "
+    "positionally passes. One site, the specifier pattern.",
+    [("SPEC_RE = re.compile(r'%(?:(\\d+)\\$)?-?(?:\\d+|\\*(?:\\d+\\$)?)?([sIL%])')\n",
+      "SPEC_RE = re.compile(r'%()-?(?:\\d+|\\*(?:\\d+\\$)?)?([sIL%])')\n", 1)],
+)
+MUTATION_SRC["part_row_lint_positional_unread"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["part_row_lint_locals_untracked"] = (
+    "bench/part_row_by_name_lint.sh",
+    "PR #1392 round 8: the lint knows a child name only as `child_name` or `p_child`, never a local that holds one "
+    "(`v_name := r.child_name`, `select p.child_name into v_sub_name`), so regrain_step's copy names pass unmarked. "
+    "One clause, the fixpoint over a function's assignments.",
+    [('    changed = True\n    while changed:\n',
+      '    changed = False\n    while changed:\n', 1)],
+)
+MUTATION_SRC["part_row_lint_locals_untracked"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["part_row_lint_concat_unread"] = (
+    "bench/part_row_by_name_lint.sh",
+    "PR #1392 round 8: the lint does not read a name joined by hand, `quote_ident(v_nsp) || '.' || "
+    "quote_ident(p_child)`, so a resolution spelled that way passes. One site, the rule.",
+    [('    for m in re.finditer(r"\'\\.\'\\s*\\|\\|\\s*quote_ident\\s*\\(\\s*(?:\\w+\\.)?(?:" + alts + r")\\s*\\)", unit, re.I):\n',
+      '    for m in []:\n', 1)],
+)
+MUTATION_SRC["part_row_lint_concat_unread"] = "scripts/check_part_row_by_name.py"
+MUTATIONS["unanchored_stranger_direct_only"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 7 (V-01): _unanchored_stranger judges only DIRECT partitions of the parent, so an operator's table "
+    "under an unanchored row's name one level down (inside the operator's sub-partitioned partition, over another "
+    "range) is handed back by _part_rel, and retire()'s one-step path, which asks pg_partition_ancestors, drops it. "
+    "One clause, the other levels. tests/355 part R catches it.",
+    [('     and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_rel)\n          or exists (select 1 from pg_partition_ancestors(p_rel::regclass) a   -- #1365: at any level, as retire() asks\n                      where a.relid = p_parent::oid and a.relid <> p_rel))\n',
+      '     and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_rel))\n', 1)],
+)
+
 # Issues #1364, #1355, #1367: bench/transmute_by_oid.sh runs tests/351, 352 and 353. transmute, transmute_abort and
 # the incoming-key helpers named the tables they acted on by names rendered before a lock wait, and transmute's
 # cutover made its names from its unlocked preflight's reading of the table's name. One mutation per lock, per check.
@@ -16531,6 +16736,15 @@ MUTATIONS["hypertable_drain_appends_step_source_unlocked"] = (
 )
 MUTATION_SRC["hypertable_drain_appends_step_source_unlocked"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_appends_step_source_unlocked"] = "timescale"
+
+MUTATIONS["copy_row_resolves_to_partition"] = (
+    "bench/retire_referenced_by_anchor.sh",
+    "PR #1392 round 8 (P2-01): pgpm._part_rel lets an unanchored NOT-attached row (a regrain copy) resolve to a "
+    "partition of the parent carrying its name and range, in any schema, so regrain_cancel() drops an operator's "
+    "attached partition, rows and all, as the copy. One clause. tests/355 part S catches it.",
+    [('               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)\n                    or (not p.attached   -- a copy is no partition: an unanchored copy row never resolves to one\n                        and (exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v.rel)\n                             or exists (select 1 from pg_partition_ancestors(v.rel) a where a.relid = p_parent::oid)))) then null\n',
+      '               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)) then null\n', 1)],
+)
 
 # #1362 and #1358 (pass 13, the regrain family of the by-name-after-a-wait class): each statement regrain_step and
 # its reconcile make on a relation pgpm identified by oid locks that oid first, in the statement's own mode, and names

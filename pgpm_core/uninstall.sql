@@ -165,7 +165,7 @@ begin
       -- still holds every row until the swap, and the swap attaches every copy in one transaction, so
       -- a copy is never the only home of a row. The two tests are the marks an in-flight regrain
       -- leaves in pgpm's own tables (the third, a live capture trigger, goes with the function below).
-      select string_agg(format('%I.%I', v_nsp, child_name), ', ' order by child_name) into v_copies_q
+      select string_agg(format('%I.%I', v_nsp, child_name), ', ' order by child_name) into v_copies_q   -- part-row-by-name: names for the refusal message
         from pgpm.part where parent_table = r.parent_table and not attached;
       if v_copies_q is not null
          or exists (select 1 from pgpm.config where parent_table = r.parent_table and regrain_cursor is not null) then

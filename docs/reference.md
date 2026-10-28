@@ -1626,6 +1626,25 @@ the upgrade, whose dispatched detach is still armed on the
 job, is given its record instead (an adopted operator's detach is never attached), and every retirement dispatched
 after the upgrade carries its record from the start.
 
+**A mark on another relation than the partition's is cleared too, on every run of `install.sql`, and for a row
+without a recorded oid by `retire` before it honours one.** A `retire` older than this release chose the partition to retire by its name
+alone, so where a table of the same name was also a partition of the parent it could record that table as the
+one retiring and arm the job with its detach. A mark is judged by the relation it records: on a row with a
+recorded oid it must be that oid; on a row without one (an install older than the anchor) a partition of the
+parent, attached or pending, must have the row's range for its bound, and a relation the mark's recorded detach
+already took out of the parent, which has no range left, is not vouched for either. A mark that fails is cleared, the job
+disarmed if it still holds that relation's detach, and `retain_disown` logged naming the relation's oid and where
+it stands now (still a partition and untouched, pending the detach, or no partition, when attaching it back on
+the bounds it had serves its rows again). The table is left standing either way, and the partition's retirement
+starts over on the next `retire`. When `retire` starts a retirement on a row without a recorded oid, the partition
+it marks carries the row's range, and the row records that partition's oid from then on, so its own detach
+landing never reads as someone else's. The same upgrade anchors a row an install older than `pgpm.part.child_oid` left without
+one only to the partition of the parent that carries both its name and its range, in whatever schema, the range
+compared as values of the control column's type however the catalog spells them; a table of the same name
+attached over another range is never adopted. A row whose own partition is gone stays unanchored, and `retire`
+and the write block refuse such a table wherever it is, the parent's own schema included (`fail_retain_identity`,
+`fail_write_block_identity`): it is a partition of the parent over another range than the row's.
+
 `retire` takes `SHARE UPDATE EXCLUSIVE` on the partition before it asks whether it is attached, detached or
 pending, and asks the catalog as of that lock, so a detach that starts while `retire` is in flight cannot set
 its flag under it and one already set is seen (a caller in `REPEATABLE READ` included). A concurrent detach
@@ -4078,7 +4097,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `obtain` | a forward partition created (`method` = `plain`) |
 | `retain_drop` | a partition dropped by retention (via `retain()` or `retire()`) |
 | `retain_detach` / `retain_crossing` / `detach_reap` | a concurrent detach dispatched for a referenced partition / rows deleted to honour a crossing FK's declared `ON DELETE` / an abandoned concurrent detach finalized |
-| `retain_disown` | a `retiring_at` mark on a pending or detached partition without the record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`) was cleared, so the detach is the operator's and the table is never dropped by retention: by `retire`, `_detach_reap`, `_retain_recall` or a run of `install.sql`, the upgrade that adds the record among them (see [`retire`](#retire)). `method` says which, why and the remedy the partition's state calls for once its detach is finished, as statements to run: attaching it back on its bounds, and, only when retention reaches its range, the `DROP` of the detached table with the `DELETE` of its `pgpm.part` row after it (the `DROP` alone leaves the row refused as `fail_retain_identity` for good). Logged once per mark |
+| `retain_disown` | a `retiring_at` mark on a pending or detached partition without the record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`) was cleared, so the detach is the operator's and the table is never dropped by retention: by `retire`, `_detach_reap`, `_retain_recall` or a run of `install.sql`, the upgrade that adds the record among them (see [`retire`](#retire)). A run of `install.sql` also clears a mark that an older `retire` recorded on another relation of the partition's name, naming that relation's oid and where it stands now (see [`retire`](#retire)). `method` says which, why and the remedy the partition's state calls for once its detach is finished, as statements to run: attaching it back on its bounds, and, only when retention reaches its range, the `DROP` of the detached table with the `DELETE` of its `pgpm.part` row after it (the `DROP` alone leaves the row refused as `fail_retain_identity` for good). Logged once per mark |
 | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
 | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
 | `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_delta_purge` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / captured keys the swap gate discarded because no reconcile could consume them (out of the source's range, or a `NULL` control value; `rows` counts them) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |

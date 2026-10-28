@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+- **`retire()` retires the partition `pgpm.part` anchors, not a namesake in another schema** (#1365). Its
+  referenced path picked the partition to retire out of `pg_inherits` by relname alone, so an operator's
+  partition of the same parent under the same name in another schema could be the one recorded as `retiring_oid`
+  and whose detach was dispatched; every later `retire()` of the aged cell then refused it as
+  `fail_retain_identity`, wedging retention while the operator's table was queued to leave its parent. It now
+  retires the relation its identity check vouched for and its lock holds. The one-detach-in-flight check read an
+  older mark's partition the same way, so a namesake attached after the marked partition was dropped held every
+  referenced retirement in the database off, silently; it now asks after the mark's own relation. The upgrade
+  repairs what an older install left by the same choice: a run of `install.sql` (and `retire()`, before it honours
+  a mark on a row without a recorded oid) clears a mark recorded on another relation than the partition's (on such
+  a row, one that is no partition of the parent over the row's range; logged `retain_disown`, the job disarmed if it still held
+  that relation's detach), so the cell is no longer refused for good and the operator's table is never detached
+  or dropped through it, and `retire()` records the oid of an unanchored row's partition when it marks it, so its
+  own retirement completes; the `child_oid` backfill of a row older than the anchor,
+  and `_child_nsp` for an unanchored row, take only the partition carrying the row's range as well as its name
+  (`pgpm._part_bound_is`, comparing the bounds as values of the control column's type, quoted or bare), where
+  they took whichever namesake came first, or the only one, and `retire()` then dropped the operator's table,
+  rows and all; `retire()` and the write block refuse an unanchored row's name when it denotes a partition over
+  another range, in the parent's own schema too. `adopt_partition` reads a bare bound (an `integer` column's
+  non-negative bounds) where it refused it.
+  `bench/retire_referenced_by_anchor.sh` runs `tests/355` (mutations `retire_referenced_by_relname`,
+  `retire_yield_by_relname`, `disown_namesake_mark_kept`, `child_oid_backfill_by_relname`,
+  `child_nsp_fallback_by_relname`, `part_bound_raw_quoted_only`, `retire_unanchored_stranger_unchecked`,
+  `write_block_unanchored_stranger_unchecked`, `foreign_mark_range_unchecked`, `foreign_mark_detached_vouched`,
+  `retire_foreign_mark_unchecked`, `disown_pass_reached_by_name`, `retire_mark_leaves_unanchored`,
+  `part_rel_range_unchecked`, `regrain_source_by_name` and `write_block_read_by_name`). Every step that resolves a
+  `pgpm.part` row's relation by its name now does it through one resolver, `pgpm._part_rel`, which withholds from
+  an unanchored row a partition of the parent over another range (regrain's source took and dropped one); and
+  `scripts/check_part_row_by_name.py` (in the `Quoted splices` lint job, with `bench/part_row_by_name_lint.sh` and
+  its mutations `part_row_lint_first_pair_only`, `part_row_lint_positional_unread`, `part_row_lint_locals_untracked`
+  and `part_row_lint_concat_unread`) fails any new by-name resolution outside it that does not say why: a rendered
+  `<schema>.<child>` at any argument position or positional, a name joined by hand, or a local that holds a child
+  name. A stranger is judged at every level of the parent's partition tree, as `retire()` reads attachment
+  (mutation `unanchored_stranger_direct_only`).
+
 - **A lock guard's overlap witness can fail** (#1379). The probes of `bench/maintain_lock.sh` and
   `bench/regrain_outgoing_fk_lock.sh` set `saw := true` after their poll loop, unconditionally, so "LIVENESS: the
   probe overlapped a running tick" (and "... a running swap") read true when the poll ran out of turns having seen
