@@ -84,12 +84,14 @@ begin
   begin
     if p_fn then
       if not exists (select 1 from pg_proc p where p.oid = p_obj) then return; end if;
+      -- by-name-ok: checked by its effect just below: the oid must be gone, or the script stops, rolled back
       execute format('drop function %s cascade', p_obj::regprocedure::text);
     elsif not exists (select 1 from pg_class c where c.oid = p_obj) then
       return;
     elsif to_regprocedure('pgpm._drop_by_oid(regclass,text)') is not null then
       perform pgpm._drop_by_oid(p_obj::regclass, p_what);
     else
+      -- by-name-ok: checked by its effect just below: the oid must be gone, or the script stops, rolled back
       execute format('drop table %s', p_obj::regclass::text);
     end if;
     if exists (select 1 from pg_class c where c.oid = p_obj and not p_fn)
@@ -198,6 +200,7 @@ begin
                 (select array_agg(d.id) from pgpm.dropped_fk d where d.parent_table = r.parent_table and d.restored_at is null));
     end loop;
 
+    -- by-name-ok: a remedy text the refusal or the warning carries; nothing runs it
     select string_agg(format('alter table %s add constraint %I %s (%s)',
                              d.referencing_table::text, d.constraint_name, d.definition,
                              coalesce((select l.method from pgpm.log l
@@ -225,6 +228,7 @@ begin
         v_left_q;
     end if;
 
+    -- by-name-ok: a remedy text the refusal or the warning carries; nothing runs it
     select string_agg(format('alter table %s validate constraint %I', d.referencing_table::text, d.constraint_name),
                       '; ' order by d.id)
       into v_unvalidated_q

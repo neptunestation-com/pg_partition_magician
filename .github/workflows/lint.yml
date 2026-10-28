@@ -93,6 +93,22 @@ jobs:
           python3 scripts/check_archive_child_by_oid.py --selftest
           python3 scripts/check_archive_child_by_oid.py
 
+  by-name-statements:
+    name: By-name statements
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # scripts/check_by_name_after_wait.py closes the schema-swap class in the text (#1358, #1362, #1366 and the
+      # pass-13 record): every statement that names a relation or function pgpm identified by oid is locked by oid
+      # before it, checked by its effect after it, or carries a `-- by-name-ok:` reason. A schema renamed aside while
+      # such a statement waits for its lock, with a namesake committed in its place, is what it reached. Its
+      # --selftest runs FIRST, on embedded fixtures, and requires each of the four modules to hold by-name
+      # statements, so a lexer that has stopped reading them fails here rather than reporting a clean sweep.
+      - name: Every by-name statement is locked by oid, checked by its effect, or gives its reason
+        run: |
+          python3 scripts/check_by_name_after_wait.py --selftest
+          python3 scripts/check_by_name_after_wait.py
+
   minifier:
     name: dbdev minifier
     runs-on: ubuntu-latest
@@ -227,7 +243,7 @@ jobs:
   summary:
     name: Lint summary
     runs-on: ubuntu-latest
-    needs: [markdown-lint, living-docs, quoted-splices, archive-object-keys, minifier, core-growth, track-filters, review-tooling-selftest, shellcheck, lock-view-selftest, sql-syntax]
+    needs: [markdown-lint, living-docs, quoted-splices, archive-object-keys, by-name-statements, minifier, core-growth, track-filters, review-tooling-selftest, shellcheck, lock-view-selftest, sql-syntax]
     if: always()
     steps:
       - run: |
@@ -235,6 +251,7 @@ jobs:
           [ "${{ needs.living-docs.result }}" = "success" ] || { echo "living-docs failed"; exit 1; }
           [ "${{ needs.quoted-splices.result }}" = "success" ] || { echo "quoted-splices failed"; exit 1; }
           [ "${{ needs.archive-object-keys.result }}" = "success" ] || { echo "archive-object-keys failed"; exit 1; }
+          [ "${{ needs.by-name-statements.result }}" = "success" ] || { echo "by-name-statements failed"; exit 1; }
           [ "${{ needs.minifier.result }}" = "success" ] || { echo "minifier failed"; exit 1; }
           [ "${{ needs.core-growth.result }}" = "success" ] || { echo "core-growth failed"; exit 1; }
           [ "${{ needs.track-filters.result }}" = "success" ] || { echo "track-filters failed"; exit 1; }

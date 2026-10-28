@@ -37,6 +37,100 @@
   name. A stranger is judged at every level of the parent's partition tree, as `retire()` reads attachment
   (mutation `unanchored_stranger_direct_only`).
 
+- **Every statement on a relation or function pgpm identified reaches it, or refuses** (the schema-swap class:
+  #1358, #1362, #1366 and the statements their fixes did not own). A statement that names a table or function pgpm
+  identified by oid renders the name before it waits for its lock and resolves it again once granted, and a schema
+  renamed aside during the wait, with a namesake committed in its place, is what it reached. `_frontier_native`'s
+  read (the frontier of `obtain`, `extend_to`, `progress` and an id grid's retention horizon), `_create_partition`'s
+  `CREATE TABLE ... PARTITION OF` and `_detach_reap`'s `FINALIZE` now lock by oid first and name the relation under
+  the lock; `_own_like_parent`, `_scratch_mint_fn` and `_scratch_owner_follow`'s function branch check the new owner
+  on the oid; the regrain capture function's `DROP` (by the prepare and by `untransmute`) goes through
+  `pgpm._drop_fn_by_oid`, which checks the oid is gone; and the prepare mints the capture function with a plain
+  `CREATE`, so a function committed under its name during the prepare's waits is refused instead of replaced. The
+  class is closed in the text by `scripts/check_by_name_after_wait.py` (the `By-name statements` lint job): every
+  such statement in the four install files is locked by oid before it, checked by its effect after it, or carries a
+  `-- by-name-ok:` reason. `tests/359` and `tests/360` are the acceptance tests; `bench/schema_swap_leftovers.sh`
+  runs them against `frontier_native_unlocked`, `create_partition_parent_unlocked`, `detach_reap_finalize_unlocked`,
+  `own_like_parent_unchecked`, `scratch_mint_fn_unchecked`, `scratch_owner_follow_fn_unchecked`,
+  `capture_fn_create_or_replace` and `drop_fn_by_oid_unchecked`, and `bench/by_name_after_wait_lint.sh` judges the
+  lint against four mutants of it.
+
+- **`bench/guards_run_on_clean_code.sh` credits only the tracks `test.sh` runs** (#1385). It counted a guard as
+  run against the unmodified code when any `run_<track>()` body named it, though `test.sh` runs a track only by
+  calling its function, so a guard whose only call sat in a `run_*` function nothing called (run against its
+  mutants alone, the #917 state) passed. A body now counts only when `test.sh` calls its function from the top
+  level, or from a body that is itself called. Mutation `clean_run_in_undispatched_function`.
+
+- **`bench/run_fh.sh` judges its cohort after the regrain too** (#1384). Its conservation gate read the
+  immutable cohort after the cutover and step 4e then regrained the migrated monolith (copy into fine children,
+  swap, drop the source) with nothing read after it, so a regrain that lost or rewrote cohort rows was reported
+  CONSERVED in the section whose window includes it. A new step 4f reads the cohort again by the same digest
+  after the regrain and fails the run on a mismatch, and the report's after-figures are that read's.
+  `bench/harness_conservation_identity.sh` runs the harness from 4d to its report with a lossy regrain in place
+  of the driver. Mutation `fh_conservation_before_regrain_only`.
+
+- **`bench/upgrade_in_place.sh` sees a new column with no backfill line** (#1383). It degrades only the columns
+  its `DEGRADE_COLS` names, and its #417 precondition derives the columns that must be named from the backfill
+  lines, so a column added to a `create table` body with no backfill line at all, the defect its header names
+  first, was in neither: the degraded install kept it and the catalog "matched a fresh install exactly", while an
+  install from before the column, upgraded by the same file, never got it. The guard now also installs the
+  release it upgrades from (v0.6.0) alone and fails, naming it, any column a fresh install has on a table that
+  release had, which the release lacks and the list omits. Mutation `upgrade_create_body_column_no_backfill`.
+
+- **Three review-loop verdicts read what they claim to** (#1389). `land.sh`'s `verify_tree` found a duplicate
+  guard database to renumber by substring, so a duplicate `pgpm_perf33` before a `pgpm_perf332` rewrote the
+  unrelated guard's database and kept the duplicate; it now renumbers the last whole name and stops when a name
+  is still duplicated afterwards. `stop_check.py` judged criterion 4 with Python's `round()`, which rounds half to
+  even, so half a Tier 1 estimated left read as zero; it now needs less than one half. `flake_check.sh` called
+  any job with no step `lost_runner` whatever its log said, so a job failed before its first step by a real error
+  (a container image that does not exist) was rerun as a flake; the signature now needs an empty or
+  `BlobNotFound` log, and `runner_not_acquired` needs no step run as its header says. `bench/review_tooling_verdicts.sh`
+  sections (g), (h) and (i) hold each. Mutations `land_renumber_by_substring`, `land_renumber_unchecked`,
+  `stop_check_capture_half_to_even`, `flake_check_lost_runner_by_steps_only` and
+  `flake_check_not_acquired_steps_unread`.
+
+- **`scripts/screenshot.sh` uses the browser `CHROME=` names** (#1373). Its refusal told the operator to pass
+  the browser's path via `CHROME=...`, and it set `CHROME` empty before its search on every run, so the path
+  passed was discarded and the same refusal came back. A `CHROME` naming an executable is now the browser used,
+  ahead of the search, and one naming no executable is refused by name. `bench/screenshot_chrome_override.sh`
+  runs the script with stand-in browsers, the remedy typed as the refusal gives it. Mutation
+  `screenshot_chrome_reset`.
+
+- **The fix-phase skill's command for the highest guard database gives the highest** (#1372). It sorted
+  `pgpm_perfNNN` on field 3 of a split on `f`, which has no field 3, so sort compared whole lines lexically and
+  printed `pgpm_perf99` where the highest was `pgpm_perf406`: a coordinator following it assigned fixers databases
+  `test.sh` already used. It sorts on field 2, numerically. `bench/fix_phase_assign_commands.sh` runs both of the
+  skill's assignment commands as written, on planted names whose lexical and numeric maxima differ and on this
+  checkout. Mutation `fix_phase_guard_db_sorts_empty_key`.
+
+- **The regrain swap detaches the source it identified** (#1362). `regrain_step`'s swap ran `alter table <parent>
+  detach partition <source>` with both names rendered before the `DETACH` waited for `ACCESS EXCLUSIVE` on the
+  table behind a reader, and resolved them again once granted: a schema renamed aside during the wait, with a
+  same-named schema, partitioned table and partition committed in its place, had the stranger's partition detached
+  from the stranger's table (its rows no longer served, nothing logged), while the swap went on by oid, dropped the
+  source and reported success. The table and the source are now locked by oid (`pgpm._lock_oid_or_raise`) in the
+  `DETACH`'s own mode and order first, and named under those locks, so the `DETACH` waits for neither and reaches
+  them wherever their schema went. `tests/349` is the acceptance test; `bench/regrain_swap_detach_by_oid.sh` runs it
+  against `regrain_swap_detach_unlocked`.
+
+- **The regrain copy batch, the copy's making and the reconcile reach the relations pgpm identified** (#1358). The
+  copy batch, `insert into <copy> ... select ... from <source>`, named both by names rendered before it waited for
+  its locks, so a schema swapped during the wait sent the batch from a namesake source or into a namesake copy; the
+  short batch advanced the cursor past rows the recorded copy never got, and the swap dropped them with the source
+  (or served a stranger's rows in their place). The copy and the source are now locked by oid in the `INSERT`'s own
+  modes first and named under those locks. A new copy is handed back by the oid its `CREATE` made
+  (`_regrain_copy_make` returns it), so the statements after an outgoing key's `ADD`, which waits for its referenced
+  table, and the caller's owner and ACL mint, bound `CHECK`, `pgpm.part` anchor and first batch no longer name a
+  namesake. The reconcile locks the change-capture delta by oid before its first read and names it at each
+  statement, so it no longer consumes a namesake delta's rows as its batch. And `pgpm._truncate_checked` accepts a
+  `TRUNCATE` that kept the relation's file only when this transaction already held `ACCESS EXCLUSIVE` on its oid
+  before it (its `CREATE`, or an earlier `TRUNCATE` of it, as a second `regrain_cancel` in one transaction makes):
+  judged by its `pg_class` row, which the swap tick's grant to a new writer of the table rewrites too, a
+  never-written delta passed while the swap's `TRUNCATE` emptied a namesake. `tests/350`
+  is the acceptance test; `bench/regrain_copy_by_oid.sh` runs it against `regrain_copy_batch_unlocked`,
+  `regrain_copy_make_returns_by_name`, `regrain_reconcile_delta_unlocked`,
+  `truncate_checked_inplace_by_catalog_write` and `truncate_checked_inplace_by_creation`.
+
 - **A retired chunk's offset-less bound reaches every offset a session can take** (#1363). `pgpm._native_bound_reach`
   widened a retired ledger row's bound that names no instant (a pre-#977 `covered_hi`) only to UTC-12 for a `hi`
   and UTC+14 for a `lo`, the zones tzdata names today. A session goes further: a POSIX `TimeZone` takes an offset

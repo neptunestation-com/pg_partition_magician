@@ -19,20 +19,26 @@
 #   2. The page pulls three families from Google Fonts. Capture with network access, or the display face
 #      falls back and the headline sets differently from what visitors see.
 #
-# Usage: scripts/screenshot.sh [output-path]
+# Usage: [CHROME=<browser>] [PORT=<port>] scripts/screenshot.sh [output-path]
+# CHROME names the Chrome or Chromium executable to use; without it the usual places are searched.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 OUT="${1:-docs/screenshot.png}"
 PORT="${PORT:-8765}"
 
-CHROME=""
-for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-         "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
-         "$(command -v google-chrome 2>/dev/null)" \
-         "$(command -v chromium 2>/dev/null)"; do
-  [ -n "$c" ] && [ -x "$c" ] && { CHROME="$c"; break; }
-done
+CHROME="${CHROME:-}"
+if [ -n "$CHROME" ]; then
+  # the operator's choice is used or refused, never replaced by a search
+  if [ ! -x "$CHROME" ]; then echo "ERROR: CHROME=$CHROME is not an executable file" >&2; exit 1; fi
+else
+  for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+           "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+           "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
+           "$(command -v google-chrome 2>/dev/null)" \
+           "$(command -v chromium 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { CHROME="$c"; break; }
+  done
+fi
 if [ -z "$CHROME" ]; then
   echo "ERROR: no Chrome/Chromium found. Install one, or pass its path via CHROME=..." >&2
   exit 1

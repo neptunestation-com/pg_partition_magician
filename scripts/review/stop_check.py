@@ -18,7 +18,8 @@ recent passes (N and the pass before it; N defaults to the last row of the table
   (c) the ceiling: the next pass would exceed 13 (or --extended-through) is a stop, "ceiling";
       --budget-used above 27M agent tokens for the current loop is a stop, "budget";
   (d) a BLOCKING entry of the decisions queue (decisions_queue.py) not resolved is a stop with its text;
-  (e) the method's criterion 4: the Tier 1 capture-recapture estimate rounds to zero in both passes, or,
+  (e) the method's criterion 4: the Tier 1 capture-recapture estimate rounds to zero in both passes (fewer
+      than one half remaining; a half rounds up), or,
       when either pass reads "not attempted" or not computable ("not computable", "undefined"), (a) and (b)
       hold over the THREE most recent passes instead of two.
 
@@ -435,7 +436,8 @@ def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, e
     cr_text = ", ".join(f"pass {p} " + (f"estimate, {cr[p]['remaining']:g} remaining" if cr[p]["kind"] == "estimate"
                                         else cr[p]["kind"]) for p in pair)
     if len(pair) == 2 and all(cr[p]["kind"] == "estimate" for p in pair):
-        c4_met = all(round(cr[p]["remaining"]) == 0 for p in pair)
+        # below one half, so half a Tier 1 rounds up as it does by hand (round() rounds 0.5 to even: zero; #1389)
+        c4_met = all(cr[p]["remaining"] < 0.5 for p in pair)
         c4 = {"branch": "estimate", "met": c4_met, "remaining": {str(p): cr[p]["remaining"] for p in pair}}
         lines.append(f"(e) capture-recapture, criterion 4: {cr_text}: rounds to zero in both: {'met' if c4_met else 'NOT met'}")
     else:
@@ -696,6 +698,10 @@ def selftest():
         h, r = case("cr_round", [ok12, ok13], capture_text={13: "S8: estimate 0.4 (a fraction left)"})
         v = run(h, r, extended_through=14)
         assert v["reason"].startswith("converged") and "rounding to zero" in v["reason"], v["lines"]
+        # half a Tier 1 left does not round to zero (Python's round(0.5) is 0)
+        h, r = case("cr_half", [ok12, ok13], capture_text={13: "S8 opus 3, fable 3, overlap 2: estimate 4.5, found 4"})
+        v = run(h, r, extended_through=14)
+        assert v["verdict"] == "continue" and v["criteria"]["e"]["met"] is False, v["lines"]
         # the fallback branch: an estimate not attempted or not computable in either pass asks for (a) and (b)
         # over THREE passes; two qualifying passes alone are then not enough
         for name, text in (("cr_na", "not attempted"), ("cr_nc", "S8 opus 1, fable 0, no overlap, so not computable"),

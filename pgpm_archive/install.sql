@@ -2029,6 +2029,8 @@ create or replace function archive._pq_has_nan(p_schema name, p_table name, p_co
 returns boolean language plpgsql stable as $$
 declare v boolean;
 begin
+  -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+  --   (archive._pq_snapshot)
   execute format('select exists (select 1 from %I.%I where %I = ''NaN''::numeric)', p_schema, p_table, p_col) into v;
   return v;
 end;
@@ -2057,6 +2059,8 @@ create or replace function archive._pq_from_item(
 language sql immutable as $$
   select case
     when p_control is null then format('%I.%I', p_schema, p_table)
+    -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+    --   (archive._pq_snapshot)
     else format('(select * from %I.%I where %I >= %L and %I < %L) x',
                 p_schema, p_table, p_control, p_lo, p_control, p_hi)
   end;
@@ -2145,6 +2149,8 @@ begin
   end if;
 
   if p_pgtype = 'int4' then
+    -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+    --   (archive._pq_snapshot)
     execute format(
       'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
               coalesce(string_agg(archive._pq_plain_int32(%I::int4), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
@@ -2152,6 +2158,8 @@ begin
       p_col, v_order_q, p_col, v_order_q, p_col, v_from_q)
       into is_present, values_payload;
   elsif p_pgtype = 'int8' then
+    -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+    --   (archive._pq_snapshot)
     execute format(
       'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
               coalesce(string_agg(archive._pq_plain_int64(%I::int8), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
@@ -2159,6 +2167,8 @@ begin
       p_col, v_order_q, p_col, v_order_q, p_col, v_from_q)
       into is_present, values_payload;
   elsif p_pgtype = 'float8' then
+    -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+    --   (archive._pq_snapshot)
     execute format(
       'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
               coalesce(string_agg(archive._pq_plain_double(%I::float8), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
@@ -2166,6 +2176,8 @@ begin
       p_col, v_order_q, p_col, v_order_q, p_col, v_from_q)
       into is_present, values_payload;
   elsif p_pgtype = 'bool' then
+    -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+    --   (archive._pq_snapshot)
     execute format(
       'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
               coalesce(array_agg(%I::boolean order by %s) filter (where %I is not null), ''{}''::boolean[])
@@ -2207,6 +2219,8 @@ begin
       p_col, v_order_q, p_col, v_order_q, p_col, v_from_q)
       into is_present, values_payload;
   elsif p_pgtype = 'uuid' then
+    -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+    --   (archive._pq_snapshot)
     execute format(
       'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
               coalesce(string_agg(archive._pq_plain_uuid(%I::uuid), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
@@ -2220,6 +2234,8 @@ begin
     -- DECIMAL leaf (#635). It is written as null instead, Spark's reading of a NaN cast to DECIMAL: absent
     -- from the values, false in is_present. A NOT NULL column holding one gets an OPTIONAL leaf in that
     -- file (archive._pq_has_nan, in both encoders), so the definition levels that carry the null exist.
+    -- by-name-ok: every caller reads pg_temp.archive_pq_snapshot, the temp table this transaction filled
+    --   (archive._pq_snapshot)
     execute format(
       'select coalesce(array_agg(%I is not null and %I <> ''NaN''::numeric order by %s), ''{}''::boolean[]),
               coalesce(string_agg(archive._pq_plain_decimal(%I::numeric, %L, %L), ''''::bytea order by %s) filter (where %I is not null and %I <> ''NaN''::numeric), ''''::bytea)
@@ -2339,6 +2355,8 @@ create or replace function archive._pq_from_relation(
 language sql stable as $$
   select case
     when p_control is null then p_relation::text
+    -- by-name-ok: a FROM item for archive._pq_snapshot, whose read is checked by its effect there
+    --   (archive._refuse_foreign_read)
     else format('(select * from %s where %I >= %L and %I < %L) x',
                 p_relation, p_control, p_lo, p_control, p_hi)
   end;
@@ -2453,6 +2471,8 @@ begin
   -- built empty, then filled by the same two statements a reuse runs
   if v_snap is null then
     v_from_q := archive._pq_from_relation(p_relation, p_control, p_lo, p_hi);
+    -- by-name-ok: checked with the INSERT below by archive._refuse_foreign_read, which sees any relation this
+    --   CREATE's lookup took (held since v_held)
     execute format(
       'create temp table archive_pq_snapshot on commit drop as
          select %s, row_number() over (order by %s) as archive_pq_ord from %s with no data',
@@ -3511,6 +3531,8 @@ begin
       raise exception 'pg_partition_magician: %.% does not exist; % resolves p_child in the schema of p_parent, not through search_path',
         quote_ident(v_nsp), quote_ident(p_child), p_caller;
     end if;
+    -- by-name-ok: this IS the lock by oid (pgpm._lock_oid's shape): pg_locks is asked for v_now just below, and the
+    --   name read again through the parent's relnamespace
     execute format('lock table %I.%I in access share mode', v_nsp, p_child);   -- part-row-by-name: checked by oid under the lock
     v_locked := exists (select 1 from pg_locks l
                          where l.locktype = 'relation' and l.relation = v_now::oid and l.pid = pg_backend_pid() and l.granted

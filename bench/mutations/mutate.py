@@ -2403,8 +2403,8 @@ MUTATIONS = {
         "final delete, and gone unapplied. The fine child keeps the pre-change row and the swap "
         "attaches it. tests/124 fails against this on id 150000 reading 'orig' after a clean swap, on "
         "the witness that T1's capture survived the tick, and on the tick's consumed-row count.",
-        [("  execute format('delete from %I.%I k where %s', v_dnsp, v_delta, v_batch) using v_seqs, v_rows;\n",
-          "  execute format('delete from %I.%I where %I <= %s and %s', v_dnsp, v_delta, v_seq,\n"
+        [("  execute format('delete from %s k where %s', v_dreg::text, v_batch) using v_seqs, v_rows;\n",
+          "  execute format('delete from %s where %I <= %s and %s', v_dreg::text, v_seq,\n"
           "                 (select max(s) from unnest(v_seqs) s), v_elig);\n", 1)],
     ),
     "set_archive_fn_no_return_type_check": (
@@ -2480,8 +2480,8 @@ begin
      where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
        and convalidated
   loop
-    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
-    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+    execute format('alter table %s add constraint %I %s not valid', v_copy::text, r.conname, r.def);
+    execute format('alter table %s validate constraint %I', v_copy::text, r.conname);
   end loop;
 """, "", 1),
          ("     where k.contype = 'f' and k.conparentid = 0\n",
@@ -7295,9 +7295,7 @@ select ok(
         "nothing of the parent's replica identity, which PostgreSQL does not give it either, so the parent "
         "is right and every forward partition has the default. tests/207's forward-partition assertions in "
         "parts A to D catch it.",
-        [("  perform pgpm._replica_identity_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,\n"
-          "                                             format('%I.%I', p_nsp, p_name)::regclass);   -- #782\n",
-          "", 1)],
+        [("  perform pgpm._replica_identity_like_parent(v_parent, v_child);   -- #782\n", "", 1)],
     ),
     "regrain_swap_replica_identity_dropped": (
         "bench/cutover_replica_identity.sh",
@@ -8687,8 +8685,7 @@ select ok(
         "transmute's forward grid mints keeps the maintaining role's ALTER DEFAULT PRIVILEGES, so a role revoked "
         "on the table reads it by naming it. One site. tests/256 catches it on the transmute, obtain and "
         "extend_to partitions.",
-        [("  perform pgpm._acl_reset(format('%I.%I', p_nsp, p_name)::regclass, true);   -- #875: the owner's alone\n",
-          "", 1)],
+        [("  perform pgpm._acl_reset(v_child, true);   -- #875: the owner's alone\n", "", 1)],
     ),
     "regrain_fine_child_acl_unreset": (
         "bench/acl_grantor_owner_partitions.sh",
@@ -8696,10 +8693,10 @@ select ok(
         "the role that ran the regrain, and the swap attaches it so. One site. tests/256 catches it on the "
         "regrain's two fine children. Since #949 the child is minted owner-only at its creation too, so both "
         "resets go (the creation-time one is owned like the parent instead, as before #949).",
-        [("      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875; part-row-by-name: the same\n",
+        [("      perform pgpm._acl_reset(v_copy, true);   -- #875\n",
           "", 1),
-         ("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- part-row-by-name: the copy this statement group just created\n",
-          "      perform pgpm._own_like_parent(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- MUTANT\n", 1)],
+         ("      perform pgpm._scratch_mint(p_parent, v_copy);\n",
+          "      perform pgpm._own_like_parent(p_parent, v_copy);\n", 1)],
     ),
     "transmute_incoming_gate_accepts_not_valid": (
         "bench/incoming_not_valid_refused.sh",
@@ -8852,7 +8849,7 @@ select ok(
         "Pre-#949 regrain_step: a fine child keeps the creating role's default privileges from its CREATE until "
         "its sub-range's last short batch, so between ticks a role they name reads every row copied so far, "
         "past the parent's row security. tests/267 stage A catches it.",
-        [("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- part-row-by-name: the copy this statement group just created\n", "", 1)],
+        [("      perform pgpm._scratch_mint(p_parent, v_copy);\n", "", 1)],
     ),
     "scratch_regrain_owner_not_followed": (
         "bench/scratch_relations.sh",
@@ -10819,7 +10816,7 @@ MUTATION_SRC['forget_missing_survivors_by_count'] = 'tests/79_status_survives_dr
 # the other). HELD is the code as it stands (#1057: the delta written only under a lock that pins it to the
 # name used); UNLOCKED is #1051's and #1037's (the to_regclass check, then a static insert that resolves the
 # name again after any wait); STATIC is pre-#1051 and pre-#1037 (the insert by the minted name alone).
-CAPTURE_HELD_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+CAPTURE_HELD_CORE = """  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
     declare
       d regclass;
       n text;
@@ -10880,7 +10877,7 @@ CAPTURE_HELD_CORE = """  execute format('create or replace function %I.%I() retu
     format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
     format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
 """
-CAPTURE_UNLOCKED_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+CAPTURE_UNLOCKED_CORE = """  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
     declare
       d regclass;
     begin
@@ -10918,7 +10915,7 @@ CAPTURE_UNLOCKED_CORE = """  execute format('create or replace function %I.%I() 
     v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
     v_nsp, v_delta, v_keycols_q, v_newvals_q);
 """
-CAPTURE_STATIC_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+CAPTURE_STATIC_CORE = """  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
     begin
       if tg_op = ''DELETE'' then
         insert into %I.%I (%s) values (%s); return old;
@@ -14065,14 +14062,14 @@ MUTATIONS["regrain_copy_validates_not_valid_check"] = (
     [("""  for r in
     select c.conname
       from pg_constraint k
-      join pg_constraint c on c.conrelid = format('%I.%I', p_nsp, p_name)::regclass and c.contype = k.contype
+      join pg_constraint c on c.conrelid = v_copy and c.contype = k.contype
      where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
        and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
        and case when k.contype = 'c' then c.conname = k.conname
                 else (select a.attname from pg_attribute a where a.attrelid = k.conrelid and a.attnum = k.conkey[1])
                    = (select a.attname from pg_attribute a where a.attrelid = c.conrelid and a.attnum = c.conkey[1]) end
   loop
-    execute format('alter table %I.%I drop constraint %I', p_nsp, p_name, r.conname);
+    execute format('alter table %s drop constraint %I', v_copy::text, r.conname);
   end loop;
 """, "", 1)],
 )
@@ -16103,7 +16100,7 @@ MUTATIONS["delete_checked_unverified"] = (
 MUTATIONS["truncate_checked_unverified"] = (
     "bench/retire_locks_by_oid.sh",
     "pgpm._truncate_checked does not look at the delta's relfilenode: regrain_cancel's TRUNCATE (and the swap's) empties a namesake a schema rename put under the name while it waited behind a captured write, with the schemas swapped back or not, and returns as if it had emptied its own delta (P2-02). One clause. tests/345 parts L and L2 catch it.",
-    [("  perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn\n    or (pg_relation_size(p_rel) = 0\n        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),\n    p_rel, p_what);\n", '', 1)],
+    [("  perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn\n    or (pg_relation_size(p_rel) = 0 and v_held),\n    p_rel, p_what);\n", '', 1)],
 )
 MUTATIONS["write_block_create_unverified"] = (
     "bench/retire_locks_by_oid.sh",
@@ -16635,6 +16632,290 @@ MUTATIONS["copy_row_resolves_to_partition"] = (
       '               and (pgpm._unanchored_stranger(p_parent, v.rel::oid, p.lo, p.hi)) then null\n', 1)],
 )
 
+# #1362 and #1358 (pass 13, the regrain family of the by-name-after-a-wait class): each statement regrain_step and
+# its reconcile make on a relation pgpm identified by oid locks that oid first, in the statement's own mode, and names
+# it under the lock; the copy's making hands it back by the oid its CREATE made. bench/regrain_swap_detach_by_oid.sh
+# runs tests/349 and bench/regrain_copy_by_oid.sh runs tests/350. One mutation per site.
+MUTATIONS["regrain_swap_detach_unlocked"] = (
+    "bench/regrain_swap_detach_by_oid.sh",
+    "Issue #1362: regrain_step's swap DETACHes the source with no lock by oid on the parent or the source first. The "
+    "DETACH waits for ACCESS EXCLUSIVE on the parent behind a reader and resolves both names again once granted, so a "
+    "schema renamed aside with a namesake partitioned table and partition committed during the wait has the stranger's "
+    "partition detached from the stranger's table, while the swap goes on by oid and reports success. The two locks "
+    "before the DETACH. tests/349 parts A (the stranger's partition detached) and C (the DETACH fails on the "
+    "stranger's partition) catch it.",
+    [("  perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));\n"
+      "  perform pgpm._lock_oid_or_raise(v_child, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));\n",
+      "", 1)],
+)
+MUTATIONS["regrain_copy_batch_unlocked"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358: regrain_step's copy batch INSERTs with no lock by oid on the copy or the source first, so the "
+    "INSERT waits for its locks by name and resolves the names again once granted: a schema renamed aside during the "
+    "wait sends the batch from a namesake source or into a namesake copy, and the short batch advances the cursor "
+    "past rows the copy pgpm recorded never got, which the swap then drops with the source. The two locks before "
+    "the INSERT. tests/350 parts A (the namesake copy filled, the cursor past [0, 500), ids lost at the swap) and B "
+    "(the namesake's stale rows copied and served) catch it.",
+    [("    perform pgpm._lock_oid_or_raise(v_copy, 'row exclusive', true, format('regrain_step(%s), copying a batch,', p_parent));\n"
+      "    perform pgpm._lock_oid_or_raise(v_child, 'access share', true, format('regrain_step(%s), copying a batch,', p_parent));\n",
+      "", 1)],
+)
+MUTATIONS["regrain_copy_make_returns_by_name"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358, where a copy is made: _regrain_copy_make hands the copy back by its name once its statements have "
+    "run, not by the oid its CREATE made. An outgoing key's ADD waits for its referenced table behind a writer, and a "
+    "schema renamed aside during that wait makes the name denote a namesake, which the caller then mints (its grants "
+    "revoked), constrains with the bound CHECK, anchors in pgpm.part and fills with the batch. One clause, the return. "
+    "tests/350 part C catches it.",
+    [("  return v_copy;\nend;\n", "  return format('%I.%I', p_nsp, p_name)::regclass;\nend;\n", 1)],
+)
+MUTATIONS["regrain_reconcile_delta_unlocked"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358, the reconcile's delta: _regrain_reconcile reads and consumes the capture delta with no lock by oid on "
+    "it first, so the batch's read waits for the delta behind a holder and resolves its name again once granted: a "
+    "schema renamed aside during the wait makes it read a namesake's rows as the batch, and the delta pgpm recorded "
+    "is not reconciled that tick. One clause, the lock. tests/350 part D catches it.",
+    [("  perform pgpm._lock_oid_or_raise(v_dreg, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));\n",
+      "", 1)],
+)
+
+MUTATIONS["truncate_checked_inplace_by_catalog_write"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "Issue #1358 (pass 13's F4 hypothesis, built): pgpm._truncate_checked accepts an unchanged relfilenode when the "
+    "relation is empty and this transaction wrote its pg_class row, as it does for a delta it created; but a GRANT "
+    "writes that row too, and the swap tick grants a new writer of the table INSERT on the delta (#496). A "
+    "never-written delta (no page to empty) under that grant passes while the TRUNCATE, waiting behind a reader, "
+    "empties a namesake a schema swap put under its name, and the swap commits. One clause, what the in-place branch "
+    "asks. tests/350 part E catches it.",
+    [("    or (pg_relation_size(p_rel) = 0 and v_held),\n",
+      "    or (pg_relation_size(p_rel) = 0\n"
+      "        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n"
+      "                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),\n", 1)],
+)
+MUTATIONS["truncate_checked_inplace_by_creation"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "PR #1400 review (codex): pgpm._truncate_checked accepts an in-place TRUNCATE only for a relation this transaction "
+    "created. PostgreSQL also truncates in place a relation whose file this transaction already replaced, so two "
+    "regrain_cancel calls in one transaction, on a delta an earlier one created, refused the second as a TRUNCATE "
+    "that reached another relation. One clause, what the in-place branch asks. tests/350 part E2 catches it.",
+    [("    or (pg_relation_size(p_rel) = 0 and v_held),\n",
+      "    or (pg_relation_size(p_rel) = 0\n"
+      "        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n"
+      "                            + (select a.xmin::text::bigint from pg_attribute a where a.attrelid = p_rel and a.attnum = -1))::text::xid8) = 'in progress'),\n", 1)],
+)
+
+# pass 13 G16 (#1372, #1373, #1389, #1383, #1384, #1385): the review loop's tooling and the bench meta-guards.
+MUTATIONS["fix_phase_guard_db_sorts_empty_key"] = (
+    "bench/fix_phase_assign_commands.sh",
+    "Pre-#1372 fix-phase skill: the command for the highest guard database sorts on field 3 of names split on `f`, "
+    "and `pgpm_perfNNN` has one `f`, so every key is empty and sort compares whole lines lexically: it prints "
+    "pgpm_perf99 where the highest is in the four hundreds, and the coordinator assigns databases test.sh uses. "
+    "One clause, the key.",
+    [("sort -t f -k2,2n | tail -1", "sort -t f -k3 -n | tail -1", 1)],
+)
+MUTATION_SRC["fix_phase_guard_db_sorts_empty_key"] = ".claude/skills/fix-phase/SKILL.md"
+
+MUTATIONS["screenshot_chrome_reset"] = (
+    "bench/screenshot_chrome_override.sh",
+    "Pre-#1373 scripts/screenshot.sh: CHROME is set to the empty string before the browser search, so the CHROME= "
+    "its own refusal tells the operator to pass is discarded, the search finds nothing (or another browser) and "
+    "the same refusal comes back. One clause, the assignment.",
+    [('CHROME="${CHROME:-}"\n', 'CHROME=""\n', 1)],
+)
+MUTATION_SRC["screenshot_chrome_reset"] = "scripts/screenshot.sh"
+MUTATIONS["land_renumber_by_substring"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 land.sh verify_tree: a duplicate guard database is located for renumbering with s.rfind(d), a "
+    "substring search, so when the duplicate (pgpm_perf33) prefixes a name later in test.sh (pgpm_perf332) that "
+    "unrelated guard's database is rewritten and the duplicate kept. One clause, the search. The guard's (g) "
+    "catches it (pgpm_perf332 rewritten; the run stops on the duplicate left).",
+    [('        i = [m.start() for m in re.finditer(re.escape(d) + r"\\b", s)][-1]\n',
+      '        i = s.rfind(d)\n', 1)],
+)
+MUTATION_SRC["land_renumber_by_substring"] = "scripts/review/land.sh"
+MUTATIONS["land_renumber_unchecked"] = (
+    "bench/review_tooling_verdicts.sh",
+    "#1389's re-check dropped: verify_tree does not read the names again after renumbering, so a database three "
+    "PRs took is written back twice while the run reports the guard databases unique. One clause. The guard's (g) "
+    "catches it (the triple written back with a duplicate, exit 0).",
+    [('    if left: print("    guard databases still duplicated after renumbering:", left); sys.exit(1)\n', '', 1)],
+)
+MUTATION_SRC["land_renumber_unchecked"] = "scripts/review/land.sh"
+MUTATIONS["stop_check_capture_half_to_even"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 stop_check.py criterion 4: the Tier 1 capture-recapture estimate is judged with Python's round(), "
+    "which rounds half to even, so 0.5 Tier 1 remaining (estimate 4.5, found 4) reads as rounding to zero and the "
+    "loop as converged. One clause, the comparison. The guard's (h) catches it.",
+    [('        c4_met = all(cr[p]["remaining"] < 0.5 for p in pair)\n',
+      '        c4_met = all(round(cr[p]["remaining"]) == 0 for p in pair)\n', 1)],
+)
+MUTATION_SRC["stop_check_capture_half_to_even"] = "scripts/review/stop_check.py"
+MUTATIONS["flake_check_lost_runner_by_steps_only"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 flake_check.sh lost_runner: the step count alone, so a job GitHub failed before any step with a log "
+    "naming a real error (a job container image that does not exist) is a known flake, exit 0, and land.sh reruns "
+    "it. One clause, the log's test. The guard's (i) catches it.",
+    [("    if grep -q '[^[:space:]]' <<<\"$jlog\" && ! grep -q 'BlobNotFound' <<<\"$jlog\"; then\n",
+      "    if false; then\n", 1)],
+)
+MUTATION_SRC["flake_check_lost_runner_by_steps_only"] = "scripts/review/flake_check.sh"
+MUTATIONS["flake_check_not_acquired_steps_unread"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1389 flake_check.sh runner_not_acquired: the annotation alone, though its header also requires that no "
+    "step ran, so a job carrying the annotation whose steps ran and failed is retried as a known flake. One "
+    "clause, the step count. The guard's (i) catches it.",
+    [('  [ "$steps" = 0 ] || { all_runner=0; break; }\n', '', 1)],
+)
+MUTATION_SRC["flake_check_not_acquired_steps_unread"] = "scripts/review/flake_check.sh"
+MUTATIONS["fh_conservation_before_regrain_only"] = (
+    "bench/harness_conservation_identity.sh",
+    "Pre-#1384 bench/run_fh.sh: the cohort is judged after the cutover and never after step 4e's regrain (copy, "
+    "swap, drop the source), so a regrain that loses cohort row 5 and invents a stranger 50 is reported CONSERVED. "
+    "One clause, the post-regrain read's failure verdict; the read and its message stay.",
+    [("CONSERVATION FAIL after the regrain: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, "
+      "invented or rewritten). CORRECTNESS DEFECT.\"; CONS=fail; fi\n",
+      "CONSERVATION FAIL after the regrain: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, "
+      "invented or rewritten). CORRECTNESS DEFECT.\"; fi\n", 1)],
+)
+MUTATION_SRC["fh_conservation_before_regrain_only"] = "bench/run_fh.sh"
+MUTATIONS["clean_run_in_undispatched_function"] = (
+    "bench/guards_run_on_clean_code.sh",
+    "#1385: write_block_identity.sh's one clean-code run moved out of run_perf's list into a run_* function of "
+    "its own that test.sh never calls, so no track runs it against the unmodified module and only its mutants "
+    "exercise it (the #917 state). Before #1385 the guard credited any guard named in any run_*() body, called or "
+    "not. Two sites: the list entry, and the function placed before run_discriminate.",
+    [('    "bench/write_block_identity.sh pgpm_wbident"\n', '', 1),
+     ("\nrun_discriminate() {\n",
+      "\nrun_identity_guards() {\n"
+      "  bash \"$(dirname \"$0\")/bench/write_block_identity.sh\" pgpm_test-15 pgpm_wbident || return 1\n"
+      "}\n\nrun_discriminate() {\n", 1)],
+)
+MUTATION_SRC["clean_run_in_undispatched_function"] = "test.sh"
+MUTATIONS["upgrade_create_body_column_no_backfill"] = (
+    "bench/upgrade_in_place.sh",
+    "#1383: a column added to pgpm.config's `create table` body with no `add column if not exists` line at all, "
+    "the defect bench/upgrade_in_place.sh's header names first. A fresh install has it, so the pgTAP suite stays "
+    "green; an install from before it, upgraded by re-running the file, never gets it. Before #1383 the guard "
+    "passed it: DEGRADE_COLS did not name the column and the #417 precondition reads only the backfill lines, so "
+    "the degrade kept it and the catalog matched. Its precondition against the release must fail, by name.",
+    [("create table if not exists pgpm.config (\n  parent_table     regclass    primary key,\n",
+      "create table if not exists pgpm.config (\n  parent_table     regclass    primary key,\n"
+      "  obtain_note      text,\n", 1)],
+)
+
+# The schema-swap class as one lever (the pass-13 record): the statements the per-family fixes (#1399, #1400, #1402)
+# did not own, each locked by oid first or checked by its effect after. bench/schema_swap_leftovers.sh runs tests/359
+# and tests/360 against the mutant; one mutation per clause.
+MUTATIONS["frontier_native_unlocked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_frontier_native reads the parent by a name rendered before the read waits for ACCESS SHARE behind a holder of "
+    "ACCESS EXCLUSIVE, with no lock by oid first, so a schema swapped during the wait makes a namesake's maximum the "
+    "frontier (obtain's, extend_to's, progress's, and an id grid's retention horizon). One clause, the lock. tests/359 "
+    "part A catches it.",
+    [("  perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'reading the write frontier');\n", "", 1)],
+)
+MUTATIONS["create_partition_parent_unlocked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_create_partition does not lock the parent by oid before its CREATE TABLE ... PARTITION OF, so the CREATE waits "
+    "for ACCESS EXCLUSIVE by the parent's name and, after a schema swap during the wait, reaches the namesake parent "
+    "(its effect check then refuses the tick, and the managed table goes without the partition). One clause, the "
+    "lock. tests/359 part B catches it.",
+    [("  perform pgpm._lock_oid_or_raise(v_parent, 'access exclusive', true, 'obtain, creating a partition,');\n", "", 1)],
+)
+MUTATIONS["detach_reap_finalize_unlocked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_detach_reap's FINALIZE takes no lock by oid first, so it waits for ACCESS EXCLUSIVE on the partition by name "
+    "and, after a schema swap during the wait, reaches the namesakes: the abandoned detach it identified is left "
+    "pending and fail_detach_reap logged. One clause, the locks. tests/359 part F catches it.",
+    [("      perform pgpm._lock_oid_or_raise(r.parent, 'share update exclusive', true, '_detach_reap');\n"
+      "      perform pgpm._lock_oid_or_raise(r.child_oid::regclass, 'access exclusive', true, '_detach_reap');\n", "", 1)],
+)
+MUTATIONS["own_like_parent_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_own_like_parent's ALTER TABLE ... OWNER is not checked by its effect on the child's oid, so a schema swapped "
+    "while it waits behind the child's readers hands the namesake table to the parent's owner. One clause, the "
+    "effect check. tests/360 part C catches it.",
+    [("    perform pgpm._effect_or_raise((select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_child) = v_owner,\n"
+      "                                  p_child, 'handing a new relation to its parent''s owner');\n", "", 1)],
+)
+MUTATIONS["scratch_mint_fn_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_scratch_mint_fn's ALTER FUNCTION ... OWNER is not checked by its effect on the function's oid, so a schema "
+    "swapped while it waits for the function's lock hands the namesake function to the parent's owner. One clause, "
+    "the effect check. tests/360 part D catches it.",
+    [("    perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = p_fn) = v_owner, p_fn,\n"
+      "                                  'handing a capture function to its parent''s owner');\n", "", 1)],
+)
+MUTATIONS["scratch_owner_follow_fn_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_scratch_owner_follow's function branch does not check its ALTER FUNCTION ... OWNER by the function's oid "
+    "(F9's hypothesis), so a schema swapped while it waits for the capture function's lock hands a namesake to the "
+    "new owner. One clause, the effect check. tests/360 part E catches it.",
+    [("      perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = r.oid) = v_want, r.oid,\n"
+      "                                    format('%s, handing a scratch function to %I,', p_what, v_want_n));\n", "", 1)],
+)
+MUTATIONS["capture_fn_create_or_replace"] = (
+    "bench/schema_swap_leftovers.sh",
+    "_regrain_capture_install mints the capture function with CREATE OR REPLACE again, under the name it found free "
+    "before its waits, so a function committed under that name during one (a namesake schema swapped in while the "
+    "previous delta's DROP waits) has its body replaced by pgpm's capture (#1357's residue). One clause, the "
+    "statement's verb. tests/360 part G catches it.",
+    [("  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$\n",
+      "  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$\n", 1)],
+)
+MUTATIONS["drop_fn_by_oid_unchecked"] = (
+    "bench/schema_swap_leftovers.sh",
+    "pgpm._drop_fn_by_oid does not ask whether the function's oid is gone after its DROP FUNCTION, the shape "
+    "_regrain_capture_install's and untransmute's drops had: the DROP waits for the function's lock and looks the "
+    "name up again, so a schema swapped during the wait drops the operator's function and leaves pgpm's. One "
+    "clause, the effect check. tests/360 part H catches it.",
+    [("  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what);\n", "", 1)],
+)
+
+# The class's static exhaustiveness check (scripts/check_by_name_after_wait.py). bench/by_name_after_wait_lint.sh
+# judges a mutant of the checker on its own fixtures; one mutation per recogniser clause.
+MUTATIONS["by_name_lint_lock_any_object"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker counts a lock by oid on ANY relation of the unit as covering a by-name statement, so a statement "
+    "on a relation nothing locked passes beside a lock on another. One clause, the object match.",
+    [("            if any(p < st['start'] and obj in cov for p, cov in locks):\n",
+      "            if any(p < st['start'] for p, cov in locks):\n", 1)],
+)
+MUTATIONS["by_name_lint_effect_anywhere_after"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker counts an effect check anywhere after a by-name statement as covering it, so an unchecked DROP "
+    "followed by another statement and that one's check passes. One clause, the bound at the next statement.",
+    [("        effect = any(st['end'] <= p < nxt for p in effects)\n",
+      "        effect = any(st['end'] <= p for p in effects)\n", 1)],
+)
+MUTATIONS["by_name_lint_pairs_unread"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker does not read a `%I.%I` pair as an object name, so a statement naming a schema and a name read "
+    "earlier passes unjudged. One clause, the pair recogniser.",
+    [("            if x[2] == 'I' and y[2] == 'I' and fmt[x[1]:y[0]] == '.' and x[0] not in in_pair:\n",
+      "            if False:\n", 1)],
+)
+MUTATIONS["by_name_lint_mark_in_literal"] = (
+    "bench/by_name_after_wait_lint.sh",
+    "The checker reads a `by-name-ok:` mark in a string literal as a reason, so a statement whose own text carries "
+    "the words passes unreviewed. One clause, the comment spans.",
+    [("    for a, b in coms:                       # a mark counts only in a comment, never in a literal\n",
+      "    for a, b in coms + [(x[0], x[1]) for x in lits if x[0] != 'body']:\n", 1)],
+)
+MUTATION_SRC.update({_m: "scripts/check_by_name_after_wait.py" for _m in (
+    "by_name_lint_lock_any_object", "by_name_lint_effect_anywhere_after", "by_name_lint_pairs_unread",
+    "by_name_lint_mark_in_literal")})
+
+
+# One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two
+# lines of an anchor. See main().
+_BY_NAME_MARKS = r"(?:[ \t]*-- by-name-ok:[^\n]*\n(?:[ \t]*--   [^\n]*\n)*)*"
+
+
+def _mark_tolerant(find):
+    return re.compile(("\n" + _BY_NAME_MARKS).join(re.escape(p) for p in find.split("\n")))
+
+
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
         for name, e in late_survivors().items():
@@ -16700,6 +16981,13 @@ def main() -> int:
     for find, replace, expected in edits:
         is_re = hasattr(find, "sub")
         got = len(find.findall(text)) if is_re else text.count(find)
+        if got != expected and not is_re and "\n" in find:
+            # a `-- by-name-ok:` review mark (scripts/check_by_name_after_wait.py) is a comment between two lines of
+            # code, never code: an anchor written before a mark landed between its lines still names the same code
+            tolerant = _mark_tolerant(find)
+            if len(tolerant.findall(text)) == expected:
+                text = tolerant.sub(lambda _m, _r=replace: _r, text)
+                continue
         if got != expected:
             print(
                 f"mutate.py: {name}: pattern matched {got} time(s), expected {expected}.\n"

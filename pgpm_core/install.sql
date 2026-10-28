@@ -176,8 +176,12 @@ begin
              join pg_proc p on p.oid = u.fn
              join pgpm._surface_shapes() s on to_regprocedure(s.sig) = u.fn loop
     if r.granted and r.kept is null then
+      -- by-name-ok: pgpm's own function in schema pgpm, at install: a namesake needs schema pgpm renamed aside, which
+      --   only its owner can do
       execute format('alter routine %s rename to %I', r.fn, '_surface_kept_' || r.proname);
     else
+      -- by-name-ok: pgpm's own function in schema pgpm, at install: a namesake needs schema pgpm renamed aside, which
+      --   only its owner can do
       execute format('drop function %s', r.fn);
     end if;
   end loop;
@@ -211,6 +215,8 @@ begin
     union
     select a.grantee from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a where p.oid = v_new
   loop
+    -- by-name-ok: pgpm's own function in schema pgpm, at install: a namesake needs schema pgpm renamed aside, which
+    --   only its owner can do
     execute format('revoke all on function %s from %s cascade', v_new,
                    case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end);
   end loop;
@@ -233,6 +239,8 @@ begin
       from g
      order by depth, g.grantee, g.privilege_type, g.grantor
   loop
+    -- by-name-ok: pgpm's own function in schema pgpm, at install: a namesake needs schema pgpm renamed aside, which
+    --   only its owner can do
     v_grant_q := format('grant %s on function %s to %s%s', r.privilege_type, v_new,
                         case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
                         case when r.is_grantable then ' with grant option' else '' end);
@@ -242,6 +250,8 @@ begin
       perform pgpm._acl_grant_as(r.grantor, v_grant_q);
     end if;
   end loop;
+  -- by-name-ok: pgpm's own function in schema pgpm, at install: a namesake needs schema pgpm renamed aside, which
+  --   only its owner can do
   execute format('drop routine %s', v_kept);
 end $$;
 
@@ -779,6 +789,8 @@ returns numeric language plpgsql stable as $$
 declare v_last bigint; v_called boolean;
 begin
   if p_seq is null then return null; end if;
+  -- by-name-ok: a read: the reseed clears every id in the table whatever this returns (_identity_reseed), so no row
+  --   moves
   execute format('select last_value, is_called from %s', p_seq::text) into v_last, v_called;
   return case when v_called
               then v_last::numeric + (select seqincrement from pg_sequence where seqrelid = p_seq)
@@ -2588,6 +2600,11 @@ begin
   -- retention's horizon on an id grid, maintain's regrain dispatch), rather than at each of them.
   perform pgpm._refuse_filtered_reads(p_parent, 'read the write frontier of',
     'the frontier, the largest value of the control column, would be the largest one those rows hold, and obtain, retention and regrain would place the grid by it');
+  -- The parent by oid first (the schema-swap class): the read waits for ACCESS SHARE behind any holder of ACCESS
+  -- EXCLUSIVE and resolves its name again once granted, so a schema renamed aside during that wait, with a namesake
+  -- schema and table committed in its place, was what it read: the namesake's maximum became the frontier, and an id
+  -- grid's retention horizon (frontier minus retain) moved with it. Locked by oid, the read waits for nothing of it.
+  perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'reading the write frontier');
   -- ORDER BY ... LIMIT 1 (not max()) so it works for uuid too; uses the index.
   -- Qualify with an alias so ORDER BY binds to the (typed) column, not the ::text projection.
   execute format('select t.%I::text from %s t order by t.%I desc limit 1',
@@ -2636,6 +2653,7 @@ $$;
 create or replace function pgpm._analyze(p_rel regclass)
 returns void language plpgsql as $$
 begin
+  -- by-name-ok: statistics only: a namesake reached is analyzed, and no row moves
   execute format('analyze %s', p_rel::text);
 end;
 $$;
@@ -2654,6 +2672,10 @@ begin
   select pg_get_userbyid(relowner) into v_owner from pg_class where oid = p_parent;
   if v_owner is distinct from (select pg_get_userbyid(relowner) from pg_class where oid = p_child) then
     execute format('alter table %s owner to %I', p_child::text, v_owner);
+    -- it waits for ACCESS EXCLUSIVE behind the child's readers (regrain's copy tick holds the copy in ROW EXCLUSIVE
+    -- only), and a schema renamed during that wait sent it to a namesake: the child, by oid, must be the owner's now
+    perform pgpm._effect_or_raise((select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_child) = v_owner,
+                                  p_child, 'handing a new relation to its parent''s owner');
   end if;
 end;
 $$;
@@ -2722,6 +2744,10 @@ begin
   select relowner into v_owner from pg_class where oid = p_parent;
   if v_owner is distinct from (select proowner from pg_proc where oid = p_fn) then
     execute format('alter function %s owner to %I', p_fn::text, pg_get_userbyid(v_owner));
+    -- ALTER FUNCTION ... OWNER waits for the function's lock behind any DDL on it and looks the name up again once
+    -- granted, so a schema swapped meanwhile handed a namesake function to the owner: by oid, it must be p_fn
+    perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = p_fn) = v_owner, p_fn,
+                                  'handing a capture function to its parent''s owner');
   end if;
 end;
 $$;
@@ -2782,11 +2808,15 @@ begin
   if v_reach then
     if not exists (select 1 from pg_proc p where p.oid = p_fn and p.prosecdef
                       and p.proconfig = array['search_path=pg_catalog, pg_temp']) then
+      -- by-name-ok: ALTER FUNCTION ... SECURITY and SET take no lock (measured), so nothing waits between the oid's
+      --   rendering and the lookup
       execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);
       v_did := true;
     end if;
   elsif not v_reach then
     if exists (select 1 from pg_proc p where p.oid = p_fn and (p.prosecdef or p.proconfig is not null)) then
+      -- by-name-ok: ALTER FUNCTION ... SECURITY and SET take no lock (measured), so nothing waits between the oid's
+      --   rendering and the lookup
       execute format('alter function %s security invoker reset search_path', p_fn::text);
       v_did := true;
     end if;
@@ -2878,11 +2908,14 @@ begin
       if not pg_has_role(current_user, r.relowner, 'USAGE') then v_stuck := v_stuck || r.relowner; end if;
     end;
   end loop;
-  for r in select p.proowner, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args
+  for r in select p.oid, p.proowner, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args
              from pg_proc p join pg_namespace n on n.oid = p.pronamespace
             where p.oid = any(v_objs.fns) and p.proowner <> v_want order by p.oid loop
     begin
       execute format('alter function %I.%I(%s) owner to %I', r.nspname, r.proname, r.args, v_want_n);
+      -- as the relation's above: it waits for the function's lock and looks the name up again, so by oid
+      perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = r.oid) = v_want, r.oid,
+                                    format('%s, handing a scratch function to %I,', p_what, v_want_n));
     exception when insufficient_privilege then
       if not pg_has_role(current_user, r.proowner, 'USAGE') then v_stuck := v_stuck || r.proowner; end if;
     end;
@@ -3012,8 +3045,12 @@ begin
                                  where i.indrelid = p_child and i.indisreplident and ci.relname = v_idx) then
       return;
     end if;
+    -- by-name-ok: every caller holds ACCESS EXCLUSIVE on p_child (created in this transaction by _create_partition,
+    --   or the swap's copy, locked by oid for its attach), so this waits for nothing of it
     execute format('alter table %s replica identity using index %I', p_child::text, v_idx);
   elsif v_want is distinct from v_have then
+    -- by-name-ok: every caller holds ACCESS EXCLUSIVE on p_child (created in this transaction by _create_partition,
+    --   or the swap's copy, locked by oid for its attach), so this waits for nothing of it
     execute format('alter table %s replica identity %s', p_child::text,
                    case v_want when 'f' then 'full' when 'n' then 'nothing' else 'default' end);
   end if;
@@ -3031,26 +3068,35 @@ create or replace function pgpm._create_partition(
   p_cfg pgpm.config, p_nsp name, p_rel name, p_default regclass, p_name name, p_lo text, p_hi text
 )
 returns void language plpgsql as $$
-declare v_lo_lit text; v_hi_lit text;
+declare v_lo_lit text; v_hi_lit text; v_parent regclass := p_cfg.parent_table; v_cnsp name; v_child regclass;
 begin
   v_lo_lit := pgpm._encode(p_cfg.control_kind, p_lo,
                             p_cfg.text_time_prefix, p_cfg.text_time_width, p_cfg.text_time_radix, p_cfg.text_time_unit, p_cfg.text_time_alphabet, p_cfg.text_time_discard_bits, p_cfg.text_time_epoch, p_cfg.partition_tz);
   v_hi_lit := pgpm._encode(p_cfg.control_kind, p_hi,
                             p_cfg.text_time_prefix, p_cfg.text_time_width, p_cfg.text_time_radix, p_cfg.text_time_unit, p_cfg.text_time_alphabet, p_cfg.text_time_discard_bits, p_cfg.text_time_epoch, p_cfg.partition_tz);
-  execute format('create table %I.%I partition of %I.%I for values from (%L) to (%L)',
-                 p_nsp, p_name, p_nsp, p_rel, v_lo_lit, v_hi_lit);
-  perform pgpm._own_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,
-                                format('%I.%I', p_nsp, p_name)::regclass);
-  perform pgpm._acl_reset(format('%I.%I', p_nsp, p_name)::regclass, true);   -- #875: the owner's alone
-  perform pgpm._replica_identity_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,
-                                             format('%I.%I', p_nsp, p_name)::regclass);   -- #782
+  -- The parent by oid first, in the CREATE's own mode (the schema-swap class). CREATE TABLE ... PARTITION OF waits
+  -- for ACCESS EXCLUSIVE on the parent behind any reader and resolves both names again once granted, so a schema
+  -- renamed aside during that wait, with a namesake schema and partitioned table committed in its place, got the new
+  -- partition: the operator's table took a range of pgpm's, and the tick then failed on its own lookups by name or,
+  -- with a table of the new partition's name in the namesake schema too, re-owned and recorded that table. Locked by
+  -- oid, the parent's schema is read under the lock, and the partition is made beside it there (p_nsp and p_rel are
+  -- the caller's reading, before any wait).
+  perform pgpm._lock_oid_or_raise(v_parent, 'access exclusive', true, 'obtain, creating a partition,');
+  select n.nspname into v_cnsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_parent;
+  execute format('create table %I.%I partition of %s for values from (%L) to (%L)',
+                 v_cnsp, p_name, v_parent::text, v_lo_lit, v_hi_lit);
+  v_child := format('%I.%I', v_cnsp, p_name)::regclass;
+  perform pgpm._effect_or_raise(exists (select 1 from pg_inherits i where i.inhrelid = v_child and i.inhparent = v_parent),
+                                v_parent, 'obtain, creating a partition,');
+  perform pgpm._own_like_parent(v_parent, v_child);
+  perform pgpm._acl_reset(v_child, true);   -- #875: the owner's alone
+  perform pgpm._replica_identity_like_parent(v_parent, v_child);   -- #782
   -- child_oid: WHICH relation this row is about (#421), recorded in the same statement that first
-  -- names it, resolved from the CREATE TABLE two lines up rather than trusted from anywhere else.
+  -- names it, resolved from the CREATE TABLE above rather than trusted from anywhere else.
   insert into pgpm.part (parent_table, child_name, lo, hi, child_oid)
-    values (format('%I.%I', p_nsp, p_rel)::regclass, p_name, p_lo, p_hi,
-            format('%I.%I', p_nsp, p_name)::regclass::oid) on conflict do nothing;
+    values (v_parent, p_name, p_lo, p_hi, v_child::oid) on conflict do nothing;
   insert into pgpm.log (parent_table, action, lo, hi, method)
-    values (format('%I.%I', p_nsp, p_rel)::regclass, 'obtain', p_lo, p_hi, 'plain');
+    values (v_parent, 'obtain', p_lo, p_hi, 'plain');
 end;
 $$;
 
@@ -3573,6 +3619,8 @@ begin
     -- #873: read from the referencing table as the caller, under ITS row-level security.
     perform pgpm._refuse_filtered_reads(r.referencing, 'read the rows referencing a retiring partition from',
       'retention would honour the declared ON DELETE for those rows alone, and the detach would then be refused by the others');
+    -- by-name-ok: a read: its keys select rows of the retiring partition's own range [lo, hi), which the retirement
+    --   removes anyway; a key it misses refuses the detach (the FK), retried
     execute format(
       'select coalesce(array_agg(distinct %s), ''{}''::text[]) from %s where %s >= %L and %s < %L',
       v_refval_q, r.referencing::text, v_refcmp_q, v_lo_lit, v_refcmp_q, v_hi_lit)
@@ -3600,6 +3648,9 @@ drop function if exists pgpm._idle_detach_job();
 -- the relation, well before either call site.
 create or replace function pgpm._detach_cmd(p_parent regclass, p_child_nsp name, p_child_rel name)
 returns text language sql stable as $$
+  -- by-name-ok: not closable by these levers (#407): pg_cron runs this text later in its own session, and DETACH
+  --   CONCURRENTLY refuses a transaction block, so nothing can lock first or check after; retiring_oid lets retire()
+  --   refuse at its next decision points
   select format('alter table %I.%I detach partition %I.%I concurrently',
                 n.nspname, c.relname, p_child_nsp, p_child_rel)
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -3876,6 +3927,7 @@ begin
     v_reached := null; v_unjudged := sqlerrm;
   end;
   begin
+    -- by-name-ok: a remedy text a log row carries; nothing runs it
     v_attach := format('alter table %s attach partition %s for values from (%L) to (%L);', v_parent_q, v_rel_q,
       pgpm._encode(cfg.control_kind, v_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
       pgpm._encode(cfg.control_kind, v_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
@@ -4076,6 +4128,8 @@ begin
       if not found then return false; end if;
     end if;
     begin
+      -- by-name-ok: this IS the lock by oid: pg_locks is asked for p_rel just below, and the name read again under
+      --   the lock
       execute format('lock table %s %s in %s mode', case when p_only then 'only' else '' end, v_name_q, p_mode);
     exception when undefined_table or invalid_schema_name or wrong_object_type then
       null;   -- the name denotes nothing LOCK can take now: no lock on p_rel, answered just below
@@ -4140,18 +4194,25 @@ end;
 $$;
 
 -- TRUNCATE p_rel: its relfilenode must have changed (#1335 b10, round 3). A relation created or rewritten in the
--- current subtransaction is truncated in place and keeps its relfilenode (regrain() prepares and swaps in one
--- transaction); it is accepted then only empty and only if this transaction wrote its pg_class row, which also means
--- this transaction has held ACCESS EXCLUSIVE on it since, so the TRUNCATE never waited for it.
+-- current transaction is truncated in place and keeps its relfilenode (regrain() prepares and swaps in one
+-- transaction; two regrain_cancel calls in one truncate the delta twice); it is accepted then only empty and only
+-- if this transaction already held ACCESS EXCLUSIVE on p_rel's oid before the TRUNCATE (its CREATE, or its earlier
+-- TRUNCATE or rewrite, took it, and it is held to the end), so the TRUNCATE waited for nothing of it and reached it.
+-- Not "this transaction wrote its pg_class row" (#1358): a GRANT or an owner change writes that one too, and a
+-- never-written delta (no page to empty) under the swap's grant to a new writer passed while the TRUNCATE, waiting
+-- behind a reader, emptied a namesake.
 create or replace function pgpm._truncate_checked(p_rel regclass, p_what text)
 returns void language plpgsql as $$
-declare v_rfn oid := (select c.relfilenode from pg_class c where c.oid = p_rel);
+declare
+  v_rfn oid := (select c.relfilenode from pg_class c where c.oid = p_rel);
+  v_held boolean := exists (select 1 from pg_catalog.pg_locks l
+                             where l.locktype = 'relation' and l.relation = p_rel::oid and l.pid = pg_backend_pid()
+                               and l.granted and l.mode = 'AccessExclusiveLock'
+                               and l.database = (select d.oid from pg_database d where d.datname = current_database()));
 begin
   execute format('truncate %s', p_rel::text);
   perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn
-    or (pg_relation_size(p_rel) = 0
-        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)
-                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),
+    or (pg_relation_size(p_rel) = 0 and v_held),
     p_rel, p_what);
 end;
 $$;
@@ -4168,6 +4229,20 @@ begin
     raise exception 'pg_partition_magician: % could not take its lock on % (oid %): renamed each time the call locked it by name; refusing to drop it by a name that may denote another relation. Re-run it',
       p_what, p_rel, p_rel::oid;
   end if;
+end;
+$$;
+
+-- DROP FUNCTION of a function pgpm identified by oid (a capture function): rendered from the oid, and the oid must be
+-- gone after. A function cannot be LOCKed, and DROP FUNCTION waits for the function's lock behind any DDL on it and
+-- looks the name up again once granted, so a schema renamed aside during that wait, with a namesake schema and
+-- function committed in its place, made it drop the operator's function and leave pgpm's. Refused, rolled back with
+-- the caller. A function gone already is what the caller wanted.
+create or replace function pgpm._drop_fn_by_oid(p_fn oid, p_what text)
+returns void language plpgsql as $$
+begin
+  if not exists (select 1 from pg_proc p where p.oid = p_fn) then return; end if;
+  execute format('drop function %s', p_fn::regprocedure::text);
+  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what);
 end;
 $$;
 
@@ -4814,6 +4889,8 @@ begin
     end if;
     perform pgpm._idle_detach_job(v_cmd_q);
     begin
+      -- by-name-ok: checked by its effect just below (v_now must be attached to p_parent), raised in a handler that
+      --   rolls the attach back
       execute format('alter table %s attach partition %I.%I for values from (%L) to (%L)',   -- part-row-by-name: v_now's name, judged by its effect just below (#1335 b10)
                      p_parent::text, v_nsp, r.child_name,
                      pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
@@ -4830,6 +4907,8 @@ begin
          where c.conrelid = v_now and c.contype = 'c' and c.conislocal and c.coninhcount = 0
            and pg_get_constraintdef(c.oid) = format('CHECK (%s)', pg_get_partition_constraintdef(v_now))
       loop
+        -- by-name-ok: the ATTACH above holds ACCESS EXCLUSIVE on v_now, checked to be what it attached, so this waits
+        --   for nothing of it
         execute format('alter table %s drop constraint %I', v_now, v_check);
       end loop;
       update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
@@ -5022,6 +5101,7 @@ begin
     end if;
     return;
   end if;
+  -- by-name-ok: checked by its effect after the ENABLE below (pgpm_write_block on v_child, by oid, ENABLE ALWAYS)
   execute format(
     'create trigger pgpm_write_block before insert or update or delete on %I.%I'   -- part-row-by-name: v_child's name, judged by its effect below
     || ' for each row execute function pgpm._write_block_raise()', v_nsp, p_child);
@@ -5061,6 +5141,8 @@ returns void language plpgsql as $$
 declare v_nsp name;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
+  -- by-name-ok: a namesake loses only a trigger named pgpm_write_block, and the partition keeps its block (read-only
+  --   longer, the safe side); retire()'s crossing DELETE is then refused by that block, and retried
   execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);   -- part-row-by-name: pgpm's own trigger off whatever holds the name, on purpose (above)
 end;
 $$;
@@ -5268,6 +5350,8 @@ begin
   if v_rel is null then
     raise exception 'relation "%.%" does not exist', pgpm._child_nsp(p_parent, p_child), p_child using errcode = '42P01';
   end if;
+  -- by-name-ok: a count a ledger row reports: a 0 over rows is caught by _discard_contradicted_coverage, which reads
+  --   the partition again under retire()'s lock by oid
   execute format('select count(*) from %s where %I >= %L and %I < %L',
                  v_rel, cfg.control_column, pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
                  cfg.control_column, pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
@@ -5298,6 +5382,7 @@ begin
   -- pgpm.archive_result's 2 fields) rather than assigning the whole value -- covered_hi would end
   -- up holding the composite's own text form and rows_archived would stay null. Calling it as a
   -- FROM-item expands its fields into real output columns first.
+  -- by-name-ok: a function call takes no lock, so nothing waits between the oid's rendering and the call's lookup
   execute format('select * from %s($1,$2,$3,$4)', (cfg.archive_fn::oid::regproc)::text)
     into v_result using p_parent, p_child, p_lo, p_hi;
   return v_result;
@@ -5693,6 +5778,8 @@ begin
   if pgpm._part_rel(p_parent, p_child) is null then   -- #1365: the row's relation, or the error a read of the name raised
     raise exception 'relation "%.%" does not exist', v_nsp, p_child using errcode = '42P01';
   end if;
+  -- by-name-ok: sizes the chunk only: the rows a chunk covers are [lo, hi) of the strategy's own read, so a namesake
+  --   read moves a boundary, never a row
   execute format(
     'select avg(pg_column_size(t.*))::numeric from (select * from %s t where t.%I >= %L order by t.%I limit %s) t',
     pgpm._part_rel(p_parent, p_child), cfg.control_column, pgpm._encode(cfg.control_kind, v_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), cfg.control_column, cfg.archive_probe_sample)
@@ -5727,6 +5814,8 @@ begin
   -- as aggregates both raised 42883 on every uuidv7 table with an archive_fn, every tick's archive step
   -- was logged as skip_archive, no ledger row was ever written and the aged partition was never
   -- retired (#507). Same reasoning, and the same shape, as _frontier_native's read of the frontier.
+  -- by-name-ok: sizes the chunk only: the rows a chunk covers are [lo, hi) of the strategy's own read, so a namesake
+  --   read moves a boundary, never a row
   execute format(
     'with w as (select t.%I as c, %s as c_text from %s t where t.%I >= %L order by t.%I limit %s)
      select (select count(*) from w), (select w.c_text from w order by w.c desc limit 1)',
@@ -5740,6 +5829,8 @@ begin
     v_probe_hi := pgpm._col_to_native(cfg, v_probe_hi_col);
     -- extend to the next distinct value past the boundary, so hi never splits a run of ties (a
     -- child's own CHECK bounds every row here to < v_child_hi already, so this can never overshoot it)
+    -- by-name-ok: sizes the chunk only: the rows a chunk covers are [lo, hi) of the strategy's own read, so a
+    --   namesake read moves a boundary, never a row
     execute format('select %s from %s t where t.%I > %L order by t.%I asc limit 1',
                    v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column, v_probe_hi_col, cfg.control_column)
       into v_next_distinct_col;
@@ -5767,6 +5858,8 @@ begin
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
+      -- by-name-ok: sizes the chunk only: the rows a chunk covers are [lo, hi) of the strategy's own read, so a
+      --   namesake read moves a boundary, never a row
       execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',
                      v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
@@ -5870,6 +5963,8 @@ begin
             where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
               and (l.child_oid is null or l.child_oid = v_rel) and l.rows_archived = 0
   loop
+    -- by-name-ok: its one caller, retire(), holds SHARE UPDATE EXCLUSIVE on this partition by oid under this name
+    --   (_lock_oid's vouched form), so this waits for nothing of it
     execute format('select exists (select 1 from %s where %I >= %L and %I < %L)',
                    v_rel::regclass, cfg.control_column, pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
                    cfg.control_column, pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
@@ -6235,10 +6330,12 @@ declare cfg pgpm.config;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
+  -- by-name-ok: a remedy text a skip_archive row carries; nothing runs it
   return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)', p_parent, p_nsp, p_child,   -- part-row-by-name: remedy text the operator types, runs nothing
     pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
     pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
 exception when others then
+  -- by-name-ok: a remedy text a skip_archive row carries; nothing runs it
   return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM ... TO ..., its bounds [%s, %s) as the column''s values (they could not be encoded here: %s)',   -- part-row-by-name: the same
                 p_parent, p_nsp, p_child, p_lo, p_hi, sqlerrm);
 end;
@@ -6708,6 +6805,7 @@ begin
        or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)
     then continue; end if;
     v_fn := to_regprocedure(format('%I.%I()', v_nsp, left(v_rel || '_pgpm_regrain_capture', 63)::name));
+    -- by-name-ok: a string compared with a function's source; nothing runs it
     if v_fn is null   -- #969: the proof that pgpm minted the pair
        or not exists (select 1 from pg_proc p
                        where p.oid = v_fn and p.prorettype = 'trigger'::regtype
@@ -6759,8 +6857,12 @@ begin
   if exists (select 1 from pg_trigger where tgrelid = p_child and tgname = 'pgpm_regrain_truncate_guard') then
     return false;
   end if;
+  -- by-name-ok: self-refusing (#1353, measured): the ENABLE below renders the relation from its oid again, so a
+  --   CREATE that reached a namesake leaves it no trigger to enable (42704) and the tick rolls back
   execute format('create trigger pgpm_regrain_truncate_guard before truncate on %s for each statement execute function pgpm._regrain_truncate_guard()',
                  p_child::text);
+  -- by-name-ok: the CREATE TRIGGER above took SHARE ROW EXCLUSIVE on the relation, so this waits for nothing of it;
+  --   had that CREATE reached a namesake, this finds no trigger (42704) and the tick rolls back
   execute format('alter table %s enable always trigger pgpm_regrain_truncate_guard', p_child::text);
   return true;
 end;
@@ -6806,6 +6908,7 @@ begin
                         where d.oid = p_delta and d.relacl is not null
                           and b.grantee = g.grantee and b.privilege_type = 'INSERT')
   loop
+    -- by-name-ok: GRANT and REVOKE take no relation lock, so nothing waits between the oid's rendering and the lookup
     execute format('grant insert on %s to %s', p_delta::text,
                    case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end);
   end loop;
@@ -6851,7 +6954,9 @@ begin
     v_n := v_n + 1;
     v_seq := 'pgpm_seq_' || v_n;
   end loop;
+  -- by-name-ok: on a delta its caller created in this transaction, which holds ACCESS EXCLUSIVE on it
   execute format('alter table %s add column %I bigint generated always as identity', p_delta::text, v_seq);
+  -- by-name-ok: on a delta its caller created in this transaction, which holds ACCESS EXCLUSIVE on it
   execute format('create index on %s (%I)', p_delta::text, v_seq);
   return v_seq;
 end;
@@ -6878,6 +6983,7 @@ declare
   v_keyidx oid; v_keycols_q text; v_newvals_q text; v_oldvals_q text; v_bad_q text;
   v_src regclass;   -- the source, as pgpm.part recorded it (#768), never <parent's schema>.<name>
   v_nkeys int; v_oldargs text; v_newargs text;   -- #1051: the capture's insert by the record, its bind parameters
+  v_fn_reg regprocedure;   -- the capture function the CREATE below made, by oid
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -6951,13 +7057,16 @@ begin
   -- from under it. Dropping it takes ACCESS EXCLUSIVE on the source, so every writer in flight there commits
   -- first, through the old trigger, and every writer after this tick fires the new one. At a first prepare
   -- the source carries none, and the lock is the one CREATE TRIGGER below takes anyway.
+  -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; a source that keeps a previous capture
+  --   trigger makes the drop of the function it fires (_drop_fn_by_oid, next) fail 2BP01, and the tick rolls back
   execute format('drop trigger if exists pgpm_regrain_capture on %s', v_src::text);
-  if exists (select 1 from pg_proc where oid = cfg.regrain_capture_fn_oid) then
-    execute format('drop function %s', cfg.regrain_capture_fn_oid::regprocedure::text);
-  end if;
+  perform pgpm._drop_fn_by_oid(cfg.regrain_capture_fn_oid,
+                               format('regrain_step(%s), dropping the previous capture function,', p_parent));
   if exists (select 1 from pg_class where oid = cfg.regrain_delta_oid) then
     perform pgpm._drop_by_oid(cfg.regrain_delta_oid::regclass, format('regrain_step(%s), dropping the previous delta,', p_parent));   -- #1335 b10
   end if;
+  -- by-name-ok: moves no row: a namesake parent only shapes the delta's key columns, which _regrain_capture_drift
+  --   compares by name and type next tick and re-mints (#1400); the delta is recorded by oid below
   execute format('create table %I.%I as select %s from %s with no data', v_nsp, v_delta, v_keycols_q, p_parent::text);
   -- monotonic ordering column so a reconcile pass can batch the oldest captures first: a batch is the
   -- first N eligible rows by pgpm_seq that ONE snapshot can see, and the pass consumes exactly those rows
@@ -7002,7 +7111,13 @@ begin
   -- dynamic, the key values bound. A delta that is gone refuses the write as 42P01, as the static insert
   -- did, naming the parent and the remedy (the next tick restarts the run and re-mints capture:
   -- _regrain_capture_drift), rather than as a syntax error at the bare oid.
-  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+  -- CREATE, not CREATE OR REPLACE (the schema-swap class, #1357's residue): the name was found free (v_taken_fn) and
+  -- the recorded function dropped before the waits above (the trigger's, the drops', the delta's CREATE behind the
+  -- parent's holders), so a function under the name now was committed by another session during one of them, and
+  -- CREATE OR REPLACE replaced its body with this one. A plain CREATE refuses it (42723), rolling the tick back.
+  -- by-name-ok: self-refusing: a plain CREATE fails (42723) on any function under the name, so nothing of another
+  --   role's is replaced; the function made is recorded by its oid below
+  execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
     declare
       d regclass;
       n text;
@@ -7063,10 +7178,14 @@ begin
     format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
     format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
 
+  -- the function that CREATE made, by its oid: nothing has waited since it
+  v_fn_reg := format('%I.%I()', v_nsp, v_fn)::regprocedure;
   -- #950: owned like the parent too, so the role that owns the parent when the next regrain re-mints capture can
   -- drop it (it used to stay the role's that ran this tick).
   perform pgpm._scratch_mint_fn(p_parent, format('%I.%I()', v_nsp, v_fn)::regprocedure);
   perform pgpm._capture_definer(format('%I.%I()', v_nsp, v_fn)::regprocedure, v_delta_reg);   -- #1073
+  -- by-name-ok: checked by its effect after the ENABLE below: the trigger on v_src, by oid, must fire the function
+  --   this tick made (v_fn_reg), whatever the names led to while the CREATE waited
   execute format('create trigger pgpm_regrain_capture after insert or update or delete on %s for each row execute function %I.%I()',
                  v_src::text, v_nsp, v_fn);
   -- ENABLE ALWAYS (#450). CREATE TRIGGER leaves a trigger origin-only, which a session running as
@@ -7077,18 +7196,31 @@ begin
   -- gets it without a repair step; one already in flight with an origin-only trigger is restarted, and its
   -- capture re-minted here, by the first tick that resumes it (#892, _regrain_capture_unarmed).
   execute format('alter table %s enable always trigger pgpm_regrain_capture', v_src::text);
+  -- the schema-swap class: CREATE TRIGGER waits for SHARE ROW EXCLUSIVE on the source behind its writers (when nothing
+  -- holds the source yet: a re-mint whose previous trigger is gone) and looks the function up by name after that
+  -- wait, so a schema swapped meanwhile hung the source's capture on a namesake function of the derived name, and the
+  -- record below named that function too. The trigger on the source, by oid, must fire the function made above.
+  perform pgpm._effect_or_raise(exists (select 1 from pg_trigger t where t.tgrelid = v_src and t.tgname = 'pgpm_regrain_capture'
+                                                 and t.tgfoid = v_fn_reg and t.tgenabled = 'A'),
+                                v_src, format('regrain_step(%s), creating the capture trigger,', p_parent));
   -- #449: TRUNCATE fires no row trigger, so it is refused for as long as the row trigger is up (see
   -- _regrain_truncate_guard). Same lock, same tick, torn down wherever the row trigger is.
+  -- by-name-ok: a namesake loses only a trigger named pgpm_regrain_truncate_guard; the CREATE below renders v_src
+  --   from its oid after this wait and reaches the source
   execute format('drop trigger if exists pgpm_regrain_truncate_guard on %s', v_src::text);
+  -- by-name-ok: self-refusing (#1353, measured): the ENABLE below renders the relation from its oid again, so a
+  --   CREATE that reached a namesake leaves it no trigger to enable (42704) and the tick rolls back
   execute format('create trigger pgpm_regrain_truncate_guard before truncate on %s for each statement execute function pgpm._regrain_truncate_guard()',
                  v_src::text);
+  -- by-name-ok: the CREATE TRIGGER above took SHARE ROW EXCLUSIVE on the relation, so this waits for nothing of it;
+  --   had that CREATE reached a namesake, this finds no trigger (42704) and the tick rolls back
   execute format('alter table %s enable always trigger pgpm_regrain_truncate_guard', v_src::text);
   -- Record what was minted, by oid (#496): every reader resolves the delta and the function through
   -- pgpm.config from here on, so a rename of the parent mid-regrain changes what _regrain_capture_derive
   -- would say and nothing else.
   update pgpm.config
      set regrain_delta_oid      = v_delta_reg::oid,
-         regrain_capture_fn_oid = format('%I.%I()', v_nsp, v_fn)::regprocedure::oid
+         regrain_capture_fn_oid = v_fn_reg::oid
    where parent_table = p_parent;
 end;
 $$;
@@ -7157,6 +7289,8 @@ declare v_nsp name; v_delta name; v_n bigint;
 begin
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
   if v_delta is null then return 0; end if;   -- #955: nothing recorded, nothing to count
+  -- by-name-ok: a count: the swap tick reads it under the reconcile's lock on the delta by oid (#1400), and status()
+  --   and progress() only report it
   execute format('select count(*) from %I.%I', v_nsp, v_delta) into v_n;
   return v_n;
 end;
@@ -7175,6 +7309,8 @@ begin
   cfg := pgpm._control_followed(cfg);
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
   if v_delta is null then return 0; end if;   -- #955: nothing recorded, nothing to count
+  -- by-name-ok: a count: the swap tick reads it under the reconcile's lock on the delta by oid (#1400), and status()
+  --   and progress() only report it
   execute format('select count(*) from %I.%I where %3$s >= %4$L and %3$s < %5$L',
                  v_nsp, v_delta, quote_ident(cfg.control_column),
                  pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
@@ -7267,11 +7403,20 @@ declare
   v_kshaped text;         -- does a delta row's key decode: _text_time_shaped of it, or true (#709)
   v_kfloor text;          -- a delta row's sub-range lo on the target grid, null when its key does not decode
   v_unshaped boolean := false;   -- the batch holds a key that does not decode (#709)
+  v_dreg regclass;        -- the delta, by its oid (#1358)
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);
   if v_delta is null then return 0; end if;   -- #955: nothing recorded, nothing to reconcile
+  -- #1358: the delta locked by oid first, in the mode its consuming DELETE takes, and named by v_dreg rendered at each
+  -- statement below: names read before a wait (this lock's, the ANALYZE's, a copy's) led every statement to a
+  -- namesake delta a schema swap put in its place, whose rows the tick consumed. The tick's later reads of the delta
+  -- (the swap gate's counts, the purge) then wait for nothing of it either.
+  v_dreg := format('%I.%I', v_dnsp, v_delta)::regclass;
+  perform pgpm._lock_oid_or_raise(v_dreg, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));
+  select n.nspname, c.relname into v_dnsp, v_delta
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_dreg;
   v_src := pgpm._regrain_child_rel(p_parent, p_child);
   if v_src is null then
     raise exception 'pg_partition_magician: internal error reconciling % -- the source pgpm.part records for % no longer exists, so its captured changes cannot be reread from it; refusing rather than discarding them.',
@@ -7384,14 +7529,14 @@ begin
   -- in the set. A row not in the set, whatever pgpm_seq it carries, is neither applied nor consumed, and
   -- waits for the tick that judges it eligible.
   -- The ordering column is the delta's identity column, under whatever name the mint gave it (#1074).
-  execute format('select array_agg(%1$I), array_agg(ctid) from (select %1$I, ctid from %2$I.%3$I where %4$s order by %1$I limit %5$s) t',
-                 v_seq, v_dnsp, v_delta, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
+  execute format('select array_agg(%1$I), array_agg(ctid) from (select %1$I, ctid from %2$s where %3$s order by %1$I limit %4$s) t',
+                 v_seq, v_dreg::text, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
   if v_seqs is null then return 0; end if;
   v_seq_q := quote_ident(v_seq);
   v_batch := format('k.%s = any($1) and k.ctid = any($2)', v_seq_q);
 
   -- one pair of set-based statements per distinct fine child touched, not per key
-  for r in execute format('select distinct %s as sub_lo from %I.%I k where %s', v_kfloor, v_dnsp, v_delta, v_batch)
+  for r in execute format('select distinct %s as sub_lo from %s k where %s', v_kfloor, v_dreg::text, v_batch)
     using v_seqs, v_rows
   loop
     if r.sub_lo is null then v_unshaped := true; continue; end if;   -- #709: placed by its encoded value, below
@@ -7445,12 +7590,12 @@ begin
     perform pgpm._lock_oid_or_raise(v_sub_rel, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));
     perform pgpm._lock_oid_or_raise(v_src, 'access share', true, format('the regrain reconcile of %s', p_parent));
     execute format(
-      'delete from %s d where %s in (select %s from %I.%I k where %s and %s = %L)',
-      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kfloor, r.sub_lo)
+      'delete from %s d where %s in (select %s from %s k where %s and %s = %L)',
+      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dreg::text, v_batch, v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
     execute format(
-      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and %s = %L)',
-      v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
+      'insert into %s (%s) select %s from %s s where %s in (select %s from %s k where %s and %s = %L)',
+      v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dreg::text, v_batch,
       v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
   end loop;
@@ -7473,16 +7618,16 @@ begin
                                       pgpm._encode($5, lo, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as lo_lit,
                                       pgpm._encode($5, hi, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as hi_lit
                                  from f where not pgpm._native_gt($5, $6, lo) and not pgpm._native_gt($5, hi, $7)),
-            u as (select k.%9$I as c from %10$I.%11$I k where %12$s and not %13$s)
+            u as (select k.%9$I as c from %10$s k where %11$s and not %12$s)
        select distinct m.child_name, m.lo_lit, m.hi_lit,
               case when m.child_name is null
-                   then coalesce((select g.hi from g where g.hi_lit <= u.c order by g.hi::%14$s desc limit 1), $6) end as gap_lo,
+                   then coalesce((select g.hi from g where g.hi_lit <= u.c order by g.hi::%13$s desc limit 1), $6) end as gap_lo,
               case when m.child_name is null
-                   then coalesce((select g.lo from g where g.lo_lit > u.c order by g.lo::%14$s limit 1), $8) end as gap_hi
+                   then coalesce((select g.lo from g where g.lo_lit > u.c order by g.lo::%13$s limit 1), $8) end as gap_hi
          from u left join g m on u.c >= m.lo_lit and u.c < m.hi_lit',
       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
       cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz,
-      cfg.control_column, v_dnsp, v_delta, v_batch, v_kshaped, v_ncast)
+      cfg.control_column, v_dreg::text, v_batch, v_kshaped, v_ncast)
       using v_seqs, v_rows, p_parent, p_child, cfg.control_kind, p_lo, p_hi, p_cursor
     loop
       if r.child_name is null then
@@ -7501,13 +7646,13 @@ begin
       perform pgpm._lock_oid_or_raise(v_sub_rel, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));
       perform pgpm._lock_oid_or_raise(v_src, 'access share', true, format('the regrain reconcile of %s', p_parent));
       execute format(
-        'delete from %s d where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
-        v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        'delete from %s d where %s in (select %s from %s k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_dkey_q, v_keycols_q, v_dreg::text, v_batch, v_kshaped,
         v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
         using v_seqs, v_rows;
       execute format(
-        'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
-        v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        'insert into %s (%s) select %s from %s s where %s in (select %s from %s k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dreg::text, v_batch, v_kshaped,
         v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
         using v_seqs, v_rows;
     end loop;
@@ -7515,7 +7660,7 @@ begin
 
   -- consume exactly the rows the statements above addressed: by identity, never by watermark (#497) and
   -- never by pgpm_seq alone (#1070)
-  execute format('delete from %I.%I k where %s', v_dnsp, v_delta, v_batch) using v_seqs, v_rows;
+  execute format('delete from %s k where %s', v_dreg::text, v_batch) using v_seqs, v_rows;
   get diagnostics v_n = row_count;
   if v_n > 0 then
     insert into pgpm.log (parent_table, action, lo, hi, rows)
@@ -7590,7 +7735,11 @@ begin
             and not pgpm._native_gt(cfg.control_kind, cfg.regrain_cursor, r.hi);      -- cursor <= hi
       if not v_keep then
         v_rel := pgpm._regrain_child_rel(p_parent, r.child_name);   -- #768: the relation that carries it
+        -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; the source keeps its capture until the
+        --   next drop or janitor tick, and no row moves (#1400)
         execute format('drop trigger if exists pgpm_regrain_capture on %s', v_rel::text);
+        -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; the source keeps its capture until the
+        --   next drop or janitor tick, and no row moves (#1400)
         execute format('drop trigger if exists pgpm_regrain_truncate_guard on %s', v_rel::text);   -- #449
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'regrain_capture_orphan', r.lo, r.hi, r.child_name);
@@ -7648,14 +7797,23 @@ $$;
 -- which makes one only to ask whether a copy made now would match the parent, and drops it. The two must make
 -- the same shape for that question to mean anything, so neither makes its own. p_spc_q is the tablespace
 -- clause, already quoted.
+-- Returns the copy BY OID (#1358), and names it by that oid in every statement after the CREATE. The CREATE can wait
+-- (the LIKE's lock on the parent) and an outgoing key's ADD below waits for its referenced table, and a schema renamed
+-- during such a wait sent every later statement that named the copy, and the caller's mint, bound CHECK, pgpm.part
+-- anchor and first batch, to a namesake of the copy. Found in the schema p_nsp named just before the CREATE, by that
+-- schema's oid: a CREATE that went to another schema is refused.
+drop function if exists pgpm._regrain_copy_make(regclass, name, name, text);
 create or replace function pgpm._regrain_copy_make(p_parent regclass, p_nsp name, p_name name, p_spc_q text)
-returns void language plpgsql as $$
-declare r record; v_nsp name; v_rel name;
+returns regclass language plpgsql as $$
+declare r record; v_nsp name; v_rel name; v_made_in oid; v_copy regclass;
 begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_made_in := (select n.oid from pg_namespace n where n.nspname = p_nsp);
   execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)%s',
                  p_nsp, p_name, v_nsp, v_rel, p_spc_q);
+  v_copy := (select c.oid from pg_class c where c.relnamespace = v_made_in and c.relname = p_name);
+  perform pgpm._effect_or_raise(v_copy is not null, p_parent, format('making the regrain copy %I.%I of %s', p_nsp, p_name, p_parent));
   -- #1261: LIKE gives the copy every CHECK of the parent as a VALIDATED one, a NOT VALID one included, and on
   -- PostgreSQL 18 a NOT VALID NOT NULL the same way. A NOT VALID constraint leaves the rows written before it in
   -- place, and the parent still serves them, so on the copy it refused the first such row: every copy batch of
@@ -7667,14 +7825,15 @@ begin
   for r in
     select c.conname
       from pg_constraint k
-      join pg_constraint c on c.conrelid = format('%I.%I', p_nsp, p_name)::regclass and c.contype = k.contype
+      join pg_constraint c on c.conrelid = v_copy and c.contype = k.contype
      where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
        and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
        and case when k.contype = 'c' then c.conname = k.conname
                 else (select a.attname from pg_attribute a where a.attrelid = k.conrelid and a.attnum = k.conkey[1])
                    = (select a.attname from pg_attribute a where a.attrelid = c.conrelid and a.attnum = c.conkey[1]) end
   loop
-    execute format('alter table %I.%I drop constraint %I', p_nsp, p_name, r.conname);
+    -- by-name-ok: on the copy this transaction's CREATE made (above), which holds ACCESS EXCLUSIVE on it
+    execute format('alter table %s drop constraint %I', v_copy::text, r.conname);
   end loop;
   -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
   -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
@@ -7694,9 +7853,12 @@ begin
      where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
        and convalidated
   loop
-    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
-    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+    -- by-name-ok: on the copy this transaction's CREATE made (above), which holds ACCESS EXCLUSIVE on it
+    execute format('alter table %s add constraint %I %s not valid', v_copy::text, r.conname, r.def);
+    -- by-name-ok: on the copy this transaction's CREATE made (above), which holds ACCESS EXCLUSIVE on it
+    execute format('alter table %s validate constraint %I', v_copy::text, r.conname);
   end loop;
+  return v_copy;
 end;
 $$;
 
@@ -7719,9 +7881,9 @@ begin
   if to_regclass(format('%I.%I', v_nsp, v_name)) is not null then
     return null;
   end if;
-  perform pgpm._regrain_copy_make(p_parent, v_nsp, v_name, '');
-  v_probe := format('%I.%I', v_nsp, v_name)::regclass;
+  v_probe := pgpm._regrain_copy_make(p_parent, v_nsp, v_name, '');
   v_d := pgpm._regrain_shape_drift(p_parent, array[v_probe::oid]);
+  -- by-name-ok: the probe this transaction created (_regrain_copy_make above) and holds ACCESS EXCLUSIVE on
   execute format('drop table %s', v_probe::text);
   return v_d;
 end;
@@ -8083,7 +8245,11 @@ begin
   for r in select child_name from pgpm.part where parent_table = p_parent loop
     v_rel := pgpm._regrain_child_rel(p_parent, r.child_name);   -- #768: a null child_oid in its own schema
     continue when v_rel is null;
+    -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; the source keeps its capture until the next
+    --   drop or janitor tick, and no row moves (#1400)
     execute format('drop trigger if exists pgpm_regrain_capture on %s', v_rel::text);
+    -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; the source keeps its capture until the next
+    --   drop or janitor tick, and no row moves (#1400)
     execute format('drop trigger if exists pgpm_regrain_truncate_guard on %s', v_rel::text);   -- #449
   end loop;
 
@@ -8206,7 +8372,11 @@ begin
     perform pgpm._scratch_owner_follow(p_parent, 'the retirement');   -- #969: before the delta is emptied
     -- #768, #555: the source as pgpm.part recorded it, the delta by its recorded oid, each in its own schema
     v_src := pgpm._regrain_child_rel(p_parent, p_child);
+    -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; the source keeps its capture until the next
+    --   drop or janitor tick, and no row moves (#1400)
     execute format('drop trigger if exists pgpm_regrain_capture on %s', v_src::text);
+    -- by-name-ok: a namesake loses only a trigger carrying pgpm's name; the source keeps its capture until the next
+    --   drop or janitor tick, and no row moves (#1400)
     execute format('drop trigger if exists pgpm_regrain_truncate_guard on %s', v_src::text);
     select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);
     if v_delta is not null then   -- #955: the recorded delta, or nothing
@@ -9488,6 +9658,7 @@ begin
   if cfg.regrain_max_blocks is not null then
     select c.reltuples into v_reltuples from pg_class c where c.oid = v_child;
     if coalesce(v_reltuples, 0) > 0 then v_avg := pg_table_size(v_child)::numeric / v_reltuples;
+    -- by-name-ok: sizes the batch only: a namesake read changes how many rows a batch moves, never which (#1400)
     else execute format('select avg(pg_column_size(t))::numeric from (select * from %s limit 1000) t', v_child::text) into v_avg;
     end if;
     if coalesce(v_avg, 0) > 0 then
@@ -9645,26 +9816,36 @@ begin
       v_spc_q := coalesce((select format(' tablespace %I', t.spcname)
                              from pg_class c join pg_tablespace t on t.oid = c.reltablespace
                             where c.oid = p_parent), '');
-      perform pgpm._regrain_copy_make(p_parent, v_sub_nsp, v_sub_name, v_spc_q);   -- #633: its shape
+      -- #633: its shape; #1358: and from here on the table that CREATE made, by its oid
+      v_copy := pgpm._regrain_copy_make(p_parent, v_sub_nsp, v_sub_name, v_spc_q);
       -- #949: the parent's owner and an owner-only ACL from the tick that creates it, before a row is copied in.
       -- The reset used to wait for the sub-range's last short batch (below), and between ticks a role the
       -- creating role's default privileges name read every row copied so far, past the parent's row security.
-      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- part-row-by-name: the copy this statement group just created
-      execute format('alter table %I.%I add constraint %I check (%I >= %L and %I < %L)',   -- part-row-by-name: the same copy
-                     v_sub_nsp, v_sub_name, (v_sub_name || '_ck'), cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit);
+      perform pgpm._scratch_mint(p_parent, v_copy);
+      -- by-name-ok: on the copy this tick created (_regrain_copy_make above), which holds ACCESS EXCLUSIVE on it
+      execute format('alter table %s add constraint %I check (%I >= %L and %I < %L)',
+                     v_copy::text, (v_sub_name || '_ck'), cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit);
       -- child_oid (#421): the fine child is standalone here and joins pg_inherits only at the swap,
       -- so this is the only point at which its identity can be recorded from the CREATE that made it.
       insert into pgpm.part (parent_table, child_name, lo, hi, attached, child_oid)
-        values (p_parent, v_sub_name, v_sub_lo, v_sub_hi, false,
-                format('%I.%I', v_sub_nsp, v_sub_name)::regclass::oid)   -- part-row-by-name: the same copy, its oid recorded
+        values (p_parent, v_sub_name, v_sub_lo, v_sub_hi, false, v_copy::oid)
         on conflict (parent_table, child_name) do nothing;
       -- #631: a row that outlived its relation (the copy was dropped by hand) now names this one, so
       -- regrain_cancel's drop by recorded oid reaches the table just created rather than nothing.
       if v_sub_known then
-        update pgpm.part set child_oid = format('%I.%I', v_sub_nsp, v_sub_name)::regclass::oid   -- part-row-by-name: the same copy, its oid recorded
+        update pgpm.part set child_oid = v_copy::oid
          where parent_table = p_parent and child_name = v_sub_name and not attached;
       end if;
     end if;
+    -- #1358: the copy and the source locked by oid first, in the INSERT's own modes and order, and the copy named
+    -- under its lock: the INSERT then waits for neither, so it writes the copy pgpm.part recorded from the source
+    -- pgpm.part recorded. Named before its wait, a schema swapped during it sent the batch from a namesake source,
+    -- or into a namesake copy, and the short batch advanced the cursor past rows the copy never got.
+    v_copy := coalesce(v_copy, v_sub_oid::regclass, v_sub_now);
+    perform pgpm._lock_oid_or_raise(v_copy, 'row exclusive', true, format('regrain_step(%s), copying a batch,', p_parent));
+    perform pgpm._lock_oid_or_raise(v_child, 'access share', true, format('regrain_step(%s), copying a batch,', p_parent));
+    select n.nspname, c.relname into v_sub_nsp, v_sub_name
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_copy;
     execute format($f$
       insert into %7$I.%8$I (%6$s)
       select %6$s from %1$s s
@@ -9685,9 +9866,9 @@ begin
       -- the fine child holds all its rows now and is still standalone (it is attached later, at the swap):
       -- ANALYZE it here, off the swap's exclusive-lock window, so the swap and any query that hits it after
       -- see real stats, not reltuples = -1 (#164).
-      perform pgpm._own_like_parent(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- #277; part-row-by-name: the copy made or checked above
-      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875; part-row-by-name: the same
-      perform pgpm._analyze(format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- part-row-by-name: the same
+      perform pgpm._own_like_parent(p_parent, v_copy);   -- #277
+      perform pgpm._acl_reset(v_copy, true);   -- #875
+      perform pgpm._analyze(v_copy);
     end if;
     update pgpm.config set regrain_cursor = v_cursor where parent_table = p_parent;
     return 'copied:' || v_moved;
@@ -9783,6 +9964,11 @@ begin
   select array_agg(id) into v_fk_ids from pgpm.dropped_fk
    where parent_table = p_parent and restored_at is not null;
   v_fk := pgpm.suspend_incoming_fks(p_parent, true);
+  -- #1362: the parent and the source locked by oid first, in the DETACH's own mode and order, so the DETACH waits for
+  -- neither and its names, rendered under those locks, reach them (rendered before its wait, a schema swapped
+  -- during it detached a namesake's partition from a namesake parent, and the swap went on by oid)
+  perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));
+  perform pgpm._lock_oid_or_raise(v_child, 'access exclusive', true, format('regrain_step(%s), detaching the source,', p_parent));
   execute format('alter table %s detach partition %s', p_parent::text, v_child::text);
   -- #892: capture must still be live NOW. This tick's check above ran before anything here locked the source,
   -- and an ALTER TABLE ... DISABLE TRIGGER needs only SHARE ROW EXCLUSIVE, which the copy and the reconcile do
@@ -10221,6 +10407,8 @@ begin
                join pg_am am on am.oid = ic.relam and am.amname = 'btree'
                join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
               where i.indrelid = p_rel and i.indisvalid and i.indpred is null and a.attname = p_col) then
+    -- by-name-ok: both callers hold p_rel by oid already (transmute's _lock_named_or_raise, untransmute's
+    --   _lock_oid_or_raise), so this read waits for nothing of it
     execute format('select max(%1$I)::bigint, min(%1$I)::bigint from %2$s', p_col, p_rel::text) into v_max, v_min;
     o_max := greatest(v_max, p_max);   -- greatest/least ignore a null: an empty table clears nothing
     o_min := least(v_min, p_min);
@@ -11345,10 +11533,12 @@ begin
     select a.grantee from pg_attribute att, aclexplode(att.attacl) a
      where att.attrelid = p_rel and att.attnum > 0 and att.attacl is not null
   loop
+    -- by-name-ok: GRANT and REVOKE take no relation lock, so nothing waits between the oid's rendering and the lookup
     execute format('revoke all on %s from %s cascade', p_rel::text,
                    case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end);
   end loop;
   if p_default then
+    -- by-name-ok: GRANT and REVOKE take no relation lock, so nothing waits between the oid's rendering and the lookup
     execute format('grant all on %s to %I', p_rel::text,
                    (select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_rel));
   end if;
@@ -11387,6 +11577,7 @@ begin
       p_grant, quote_ident(pg_get_userbyid(p_grantor)), sqlerrm, quote_ident(pg_get_userbyid(p_grantor)),
       quote_ident(pg_get_userbyid(p_grantor)), quote_ident(pg_get_userbyid(p_grantor));
   end;
+  -- by-name-ok: a GRANT: GRANT takes no relation lock, so nothing waits between its rendering and the lookup
   execute p_grant;
   execute 'set role ' || case when v_was = 'none' then 'none' else quote_ident(v_was) end;
 end $$;
@@ -11439,6 +11630,7 @@ begin
       from g
      order by depth, g.attnum, g.grantee, g.privilege_type, g.grantor
   loop
+    -- by-name-ok: a GRANT text its callers run: GRANT takes no relation lock
     v_grant_q := format('grant %s%s on %s to %s%s', r.privilege_type,
                         case when r.attname is null then '' else format(' (%I)', r.attname) end, p_dst_q,
                         case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
@@ -12486,6 +12678,8 @@ begin
   -- preflight's for the staging name itself, _transmute_refuse_names_held's for the rest it takes.
   v_pre_names := pgpm._transmute_names_present(v_nsp, array[v_staging]);
   begin
+    -- by-name-ok: the staging parent's own new name in v_nsp, asked again by _nsp_held_or_raise after this CREATE's
+    --   wait (#1399)
     execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',
                    v_nsp, v_staging, p_parent::text, p_control);
   exception
@@ -12503,6 +12697,8 @@ begin
   end;
   perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the CREATE's wait for a holder
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
+  -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+  --   its oid: this waits for nothing of it (#1399)
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
   -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
   select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
@@ -12532,6 +12728,8 @@ begin
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
       v_idopts[v_i] := pgpm._identity_options(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
+      -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered
+      --   from its oid: this waits for nothing of it (#1399)
       execute format('alter table %s alter column %I add generated %s as identity %s',
                      v_parent::text, v_idcols[v_i],
                      case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end,
@@ -12544,15 +12742,21 @@ begin
   -- OID (see 0b), so they stay below, after both renames. And except comments, which only the table's ACCESS
   -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers; and except
   -- grants, which no lock on the table holds still (#706), so they are read and replayed after the attach.
+  -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+  --   its oid: this waits for nothing of it (#1399)
   execute format('alter table %s owner to %I', v_parent::text, v_owner);
 
   -- RLS. FORCE matters as much as ENABLE: without it the table owner bypasses every policy, so an
   -- owner-run query would see all rows and the isolation would be silently absent for exactly the role
   -- most likely to be running reports.
   if v_rls then
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('alter table %s enable row level security', v_parent::text);
   end if;
   if v_rls_force then
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('alter table %s force row level security', v_parent::text);
   end if;
   -- 0b (policies). Captured here, under the LIKE's ACCESS SHARE (see 0b), and replayed after both renames
@@ -12594,6 +12798,8 @@ begin
     from pg_class c join pg_tablespace t on t.oid = c.reltablespace
    where c.oid = p_parent;
   if v_spc is not null then
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('alter table %s set tablespace %I', v_parent::text, v_spc);
   end if;
 
@@ -12658,6 +12864,7 @@ begin
     for v_i in 1 .. array_length(v_idcols, 1) loop
       v_opt := pgpm._identity_options_locked(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
       if v_opt is distinct from v_idopts[v_i] then
+        -- by-name-ok: the parent's identity sequence, created by this transaction (step 6), rendered from its oid
         execute format('alter sequence %s %s restart', pg_get_serial_sequence(v_parent::text, v_idcols[v_i]),
                        substr(v_opt, 2, length(v_opt) - 2));
       end if;
@@ -12782,6 +12989,8 @@ begin
   v_monreg := format('%I.%I', v_nsp, v_monolith)::regclass;
   v_pre_names := pgpm._transmute_names_present(v_nsp, array[v_rel]);
   begin
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('alter table %s rename to %I', v_parent::text, v_rel);
   exception
     when duplicate_table or duplicate_object or unique_violation then
@@ -12806,9 +13015,13 @@ begin
   -- 3. drop identity on the monolith; key columns NOT NULL (metadata no-ops: PK => NOT NULL)
   if v_idcols is not null then
     foreach v_col in array v_idcols loop
+      -- by-name-ok: v_monreg is the table, held ACCESS EXCLUSIVE by oid since 0b (renamed in this transaction),
+      --   rendered from its oid: this waits for nothing of it (#1399)
       execute format('alter table %s alter column %I drop identity if exists', v_monreg::text, v_col);
     end loop;
   end if;
+  -- by-name-ok: v_monreg is the table, held ACCESS EXCLUSIVE by oid since 0b (renamed in this transaction), rendered
+  --   from its oid: this waits for nothing of it (#1399)
   execute format('alter table %s alter column %I set not null', v_monreg::text, p_control);
   -- 3a. the parent's identity sequences take the names the table's had (#877). Step 6 added them while the
   -- parent was still the staging <table>_pgpm_new, so PostgreSQL named each <table>_pgpm_new_<col>_seq, and
@@ -12821,6 +13034,7 @@ begin
     for v_i in 1 .. array_length(v_idcols, 1) loop
       v_seq := pg_get_serial_sequence(v_parent::text, v_idcols[v_i])::regclass;
       if (select s.relname from pg_class s where s.oid = v_seq) is distinct from v_idseqs[v_i] then
+        -- by-name-ok: the parent's identity sequence, created by this transaction (step 6), rendered from its oid
         execute format('alter sequence %s rename to %I', v_seq::text, v_idseqs[v_i]);
       end if;
     end loop;
@@ -12830,6 +13044,7 @@ begin
   -- PRIVILEGES. After the OWNER TO (7b), which the parent's sequences follow and the reset needs.
   perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the drop of identity's waits
   foreach v_grant in array v_seqgrants loop
+    -- by-name-ok: a GRANT: it takes no relation lock (7b's note)
     execute v_grant;
   end loop;
   -- 3b. hand every sequence the table OWNS through a column (a serial, or an explicit OWNED BY) to the
@@ -12860,15 +13075,21 @@ begin
   -- permits nullable non-control columns, so leave those as they are (and never scan them).
   if v_add_pk and v_pkcols is not null then
     foreach v_col in array v_pkcols loop
+      -- by-name-ok: v_monreg is the table, held ACCESS EXCLUSIVE by oid since 0b (renamed in this transaction),
+      --   rendered from its oid: this waits for nothing of it (#1399)
       execute format('alter table %s alter column %I set not null', v_monreg::text, v_col);
     end loop;
   end if;
 
   -- 7. attach the original as the bounded MONOLITH child (metadata-only via the validated CHECK), then
   -- drop the now-redundant CHECK (the partition bound enforces it).
+  -- by-name-ok: v_parent (created here) and v_monreg (held by oid since 0b) are both held ACCESS EXCLUSIVE by this
+  --   transaction, rendered from their oids (#1399)
   execute format('alter table %s attach partition %s for values from (%L) to (%L)',
                  v_parent::text, v_monreg::text,
                  pgpm._encode(p_control_kind, v_lo_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz), pgpm._encode(p_control_kind, v_hi_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz));
+  -- by-name-ok: v_monreg is the table, held ACCESS EXCLUSIVE by oid since 0b (renamed in this transaction), rendered
+  --   from its oid: this waits for nothing of it (#1399)
   execute format('alter table %s drop constraint pgpm_monolith_bound', v_monreg::text);
 
   -- 7b (grants), HERE, after the rename and the attach (#706). GRANT and REVOKE take no lock on the table at
@@ -12887,6 +13108,7 @@ begin
   -- the table's. Additive grants left a privilege REVOKEd on the table held on the parent. After the OWNER
   -- TO above, which the reset needs (it takes the owner's own privileges too).
   foreach v_grant in array pgpm._acl_carry_ddl(p_parent, v_parent::text) loop
+    -- by-name-ok: a GRANT: it takes no relation lock (7b's note)
     execute v_grant;
   end loop;
 
@@ -12913,9 +13135,13 @@ begin
   -- fire it twice for every row routed there. Order is the whole correctness argument.
   if array_length(v_trgdefs, 1) > 0 then
     for v_trg in select tgname from pg_trigger where tgrelid = v_monreg and not tgisinternal loop
+      -- by-name-ok: v_monreg is the table, held ACCESS EXCLUSIVE by oid since 0b (renamed in this transaction),
+      --   rendered from its oid: this waits for nothing of it (#1399)
       execute format('drop trigger %I on %s', v_trg.tgname, v_monreg::text);
     end loop;
     foreach v_grant in array v_trgdefs loop
+      -- by-name-ok: a captured CREATE TRIGGER naming the table as it was named, the parent's name now (created and
+      --   held here), with v_nsp asked again after 7a's waits (#1399)
       execute v_grant;   -- names the ORIGINAL table, which is now the parent: replays verbatim
     end loop;
     -- #499: the verbatim text carries no tgenabled, so every trigger just created is origin-only. Put
@@ -12925,6 +13151,8 @@ begin
     -- is the whole of it.
     for v_i2 in 1 .. array_length(v_trgdefs, 1) loop
       if v_trgstates[v_i2] <> 'O' then
+        -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered
+        --   from its oid: this waits for nothing of it (#1399)
         execute format('alter table %s %s trigger %I', v_parent::text,
                        case v_trgstates[v_i2] when 'D' then 'disable'
                                               when 'A' then 'enable always'
@@ -12954,6 +13182,8 @@ begin
   -- is the table the comments are on.
   v_comment := obj_description(p_parent, 'pg_class');
   if v_comment is not null then
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('comment on table %s is %L', v_parent::text, v_comment);
   end if;
   for v_colcom in
@@ -12962,6 +13192,8 @@ begin
      where a.attrelid = p_parent and a.attnum > 0 and not a.attisdropped
        and col_description(p_parent, a.attnum) is not null
   loop
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('comment on column %s.%I is %L', v_parent::text, v_colcom.attname, v_colcom.c);
   end loop;
 
@@ -13034,8 +13266,14 @@ begin
    where c.conrelid = p_parent
      and ((v_add_pk and c.contype = 'p') or (v_add_uniq and c.contype = 'u' and c.conindid = v_reuse_idx));
   if v_add_pk or v_add_uniq then
+    -- by-name-ok: v_monreg is the table, held ACCESS EXCLUSIVE by oid since 0b (renamed in this transaction),
+    --   rendered from its oid: this waits for nothing of it (#1399)
     execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_name, 'pgpm_key_' || v_key_idx);
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('alter table only %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);
+    -- by-name-ok: indexes of tables this transaction holds ACCESS EXCLUSIVE, rendered from their oids or named in
+    --   v_nsp, asked again by _nsp_held_or_raise before 9b (#1399)
     execute format('alter index %s attach partition %s',
                    (select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.conname = v_key_name),
                    v_key_idx::regclass::text);
@@ -13072,8 +13310,14 @@ begin
        where k.conrelid = v_monreg and k.contype = 'u'
          and k.conindid = to_regclass(format('%I.%I', v_nsp, v_old))::oid;
       if found then
+        -- by-name-ok: v_monreg is the table, held ACCESS EXCLUSIVE by oid since 0b (renamed in this transaction),
+        --   rendered from its oid: this waits for nothing of it (#1399)
         execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_ucon_name, 'pgpm_key_' || v_ucon_idx);
+        -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered
+        --   from its oid: this waits for nothing of it (#1399)
         execute format('alter table only %s add constraint %I %s', v_parent::text, v_ucon_name, v_ucon_def);
+        -- by-name-ok: indexes of tables this transaction holds ACCESS EXCLUSIVE, rendered from their oids or named in
+        --   v_nsp, asked again by _nsp_held_or_raise before 9b (#1399)
         execute format('alter index %I.%I attach partition %I.%I', v_nsp, v_ucon_name, v_nsp, 'pgpm_key_' || v_ucon_idx);
         continue;
       end if;
@@ -13094,7 +13338,11 @@ begin
         raise exception 'pg_partition_magician: cannot carry the index % of %: its definition (%) does not start with CREATE [UNIQUE] INDEX % ON, so its partitioned copy cannot be named',
           quote_ident(v_old), p_parent, v_idx_defs[j], quote_ident(v_old);
       end if;
+      -- by-name-ok: a captured CREATE INDEX on the parent (created and held here), its names in v_nsp asked again
+      --   before 9b (#1399)
       execute v_pdef_q;
+      -- by-name-ok: indexes of tables this transaction holds ACCESS EXCLUSIVE, rendered from their oids or named in
+      --   v_nsp, asked again by _nsp_held_or_raise before 9b (#1399)
       execute format('alter index %I.%I attach partition %I.%I', v_nsp, v_new, v_nsp, v_old);
     end loop;
   end if;
@@ -13121,8 +13369,12 @@ begin
       raise exception 'pg_partition_magician: cannot transmute % -- its replica identity is USING INDEX, and that index was not carried onto the partitioned parent, so the identity cannot be carried either. Set the table''s REPLICA IDENTITY to DEFAULT, FULL or an index transmute carries, then re-run transmute.',
         v_parent;
     end if;
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('alter table %s replica identity using index %I', v_parent::text, v_ri_idx);
   elsif v_replident in ('f', 'n') then
+    -- by-name-ok: v_parent is the staging parent this transaction created, held ACCESS EXCLUSIVE since, rendered from
+    --   its oid: this waits for nothing of it (#1399)
     execute format('alter table %s replica identity %s', v_parent::text,
                    case v_replident when 'f' then 'full' else 'nothing' end);
   end if;
@@ -13581,8 +13833,13 @@ begin
         format('_detach_reap found %I.%I pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch of its own', r.cnsp, r.crel));
     end if;
     begin
-      execute format('alter table %I.%I detach partition %I.%I finalize',
-                     r.pnsp, r.prel, r.cnsp, r.crel);
+      -- By oid first, in the FINALIZE's own modes and order (the schema-swap class): the names above were read before
+      -- the FINALIZE waited for ACCESS EXCLUSIVE on the partition behind its readers, and it resolves them again once
+      -- granted, so a schema renamed aside during that wait, with a namesake schema and tables committed in its
+      -- place, sent it to the namesakes and left the abandoned detach it identified pending. Named under the locks.
+      perform pgpm._lock_oid_or_raise(r.parent, 'share update exclusive', true, '_detach_reap');
+      perform pgpm._lock_oid_or_raise(r.child_oid::regclass, 'access exclusive', true, '_detach_reap');
+      execute format('alter table %s detach partition %s finalize', r.parent::text, r.child_oid::regclass::text);
       insert into pgpm.log (parent_table, action, lo, hi, method)
         select r.parent, 'detach_reap', p.lo, p.hi,
                'an abandoned concurrent detach was finalized; its rows were already invisible through the parent'
@@ -13605,6 +13862,7 @@ $$;
 -- prattrs' attnums, as in transmute's 7c: the two tables' attnums differ where a column was dropped.
 create or replace function pgpm._publication_adds(p_of regclass, p_nsp name, p_name name)
 returns table (o_pub name, o_def text) language sql stable as $$
+  -- by-name-ok: a statement text untransmute runs, checked there by its effect (memberships compared by oid, #1399)
   select p.pubname,
          format('alter publication %I add table %I.%I%s%s', p.pubname, p_nsp, p_name,
                 case when m.cols_q is not null then ' (' || m.cols_q || ')' else '' end,
@@ -13959,6 +14217,8 @@ begin
     from pg_class where oid = p_parent;
   -- and its owner and comments (#710, see above)
   select relowner into v_owner from pg_class where oid = p_parent;
+  -- by-name-ok: a statement text untransmute runs below, after it asks v_nsp again (_nsp_held_or_raise); policies are
+  --   then counted on the restored table by oid
   v_comdefs := v_comdefs || format('comment on table %I.%I is %L', v_nsp, v_rel, obj_description(p_parent, 'pg_class'));
   for v_g in
     select a.attname, col_description(p_parent, a.attnum) as c
@@ -13966,6 +14226,8 @@ begin
      where a.attrelid = p_parent and a.attnum > 0 and not a.attisdropped
      order by a.attnum
   loop
+    -- by-name-ok: a statement text untransmute runs below, after it asks v_nsp again (_nsp_held_or_raise); policies
+    --   are then counted on the restored table by oid
     v_comdefs := v_comdefs || format('comment on column %I.%I.%I is %L', v_nsp, v_rel, v_g.attname, v_g.c);
   end loop;
   -- The grants as transmute carries them, the other way (#875, #903): the reset of the restored table's ACL
@@ -13980,6 +14242,8 @@ begin
            pg_get_expr(polwithcheck, polrelid) as withcheck
       from pg_policy where polrelid = p_parent order by polname
   loop
+    -- by-name-ok: a statement text untransmute runs below, after it asks v_nsp again (_nsp_held_or_raise); policies
+    --   are then counted on the restored table by oid
     v_poldefs := v_poldefs || format('create policy %I on %I.%I as %s for %s to %s%s%s',
       v_g.polname, v_nsp, v_rel,
       case when v_g.polpermissive then 'permissive' else 'restrictive' end,
@@ -14084,6 +14348,8 @@ begin
         p_parent;
     end if;
   end if;
+  -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+  --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
   execute format('alter table %s detach partition %s', p_parent::text, v_monreg::text);
   -- The mirror of transmute's 3b (#573): the parent owns the serial sequences the monolith's column
   -- defaults still call, so dropping it would take them too ("other objects depend on it"). Hand each
@@ -14107,11 +14373,15 @@ begin
   -- each unique constraint 9b carried (#828)
   for v_i in 1 .. coalesce(array_length(v_key_mons, 1), 0) loop
     v_key_name := v_key_names[v_i]; v_key_mon := v_key_mons[v_i];
+    -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+    --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
     execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_mon, v_key_name);
   end loop;
   -- and so do the parent's other indexes, for the ones made on it since the conversion (#830). ALTER INDEX
   -- renames an index-backed constraint with its index.
   for v_i in 1 .. coalesce(array_length(v_ix_oids, 1), 0) loop
+    -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+    --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
     execute format('alter index %s rename to %I', v_ix_oids[v_i]::regclass::text, v_ix_names[v_i]);
   end loop;
 
@@ -14121,6 +14391,8 @@ begin
   -- insert would collide.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
+      -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+      --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
       execute format('alter table %s alter column %I add generated %s as identity %s',
                      v_monreg::text, v_idcols[v_i],
                      case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end,
@@ -14136,6 +14408,8 @@ begin
   -- #830.) In the monolith's own schema, which is the parent's unless the
   -- parent was moved (#827); the restored table IS the monolith, so it is named by that identity, the oid
   -- transmute recorded, never resolved as <the parent's schema>.<name>, where a moved parent leaves nothing.
+  -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+  --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
   execute format('alter table %s rename to %I', v_monreg::text, v_rel);
   v_restored := v_monreg;
 
@@ -14190,6 +14464,8 @@ begin
   -- the name they were built with. The parent's DROP freed that name.
   perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: every wait since the gate
   if (select relnamespace from pg_class where oid = v_restored) <> (select oid from pg_namespace where nspname = v_nsp) then
+    -- by-name-ok: v_restored is held ACCESS EXCLUSIVE by oid; v_nsp is asked again just before and just after it
+    --   (_nsp_held_or_raise, #1399)
     execute format('alter table %s set schema %I', v_restored::text, v_nsp);
   end if;
   perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: the move's owned sequences' waits
@@ -14204,6 +14480,7 @@ begin
   for v_i in 1 .. coalesce(array_length(v_idcols, 1), 0) loop
     v_seq := pg_get_serial_sequence(v_restored::text, v_idcols[v_i])::regclass;
     if (select s.relname from pg_class s where s.oid = v_seq) is distinct from v_idseqs[v_i] then
+      -- by-name-ok: the restored table's identity sequence, created by this transaction, rendered from its oid
       execute format('alter sequence %s rename to %I', v_seq::text, v_idseqs[v_i]);
     end if;
   end loop;
@@ -14211,10 +14488,14 @@ begin
   -- Replay the captured triggers onto the restored table, now that it carries the original name again,
   -- then put back each one's enabled state (#499): the replayed text leaves them all origin-only.
   foreach v_tdef in array v_trgdefs loop
+    -- by-name-ok: a captured statement naming the restored table in v_nsp, run after v_nsp is asked again
+    --   (_nsp_held_or_raise) on a table held ACCESS EXCLUSIVE by oid (#1399)
     execute v_tdef;
   end loop;
   for v_i in 1 .. coalesce(array_length(v_trgdefs, 1), 0) loop
     if v_trgstates[v_i] <> 'O' then
+      -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+      --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
       execute format('alter table %s %s trigger %I', v_restored::text,
                      case v_trgstates[v_i] when 'D' then 'disable'
                                            when 'A' then 'enable always'
@@ -14225,10 +14506,14 @@ begin
 
   -- the parent's owner before the ACL reset, and its comments (#710, see above)
   if (select relowner from pg_class where oid = v_restored) <> v_owner then
+    -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+    --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
     execute format('alter table %s owner to %I', v_restored::text, pg_get_userbyid(v_owner));
   end if;
   perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'untransmute');   -- #1367: the moves' and owner's sequence waits
   foreach v_tdef in array v_comdefs loop
+    -- by-name-ok: a captured statement naming the restored table in v_nsp, run after v_nsp is asked again
+    --   (_nsp_held_or_raise) on a table held ACCESS EXCLUSIVE by oid (#1399)
     execute v_tdef;
   end loop;
   -- The identity sequences' grants (#1076): each restored sequence, re-added above under the creating role's
@@ -14236,6 +14521,7 @@ begin
   -- the managed sequence's grants replayed, each under its grantor. After the OWNER TO just above, which an
   -- identity sequence follows with its table and the reset needs.
   foreach v_tdef in array v_seqgrantdefs loop
+    -- by-name-ok: a GRANT: it takes no relation lock
     execute v_tdef;
   end loop;
 
@@ -14249,13 +14535,20 @@ begin
   -- parent's grants, each under its grantor (#903); then its RLS flags, both directions, and its policies in
   -- place of every policy on the copy.
   foreach v_tdef in array v_grantdefs loop
+    -- by-name-ok: a GRANT: it takes no relation lock
     execute v_tdef;
   end loop;
+  -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+  --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
   execute format('alter table %s %s row level security', v_restored::text,
                  case when v_rls then 'enable' else 'disable' end);
+  -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+  --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
   execute format('alter table %s %s row level security', v_restored::text,
                  case when v_rls_force then 'force' else 'no force' end);
   for v_g in select polname from pg_policy where polrelid = v_restored loop
+    -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+    --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
     execute format('drop policy %I on %s', v_g.polname, v_restored::text);
   end loop;
   foreach v_tdef in array v_poldefs loop
@@ -14275,6 +14568,7 @@ begin
     if v_g.o_def = any(v_pubdefs) then
       v_pubdefs := array_remove(v_pubdefs, v_g.o_def);
     else
+      -- by-name-ok: checked with the ADDs below by its effect on the memberships, compared by oid after them (#1399)
       execute format('alter publication %I drop table %s', v_g.o_pub, v_restored::text);
     end if;
   end loop;
@@ -14293,6 +14587,8 @@ begin
   -- under whatever name the renames above left it.
   if v_ri <> (select relreplident from pg_class where oid = v_restored)
      or (v_ri = 'i' and not (select indisreplident from pg_index where indexrelid = v_ri_idx)) then
+    -- by-name-ok: p_parent and its partitions (the monolith, v_monreg, v_restored) are held ACCESS EXCLUSIVE by oid
+    --   since the lock after the gate, rendered from their oids: this waits for nothing of them (#1399)
     execute format('alter table %s replica identity %s', v_restored::text,
                    case v_ri when 'd' then 'default' when 'f' then 'full' when 'n' then 'nothing'
                              else format('using index %I', (select relname from pg_class where oid = v_ri_idx)) end);
@@ -14304,7 +14600,7 @@ begin
   -- #555: where they are, not the parent's schema; #955: only what pgpm.config recorded, never a namesake;
   -- #1271: each in its OWN schema, since either may have been moved without the other
   if v_cdelta_reg is not null then perform pgpm._drop_by_oid(v_cdelta_reg, 'untransmute, dropping the regrain delta,'); end if;
-  if exists (select 1 from pg_proc where oid = v_cfn_reg) then execute format('drop function %s', v_cfn_reg::text); end if;
+  perform pgpm._drop_fn_by_oid(v_cfn_reg, 'untransmute, dropping the regrain capture function,');
 
   -- forget all pgpm state for this table (matched by the dropped parent's oid, which p_parent still
   -- carries), and log the reversal against the restored table.
@@ -15688,6 +15984,8 @@ begin
       p_child::oid, p_parent;
   end if;
   begin
+    -- by-name-ok: judged by oid just below: pg_locks must show SHARE UPDATE EXCLUSIVE on p_child, or the call refuses
+    --   (pgpm._lock_oid's shape)
     execute format('lock table %s in share update exclusive mode', v_child_q);
   exception when undefined_table or invalid_schema_name then
     null;   -- the name denotes nothing now: no lock on p_child, refused just below
@@ -15841,6 +16139,7 @@ begin
   -- they would describe the visible rows as the column's.
   perform pgpm._refuse_filtered_reads(p_table, 'sample',
     'check_uuidv7 would report its fraction and the column''s maximum from those rows alone');
+  -- by-name-ok: an operator's diagnostic read: it reports a sample of rows and moves none
   return query execute format($q$
     with s as (select pgpm._uuid_to_ts(%1$I) as ts from %2$s limit %3$s),
          m as (select pgpm._uuid_to_ts(t.%1$I) as ts from %2$s t where t.%1$I is not null
@@ -15929,6 +16228,7 @@ begin
   -- #873: as check_uuidv7's
   perform pgpm._refuse_filtered_reads(p_table, 'sample',
     'check_text_time would report its fraction and the column''s maximum from those rows alone');
+  -- by-name-ok: an operator's diagnostic read: it reports a sample of rows and moves none
   return query execute format($q$
     with s as (select %1$I::text as v from %2$s limit %3$s),
          shaped as (
@@ -15989,6 +16289,7 @@ begin
   -- #873: as check_uuidv7's
   perform pgpm._refuse_filtered_reads(p_table, 'sample',
     'check_time_monotonic would report its fraction from those rows alone');
+  -- by-name-ok: an operator's diagnostic read: it reports a sample of rows and moves none
   return query execute format($q$
     with s as (select %2$I::timestamptz as t, %1$I as idv from %3$s order by random() limit %4$s),
          o as (select t, lag(t) over (order by idv) as prev from s)
@@ -16706,6 +17007,7 @@ begin
       v_orphan := format('%1$s and not exists (select 1 from %2$s p where %3$s)',
                          v_notnull_q, c.confrelid::regclass::text, v_join_q);
     end if;
+    -- by-name-ok: a read that reports a count; it moves no row
     execute format('select count(*)::bigint from %s r where %s', c.conrelid::regclass::text, v_orphan) into v_cnt;
     referencing_table := r.referencing_table; constraint_name := r.constraint_name; orphan_rows := v_cnt;
     return next;

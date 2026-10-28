@@ -314,9 +314,9 @@ while [ $# -gt 0 ]; do
 done
 if [ -n "$flag" ] && [ "$GH_STUB" = old ]; then echo "unknown flag: --allow-escape-sequences" >&2; exit 1; fi
 case "$path" in
-  */actions/runs/*/jobs*) body='{"jobs":[{"id":101,"status":"completed","conclusion":"failure","steps":[1,2,3,4,5],"name":"perf (shard 2/4)"}]}';;
+  */actions/runs/*/jobs*) body=${GH_JOBS:-'{"jobs":[{"id":101,"status":"completed","conclusion":"failure","steps":[1,2,3,4,5],"name":"perf (shard 2/4)"}]}'};;
   */actions/runs/*) body='{"conclusion":"failure"}';;
-  */annotations) body='[]';;
+  */annotations) body=${GH_ANN:-'[]'};;
   */actions/jobs/*/logs)
     if [ "$GH_STUB" = new ] && [ -z "$flag" ] && grep -q $'\033' "$GH_LOG"; then
       echo "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway" >&2; exit 1
@@ -465,6 +465,104 @@ else
     "(f) a refusal prints GitHub's message and the PR's mergeStateStatus" "$(grep -m1 refused <<<"$out" | cut -c1-70)"
   unset -f gh sleep
 fi
+
+# ---------------------------------------------------------------- (g) land.sh's guard database renumbering
+#   #1389 (F13-05): verify_tree renumbered a duplicate guard database at `s.rfind(d)`, a SUBSTRING search, so
+#   when the duplicate (pgpm_perf33) prefixed a name later in test.sh (pgpm_perf332) it rewrote that unrelated
+#   guard's database, left the duplicate, reported "renumbered" and land.sh amended and pushed the result; and
+#   nothing re-checked that the names were unique afterwards. Driven through verify_tree's own Python, read out
+#   of land.sh, in a scratch directory holding a planted test.sh and an empty mutation catalogue. The controls:
+#   a duplicate that prefixes nothing is renumbered to the next free number, the earlier line kept.
+#     land_renumber_by_substring    the duplicate located by substring search again
+#     land_renumber_unchecked       the names not re-checked for uniqueness after the renumbering
+vt=$(awk "/python3 - <<'PY' \|\| return 1/{on=1;next} on&&/^PY\$/{exit} on" "$R/land.sh")
+if ! grep -q 'renumbered the second' <<<"$vt" || ! grep -q 'open("test.sh", "w")' <<<"$vt"; then
+  bad "fixture: land.sh's verify_tree renumbering was read" "not found"
+else
+  V="$work/vt"; mkdir -p "$V/bench/mutations"
+  printf 'MUTATIONS = {}\nMUTATION_SRC = {}\n' > "$V/bench/mutations/mutate.py"
+  printf '%s\n' "$vt" > "$V/verify.py"
+  # renum <test.sh lines...>: run verify_tree's Python on them; sets vrc, vout, and vts (test.sh after, one line)
+  renum() {
+    printf '%s\n' "$@" > "$V/test.sh"
+    vout=$(cd "$V" && python3 verify.py 2>&1); vrc=$?
+    vts=$(tr '\n' ' ' < "$V/test.sh"); vts=${vts% }
+  }
+  renum '"bench/a.sh pgpm_perf7"' '"bench/x.sh pgpm_perf400"' '"bench/new.sh pgpm_perf7"'
+  check "$([ "$vrc" = 0 ] && [ "$vts" = '"bench/a.sh pgpm_perf7" "bench/x.sh pgpm_perf400" "bench/new.sh pgpm_perf401"' ] && echo 0 || echo 1)" \
+    "LIVENESS: (g) a duplicate prefixing nothing: the later line renumbered" "exit $vrc: $vts"
+  renum '"bench/a.sh pgpm_perf33"' '"bench/new.sh pgpm_perf33"' '"bench/obtain.sh pgpm_perf332"'
+  check "$(grep -q 'renumbered the second pgpm_perf33 to pgpm_perf333' <<<"$vout" && echo 0 || echo 1)" \
+    "LIVENESS: (g) the prefix case reports renumbering pgpm_perf33" "$(grep -m1 renumbered <<<"$vout")"
+  check "$([ "$vrc" = 0 ] && [ "$vts" = '"bench/a.sh pgpm_perf33" "bench/new.sh pgpm_perf333" "bench/obtain.sh pgpm_perf332"' ] && echo 0 || echo 1)" \
+    "(g) the duplicate's later line renumbered, pgpm_perf332 untouched" "exit $vrc: $vts"
+  renum '"bench/a.sh pgpm_perf5"' '"bench/b.sh pgpm_perf5"' '"bench/c.sh pgpm_perf5"'
+  check "$([ "$vrc" != 0 ] && grep -q 'still duplicated' <<<"$vout" && [ "$vts" = '"bench/a.sh pgpm_perf5" "bench/b.sh pgpm_perf5" "bench/c.sh pgpm_perf5"' ] && echo 0 || echo 1)" \
+    "(g) a name three times over is refused, test.sh unwritten" "exit $vrc: $vts"
+fi
+
+# ---------------------------------------------------------------- (h) stop_check.py's criterion 4
+#   #1389 (F13-06): criterion 4 ("the Tier 1 capture-recapture estimate rounds to zero") was judged as
+#   round(remaining) == 0, and Python rounds a half to even: two duplicated finders at 3 Tier 1 each, 2 shared,
+#   estimate 4.5 against 4 found, half a Tier 1 left, read as zero and the loop as converged. The controls: 0.4
+#   left rounds to zero and converges, 0.6 does not, so the branch judged is the estimate one.
+#     stop_check_capture_half_to_even  round() again
+python3 - "$R" <<'PY' || fail=1
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import stop_check as s
+ok = (" (suite-caught 3/3, read-caught 6/6; late-survivor 3/3)", "precision 0.95 (strict 0.80, fell rate 0.05)", "0.93", None)
+fail = 0
+with tempfile.TemporaryDirectory() as root:
+    def run(name, est):
+        d = os.path.join(root, name); os.makedirs(d)
+        h, r = s.synth(d, [(12, 0, s.A5) + ok, (13, 0, s.B5) + ok],
+                       capture_text={13: f"S8 opus 3, fable 3, overlap 2: estimate {est}, found 4"})
+        return s.run(h, r, extended_through=14)
+    for est, want in (("4.4", True), ("4.6", False), ("4.5", False)):
+        v = run("e" + est.replace(".", "_"), est)
+        e = v["criteria"]["e"]
+        good = e.get("branch") == "estimate" and e["met"] is want and v["criteria"]["a"]["met"] and v["criteria"]["b"]["met"]
+        label = {"4.4": "LIVENESS: (h) 0.4 Tier 1 left rounds to zero (converges)",
+                 "4.6": "LIVENESS: (h) 0.6 Tier 1 left does not round to zero",
+                 "4.5": "(h) half a Tier 1 left does not round to zero"}[est]
+        print(f"{'PASS' if good else 'FAIL'}  {label:<62} {v['verdict']}: {v['reason'][:50]}")
+        fail |= not good
+sys.exit(fail)
+PY
+
+# ---------------------------------------------------------------- (i) flake_check.sh's no-step signatures
+#   #1389 (F13-07): lost_runner, documented as jobs with no step and an empty or BlobNotFound log, checked the
+#   step count alone, so a job GitHub failed before any step with a log naming a real error (a job container
+#   image that does not exist) was called a known flake, exit 0, and land.sh reran it. And runner_not_acquired,
+#   documented as the annotation AND no step run, checked the annotation alone. Driven through the real script
+#   with the stub `gh` of (e). The controls: an empty log, a BlobNotFound one and a job queued for good are still
+#   lost_runner, and the annotation on a job with no step is still runner_not_acquired.
+#     flake_check_lost_runner_by_steps_only  the log never read again
+job0() { printf '{"jobs":[{"id":9001,"status":"%s","conclusion":%s,"steps":[%s],"name":"perf (shard 3/6)"}]}' "$1" "$2" "${3:-}"; }
+fcj() { PATH="$work/bin:$PATH" GH_STUB=new GH_LOG=$1 GH_JOBS=$2 GH_ANN=${3:-[]} bash "$R/flake_check.sh" 4242 --repo o/r 2>&1; }
+printf '%s\n' "2026-10-22T12:00:00.0Z ##[error]Failed to initialize container ghcr.io/neptunestation-com/pgpm-test:17-typo" \
+  "2026-10-22T12:00:00.0Z ##[error]Error response from daemon: manifest unknown" > "$work/image.log"
+printf '%s\n' '<?xml version="1.0" encoding="utf-8"?><Error><Code>BlobNotFound</Code><Message>The specified blob does not exist.</Message></Error>' > "$work/blob.log"
+out=$(fcj "$work/empty.log" "$(job0 completed '"failure"')"); rc=$?
+check "$([ "$rc" = 0 ] && grep -q "known flake lost_runner" <<<"$out" && echo 0 || echo 1)" \
+  "LIVENESS: (i) no step and an empty log: lost_runner" "exit $rc"
+out=$(fcj "$work/blob.log" "$(job0 completed '"cancelled"')"); rc=$?
+check "$([ "$rc" = 0 ] && grep -q "known flake lost_runner" <<<"$out" && echo 0 || echo 1)" \
+  "LIVENESS: (i) no step and a BlobNotFound log: lost_runner" "exit $rc"
+out=$(fcj "$work/image.log" "$(job0 queued null)"); rc=$?
+check "$([ "$rc" = 0 ] && grep -q "known flake lost_runner" <<<"$out" && echo 0 || echo 1)" \
+  "LIVENESS: (i) a job queued for good: lost_runner" "exit $rc"
+out=$(fcj "$work/image.log" "$(job0 completed '"failure"')"); rc=$?
+check "$([ "$rc" = 1 ] && ! grep -q "known flake" <<<"$out" && grep -q 'manifest unknown\|Failed to initialize container' <<<"$out" && echo 0 || echo 1)" \
+  "(i) no step, a log naming a real error: not a flake (exit 1)" "exit $rc: ${out:0:70}"
+ann='[{"message":"The job was not acquired by Runner of type hosted even after multiple attempts"}]'
+out=$(fcj "$work/empty.log" "$(job0 completed '"failure"')" "$ann"); rc=$?
+check "$([ "$rc" = 0 ] && grep -q "known flake runner_not_acquired" <<<"$out" && echo 0 || echo 1)" \
+  "LIVENESS: (i) the annotation on a job with no step: runner_not_acquired" "exit $rc"
+out=$(fcj "$work/real.log" "$(job0 completed '"failure"' '1,2,3')" "$ann"); rc=$?
+check "$([ "$rc" = 1 ] && ! grep -q "known flake" <<<"$out" && echo 0 || echo 1)" \
+  "(i) the annotation on a job whose steps ran: not a flake" "exit $rc: ${out:0:70}"
 
 if [ "$fail" = 0 ]; then echo "review_tooling_verdicts: PASS"; else echo "review_tooling_verdicts: FAIL"; fi
 exit "$fail"

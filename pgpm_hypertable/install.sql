@@ -483,6 +483,7 @@ begin
     return;
   end if;
   -- A naive (timestamp, date) value is read as UTC wall time, the zone transmute computes such a grid in (#504).
+  -- by-name-ok: an early refusal only; the cutover asks it again under its ACCESS EXCLUSIVE (#1402)
   execute format('select max(t.%I)%s from %s t', p_control,
                  case when v_typ = 'timestamptz'::regtype then '' else '::timestamp at time zone ''UTC''' end,
                  p_hypertable::text)
@@ -565,6 +566,8 @@ begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_tbl_q := format('%I.%I', v_nsp, v_rel);
+  -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot be
+  --   renamed (see the tail there)
   v_ddl := v_ddl || format('alter table %s owner to %I', v_tbl_q,
                            (select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_hypertable));
   -- Table and column grants, after the OWNER TO, as transmute carries them (#838): a reset of the copy's
@@ -572,9 +575,13 @@ begin
   v_ddl := v_ddl || pgpm._acl_carry_ddl(p_hypertable, v_tbl_q);
   -- Row-level security. FORCE matters as much as ENABLE: without it the owner bypasses every policy.
   if (select c.relrowsecurity from pg_class c where c.oid = p_hypertable) then
+    -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot
+    --   be renamed (see the tail there)
     v_ddl := v_ddl || format('alter table %s enable row level security', v_tbl_q);
   end if;
   if (select c.relforcerowsecurity from pg_class c where c.oid = p_hypertable) then
+    -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot
+    --   be renamed (see the tail there)
     v_ddl := v_ddl || format('alter table %s force row level security', v_tbl_q);
   end if;
   for r in
@@ -585,6 +592,8 @@ begin
            pg_get_expr(polqual, polrelid) as qual, pg_get_expr(polwithcheck, polrelid) as withcheck
       from pg_policy where polrelid = p_hypertable order by polname
   loop
+    -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot
+    --   be renamed (see the tail there)
     v_ddl := v_ddl || format('create policy %I on %s as %s for %s to %s%s%s', r.polname, v_tbl_q,
       case when r.polpermissive then 'permissive' else 'restrictive' end,
       case r.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
@@ -596,7 +605,10 @@ begin
   -- The table's own comment. LIKE ... INCLUDING COMMENTS carried the columns' and constraints', not this one.
   -- Always set, to NULL when the source has none (%L renders a null as NULL): the copy carries the module's
   -- `pgpm from_hypertable copy of <oid>` record (#773), which must not survive onto the migrated table.
+  -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot be
+  --   renamed (see the tail there)
   v_ddl := v_ddl || format('comment on table %s is %L', v_tbl_q, obj_description(p_hypertable, 'pg_class'));
+  -- by-name-ok: a string compared with a function's source; nothing runs it
   for r in
     select pg_get_triggerdef(t.oid) as def
       from pg_trigger t join pg_proc f on f.oid = t.tgfoid join pg_namespace fn on fn.oid = f.pronamespace
@@ -629,9 +641,15 @@ begin
     select ic.relname into v_ri_idx
       from pg_index i join pg_class ic on ic.oid = i.indexrelid where i.indrelid = p_hypertable and i.indisreplident;
     -- an identity index dropped since leaves 'i' with no index, which PostgreSQL treats as NOTHING
+    -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot
+    --   be renamed (see the tail there)
     v_ddl := v_ddl || case when v_ri_idx is null then format('alter table %s replica identity nothing', v_tbl_q)
+                           -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP,
+                           --   where the schema cannot be renamed (see the tail there)
                            else format('alter table %s replica identity using index %I', v_tbl_q, v_ri_idx) end;
   elsif v_ri in ('f', 'n') then
+    -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot
+    --   be renamed (see the tail there)
     v_ddl := v_ddl || format('alter table %s replica identity %s', v_tbl_q,
                              case v_ri when 'f' then 'full' else 'nothing' end);
   end if;
@@ -647,6 +665,8 @@ begin
      where pr.prrelid = p_hypertable
      order by p.pubname
   loop
+    -- by-name-ok: a statement text; from_hypertable_cutover runs it after the source's DROP, where the schema cannot
+    --   be renamed (see the tail there)
     v_ddl := v_ddl || format('alter publication %I add table %s%s%s', r.pubname, v_tbl_q,
                              case when r.cols_q is not null then ' (' || r.cols_q || ')' else '' end,
                              case when r.qual is not null then ' where (' || r.qual || ')' else '' end);
@@ -953,6 +973,7 @@ create or replace function pgpm._from_hypertable_drop_fn(p_fn oid, p_what text)
 returns void language plpgsql as $$
 begin
   if not exists (select 1 from pg_proc f where f.oid = p_fn) then return; end if;
+  -- by-name-ok: checked by its effect just below (the oid must be gone)
   execute format('drop function %s', p_fn::regprocedure::text);
   if exists (select 1 from pg_proc f where f.oid = p_fn) then
     raise exception 'pg_partition_magician: % reached another function than the one pgpm recorded (oid %): the function or its schema was renamed while the DROP waited for its lock, and another function stood under the name; rolled back. Re-run it',
@@ -1053,6 +1074,8 @@ begin
   if v_prev_fn is not null then
     for r in select t.tgname from pg_trigger t
               where t.tgrelid = p_hypertable and t.tgfoid = v_prev_fn and not t.tgisinternal loop
+      -- by-name-ok: self-refusing (#1402): a drop that reached a namesake leaves the hypertable's trigger depending
+      --   on the function, so the function's drop just after fails 2BP01 and the transaction rolls back
       execute format('drop trigger %I on %I.%I', r.tgname, v_nsp, v_rel);
     end loop;
     -- #1366: by the oid, its drop checked (a trigger drop that reached a namesake leaves ours depending on it: 2BP01)
@@ -1109,6 +1132,9 @@ begin
     end if;
 
     -- delta holds just the key columns (their types come from the source via WITH NO DATA)
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute format('create table %I.%I as select %s from %I.%I with no data',
                    v_nsp, v_delta, v_keycols_q, v_nsp, v_rel);
     -- Append a monotonic ordering column (highest attnum) so the online delta-drain (from_hypertable_drain_delta,
@@ -1152,6 +1178,9 @@ begin
     -- between, and the insert is dynamic, the key values bound. A delta that is gone refuses the write as
     -- 42P01, as the static insert did, naming the table and the remedy, rather than as a syntax error at the
     -- bare oid.
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
       declare
         d regclass;
@@ -1213,6 +1242,9 @@ begin
     perform pgpm._scratch_mint_fn(p_hypertable, format('%I.%I()', v_nsp, v_trgfn)::regprocedure);
     perform pgpm._capture_definer(format('%I.%I()', v_nsp, v_trgfn)::regprocedure, v_delta_oid::regclass);   -- #1073
     perform pgpm._scratch_record(p_hypertable, 'hypertable_delta_fn', format('%I.%I()', v_nsp, v_trgfn)::regprocedure::oid);
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute format('create trigger %I after insert or update or delete on %I.%I for each row execute function %I.%I()',
                    v_trg, v_nsp, v_rel, v_nsp, v_trgfn);
     -- The trigger is origin-only, and cannot be anything else: TimescaleDB refuses ENABLE ALWAYS on a
@@ -1225,6 +1257,9 @@ begin
     -- horizon and the apparatus it vouches for always come from the same copy. It is also the module's
     -- record that this delta, its function and its trigger are pgpm's: pgpm_core/uninstall.sql finds a
     -- copy that was never cut over by this comment, not by a name pattern (#737), so keep the two in step.
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute format('comment on table %I.%I is %L', v_nsp, v_delta,
                    'pgpm from_hypertable horizon ' || pg_snapshot_xmin(pg_current_snapshot())::text);
     commit;   -- the apparatus must survive the phase boundary (copy commits, cutover reads the delta)
@@ -1241,6 +1276,9 @@ begin
   if v_prev is not null then
     perform pgpm._drop_by_oid(v_prev, format('from_hypertable_copy(%s), dropping the previous copy,', p_hypertable));   -- #1335 b10
   end if;
+  -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+  --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+  --   the hypertable's schema; the cutover's conservation and #654 checks)
   execute format('create table %I.%I (like %I.%I including defaults including constraints including generated including comments)',
                  v_nsp, v_dest, v_nsp, v_rel);
   -- #949: the hypertable's owner and an owner-only ACL from the transaction that creates it, so no role the
@@ -1255,6 +1293,9 @@ begin
   -- hypertable it names still exists and so still holds every row. LIKE ... INCLUDING COMMENTS carries the
   -- columns' comments, not the table's, so the comment is pgpm's alone; the swap replaces it with the
   -- source's own (or none) in _from_hypertable_carried_ddl, so the migrated table never carries it.
+  -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+  --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+  --   the hypertable's schema; the cutover's conservation and #654 checks)
   execute format('comment on table %I.%I is %L', v_nsp, v_dest,
                  'pgpm from_hypertable copy of ' || p_hypertable::oid::text);
   commit;
@@ -1291,6 +1332,9 @@ begin
             where hypertable_schema = v_nsp and hypertable_name = v_rel order by range_start loop
     v_lo := format(v_bound_tpl, pgpm._ts_text(r.range_start));   -- #793: never the session DateStyle
     v_hi := format(v_bound_tpl, pgpm._ts_text(r.range_end));
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute format('insert into %I.%I (%s) select %s from %I.%I where %I >= %s and %I < %s order by %I',
                    v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
                    p_control, v_lo, p_control, v_hi, p_control);
@@ -1328,8 +1372,14 @@ begin
      where c.conrelid = p_hypertable and c.contype = 'f' and c.confrelid <> p_hypertable
      order by c.conname
   loop
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute format('alter table %I.%I add constraint %I %s not valid', v_nsp, v_dest, r.conname, r.def);
     commit;
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute format('alter table %I.%I validate constraint %I', v_nsp, v_dest, r.conname);
     commit;
     insert into pgpm.log (parent_table, action, method)
@@ -1357,6 +1407,9 @@ begin
       raise exception 'pg_partition_magician: cannot pre-build the key index of % on %.% -- both of its temp names (% and pgpm_new_%) are held by relations that are not on that destination. Drop or rename them (an abandoned copy''s %.<table>_pgpm_dest is the usual holder) and re-run.',
         p_hypertable, quote_ident(v_nsp), quote_ident(v_dest), pgpm._from_hypertable_tmp_name(v_keyconname, v_keyidx), v_keyidx, quote_ident(v_nsp);
     end if;
+    -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
+    --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
+    --   the hypertable's schema; the cutover's conservation and #654 checks)
     execute pgpm._from_hypertable_index_ddl(v_keyidx, v_keytmp, v_nsp, v_dest);
     commit;
   end if;
@@ -1992,8 +2045,12 @@ begin
        order by i.indexrelid
        limit 1;
       if v_pre_idx is not null then
+        -- by-name-ok: an index built or renamed on a namesake is not on the copy, so the swap's ADD CONSTRAINT ...
+        --   USING INDEX or ALTER INDEX ... RENAME fails and rolls back (#1402)
         execute format('alter index %s rename to %I', v_pre_idx::text, v_tmp);
       else
+        -- by-name-ok: an index built or renamed on a namesake is not on the copy, so the swap's ADD CONSTRAINT ...
+        --   USING INDEX or ALTER INDEX ... RENAME fails and rolls back (#1402)
         execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
       end if;
     end if;
@@ -2011,6 +2068,8 @@ begin
                                where con.conrelid = p_hypertable and con.contype in ('p', 'u')
                                  and con.conindid = i.indexrelid) loop
     v_tmp := pgpm._from_hypertable_tmp_name(k.origname, k.indexrelid);
+    -- by-name-ok: an index built or renamed on a namesake is not on the copy, so the swap's ADD CONSTRAINT ... USING
+    --   INDEX or ALTER INDEX ... RENAME fails and rolls back (#1402)
     execute pgpm._from_hypertable_index_ddl(k.indexrelid, v_tmp, v_nsp, v_dest);
     v_idx_orig := array_append(v_idx_orig, k.origname::text);
     v_idx_tmps := array_append(v_idx_tmps, v_tmp);
@@ -2243,6 +2302,8 @@ begin
     loop
       v_fresh_batch := false;
       if k.cmp is not null then
+        -- by-name-ok: a compressed chunk in TimescaleDB's own schema, which a swap would have to rename; a read that
+        --   only chooses which rows the #654 check reads
         execute format('select exists (select 1 from %s s where %s)', k.cmp::text, v_fresh) into v_fresh_batch;
       end if;
       -- #1366: the copy rendered here, after the compressed chunk's read (which can wait for its lock), and each
@@ -2250,14 +2311,22 @@ begin
       v_nomatch_q := format('not exists (select 1 from %s d where %s = %s and row(%s)::text = row(%s)::text)',
                           v_dest_oid, v_dkey_q, v_skey_q, v_dcols_q, v_scols_q);
       if k.cmp is null then
+        -- by-name-ok: the hypertable and its chunks, held ACCESS EXCLUSIVE by the cutover's lock by oid (not ONLY),
+        --   rendered from their oids: this waits for nothing of them
         execute format('select count(*), count(x.kt), min(x.kt) from (select case when %s then case when %s then row%s::text end end as kt from only %s s offset 0) x',
                        v_fresh, v_nomatch_q, v_skey_q, k.rel::text) into v_n, v_m, v_kt;
       elsif v_fresh_batch then
+        -- by-name-ok: the hypertable and its chunks, held ACCESS EXCLUSIVE by the cutover's lock by oid (not ONLY),
+        --   rendered from their oids: this waits for nothing of them
         execute format('select count(*), count(x.kt), min(x.kt) from (select case when %s then row%s::text end as kt from %s s offset 0) x',
                        v_nomatch_q, v_skey_q, k.rel::text) into v_n, v_m, v_kt;
       else
+        -- by-name-ok: the hypertable and its chunks, held ACCESS EXCLUSIVE by the cutover's lock by oid (not ONLY),
+        --   rendered from their oids: this waits for nothing of them
         execute format('select count(x.kt), min(x.kt) from (select case when %s then case when %s then row%s::text end end as kt from only %s s offset 0) x',
                        v_fresh, v_nomatch_q, v_skey_q, k.rel::text) into v_m, v_kt;
+        -- by-name-ok: the hypertable and its chunks, held ACCESS EXCLUSIVE by the cutover's lock by oid (not ONLY),
+        --   rendered from their oids: this waits for nothing of them
         execute format('select count(*) from %s', k.rel::text) into v_n;
       end if;
       v_src_n := v_src_n + v_n;
@@ -2335,6 +2404,8 @@ begin
   loop
     v_own_seqs := array_append(v_own_seqs, k.seq);
     v_own_cols := array_append(v_own_cols, k.attname);
+    -- by-name-ok: self-refusing (#1402): our sequence stays owned by the source, whose DROP then fails (the copy's
+    --   default depends on it)
     execute format('alter sequence %s owned by none', k.seq::text);
   end loop;
   -- OUTGOING foreign keys need no work here any more (#263). from_hypertable_copy already added them to
@@ -2380,6 +2451,7 @@ begin
      order by c.conname
   loop
     v_in_names := array_append(v_in_names, k.conname::text);
+    -- by-name-ok: self-refusing (#1402): the real key still depends on the chunks, so the source's DROP fails 2BP01
     execute format('alter table %s drop constraint %I', k.referencing::text, k.conname);
     insert into pgpm.dropped_fk (parent_table, referencing_table, constraint_name, definition)
       values (v_dest_oid, k.referencing, k.conname, k.def);
@@ -2428,6 +2500,8 @@ begin
   -- adopt the pre-built unique indexes as the original PK/UNIQUE constraints (metadata-only; USING INDEX
   -- also renames the adopted index to the constraint name)
   for v_i in 1 .. coalesce(array_length(v_key_names, 1), 0) loop
+    -- by-name-ok: unreachable (#1402, measured): from the source's DROP to the COMMIT, ALTER SCHEMA ... RENAME of the
+    --   hypertable's schema waits for the cutover (TimescaleDB's hook updates the dropped hypertable's row)
     execute format('alter table %I.%I add constraint %I %s using index %I',
                    v_nsp, v_rel, v_key_names[v_i],
                    case when v_key_types[v_i] = 'p' then 'primary key' else 'unique' end,
@@ -2435,11 +2509,15 @@ begin
   end loop;
   -- rename the pre-built secondary indexes to their original names (metadata-only)
   for v_i in 1 .. coalesce(array_length(v_idx_orig, 1), 0) loop
+    -- by-name-ok: unreachable (#1402, measured): from the source's DROP to the COMMIT, ALTER SCHEMA ... RENAME of the
+    --   hypertable's schema waits for the cutover (TimescaleDB's hook updates the dropped hypertable's row)
     execute format('alter index %I.%I rename to %I', v_nsp, v_idx_tmps[v_i], v_idx_orig[v_i]);
   end loop;
   -- #787: the source's owner, grants, row-level security, policies, comment and triggers, onto the table now
   -- under its name, in the swap transaction, so transmute finds them there and carries them onto its parent.
   foreach v_stmt in array v_carried_ddl loop
+    -- by-name-ok: unreachable (#1402, measured): from the source's DROP to the COMMIT, ALTER SCHEMA ... RENAME of the
+    --   hypertable's schema waits for the cutover (TimescaleDB's hook updates the dropped hypertable's row)
     execute v_stmt;
   end loop;
   -- Identity, re-added in the source's kind and with its sequence's options (#640), at the SOURCE sequence's
@@ -2452,6 +2530,8 @@ begin
   -- out-of-range setval.
   if v_ident_cols is not null then
     for v_i in 1 .. array_length(v_ident_cols, 1) loop
+      -- by-name-ok: unreachable (#1402, measured): from the source's DROP to the COMMIT, ALTER SCHEMA ... RENAME of
+      --   the hypertable's schema waits for the cutover (TimescaleDB's hook updates the dropped hypertable's row)
       execute format('alter table %I.%I alter column %I add generated %s as identity %s',
                      v_nsp, v_rel, v_ident_cols[v_i],
                      case when v_ident_kinds[v_i] = 'a' then 'always' else 'by default' end,
@@ -2466,6 +2546,8 @@ begin
   -- #839: the sequences let go of before the DROP, owned by the same columns of the table now in its place,
   -- whose owner the swap has just made the source's (the sequences always had it).
   for v_i in 1 .. coalesce(array_length(v_own_seqs, 1), 0) loop
+    -- by-name-ok: unreachable (#1402, measured): from the source's DROP to the COMMIT, ALTER SCHEMA ... RENAME of the
+    --   hypertable's schema waits for the cutover (TimescaleDB's hook updates the dropped hypertable's row)
     execute format('alter sequence %s owned by %I.%I.%I', v_own_seqs[v_i]::text, v_nsp, v_rel, v_own_cols[v_i]);
   end loop;
   commit;

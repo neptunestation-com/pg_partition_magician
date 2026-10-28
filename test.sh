@@ -310,12 +310,15 @@ run_version() {  # <pg_version>
     local -a parallel=() serial=() alone=()
     for f in tests/*.sql; do
       local b; b="$(basename "$f")"; n=$((n + 1))
-      if [ "$b" = "333_snapshot_wait_foreign_floor_holder_test.sql" ] || [ "$b" = "345_retire_locks_by_oid_test.sql" ]; then
+      if [ "$b" = "333_snapshot_wait_foreign_floor_holder_test.sql" ] || [ "$b" = "345_retire_locks_by_oid_test.sql" ] \
+         || [ "$b" = "349_regrain_swap_detach_by_oid_test.sql" ] || [ "$b" = "350_regrain_copy_by_oid_test.sql" ]; then
         # Holds a transaction open in another database for seconds, which holds back the xmin of every
         # snapshot in the cluster, so every other file's regrain swap would defer behind it (#1263). It
         # runs in its own clone like the rest, but after them and one at a time, never beside them.
         # 345 holds one open while its own regrain swap waits behind it, and that swap waits out every
-        # older snapshot in the cluster, another file's included (#1335 bullet 10).
+        # older snapshot in the cluster, another file's included (#1335 bullet 10). 349 and 350 likewise: their
+        # swaps wait for every snapshot older than the copies, and beside another file's running transaction the
+        # file's own polling statement is one of them (#1362, #1358).
         alone+=("$n:$b")
         continue
       fi
@@ -1347,6 +1350,8 @@ run_perf() {
     "bench/retire_locks_by_oid.sh pgpm_perf400"
     "bench/uninstall_drops_by_oid.sh pgpm_perf406"
     "bench/transmute_by_oid.sh pgpm_perf410"
+    "bench/regrain_swap_detach_by_oid.sh pgpm_perf407"
+    "bench/regrain_copy_by_oid.sh pgpm_perf408"
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
     "bench/install_keeps_surface_grants.sh pgpm_perf375"
     "bench/retirement_mark_needs_dispatch.sh pgpm_perf367"
@@ -1366,6 +1371,10 @@ run_perf() {
     "bench/archive_remedy_encoded_bounds.sh pgpm_perf425"
     "bench/tests_identity_not_count.sh pgpm_perf426"
     "bench/verify_parquet_tests_see_rows.sh pgpm_perf427"
+    "bench/fix_phase_assign_commands.sh pgpm_perf433"
+    "bench/screenshot_chrome_override.sh pgpm_perf434"
+    "bench/schema_swap_leftovers.sh pgpm_perf439"
+    "bench/by_name_after_wait_lint.sh pgpm_perf440"
   )
   local selected=()
   local n=${#guards[@]} idx
@@ -1644,6 +1653,10 @@ lint_job_archive_object_keys() {
   python3 scripts/check_archive_child_by_oid.py --selftest
   python3 scripts/check_archive_child_by_oid.py
 }
+lint_job_by_name_statements() {
+  python3 scripts/check_by_name_after_wait.py --selftest
+  python3 scripts/check_by_name_after_wait.py
+}
 lint_job_minifier() {
   python3 scripts/minify_sql.py --selftest
   PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
@@ -1700,6 +1713,7 @@ run_lint() {
     living-docs
     quoted-splices
     archive-object-keys
+    by-name-statements
     minifier
     core-growth
     track-filters
