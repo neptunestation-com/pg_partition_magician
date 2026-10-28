@@ -20,6 +20,11 @@
 # were spelled in words starved() does not read: `WITNESS:` and `precondition:` in bench/, and in about a
 # hundred pgTAP files the wrappers run `A LIVENESS:`, `LIVENESS (A):`, `LIVENESS A:`, `witness:`, `setup:`,
 # `fixture (A):`, which a wrapper echoes as `not ok N - <description>` for starved() to misread.
+# AND (#1380) the premises a guard prints from PYTHON, in a heredoc or a bench/*.py file, were read by no
+# scan at all: archive_to_s3_compress.sh's decoder half printed `FAIL  single: LIVENESS: rows were read at
+# all`, the run label ahead of the prefix, archive_parquet_snapshot.sh's printed `pyarrow read rows at all`
+# with no prefix, and lock_trace.sh's "the probe attached and is delivering events" premise (shell, but
+# missing from the FLOOR) failed unprefixed before its exit 1.
 #
 # WHAT IT ASSERTS.
 #   FLOOR  Each witness or premise the listed guards name, read out of the guard's source as written, is
@@ -44,6 +49,12 @@
 #          `fixture`, `GUARD`, any case, with or without a `(tag)`) followed by a colon anywhere but at its
 #          head in exactly the spelling starved() reads (`$2: LIVENESS:`, `Liveness:`, `WITNESS:`,
 #          `precondition:`), since starved() cannot see one there.
+#   SPELLING  Over every Python helper in bench/: the body of every heredoc in a bench/*.sh, and every
+#          bench/*.py. A helper is a function that prints FAIL; each call to it whose label is a literal
+#          carrying a premise word and a colon (the shell rule's words) is rendered FAILING through the
+#          helper itself (its own format, run label and all) and must be read as starved by starved().
+#          Judged by what the rule reads, so a helper that puts its run label ahead of the prefix fails
+#          here though every label it is given is spelled right. The FLOOR reads Python calls the same way.
 #   SPELLING  Over every pgTAP file a bench/*.sh names (the files the wrappers run, whose `not ok` lines
 #          discriminate.sh reads): no SQL string literal begins, after an optional tag of up to three
 #          characters, with one of those premise words and a colon unless it begins exactly `LIVENESS:`,
@@ -51,8 +62,10 @@
 #          planted spellings, positive and negative, before they are trusted with the checkout.
 #   LIVENESS  starved() was found and reads a planted witness-only run as starved and a planted defect run
 #          as a catch; every floor guard's witnesses and defect checks were found and rendered as FAIL lines;
-#          the shell scan read the helper calls of the directory, the floor's own labels among them; the SQL
-#          scan read the wrapper-run files, tests/296 and tests/297 among them, and their prefixed premises.
+#          the shell scan read the helper calls of the directory, the floor's own labels among them; the
+#          Python scan read the helper calls of the heredocs and bench/*.py, rendered failing, the floor's
+#          among them; the SQL scan read the wrapper-run files, tests/296 and tests/297 among them, and
+#          their prefixed premises.
 #
 # Not covered, deliberately: a premise printed with no premise word at all, in a guard the FLOOR does not
 # list. Which check is a premise is the header's judgment in prose; the FLOOR is where it is recorded.
@@ -73,6 +86,12 @@
 #                                      the pre-#1033 word
 #   witness_label_test_tag_before_prefix -- tests/296's first witness spelled `A LIVENESS: ...` again, the
 #                                      pre-#1033 spelling of a wrapper-run file
+#   witness_label_py_run_label_first -- archive_to_s3_compress.sh's decoder helper prints the run label
+#                                      ahead of the prefix again, the pre-#1380 helper
+#   witness_label_py_unprefixed     -- archive_parquet_snapshot.sh's "pyarrow read rows at all" without its
+#                                      prefix, the pre-#1380 label
+#   witness_label_probe_attached_unprefixed -- lock_trace.sh's "the probe attached and is delivering
+#                                      events" without its prefix, the pre-#1380 label
 #
 # Usage: liveness_witness_labels.sh <container> <db> [guard script or test file]
 # With no third argument it judges this checkout. With one it judges THAT file in place of the one it
@@ -230,7 +249,12 @@ lock_trace|W|ml.s turn is visible in the same tick
 lock_trace|W|no events were dropped
 lock_trace|W|the tick did the work that takes the lock \(retain\)
 lock_trace|W|and regrained ml in the same tick
+lock_trace|W|the probe attached and is delivering events
 lock_trace|D|a transaction commits between mg_ret.s lock and ml.s turn
+archive_to_s3_compress|W|rows were read at all
+archive_to_s3_compress|D|the ids are the partition.s, each once, in control order
+archive_parquet_snapshot|W|pyarrow read rows at all
+archive_parquet_snapshot|D|id = tag on every row
 regrain_truncate_guard_upgrade|W|the source carries capture and no guard
 regrain_truncate_guard_upgrade|W|the resume restarted nothing
 regrain_truncate_guard_upgrade|D|a TRUNCATE before any tick is refused
@@ -245,9 +269,12 @@ helper_def() {
   ' "$1"
 }
 # sites <script> <ERE>: every site in <script> that prints a FAIL line with a label matching <ERE>, one per
-# line as <form><TAB><printf format, for the printf form><TAB><label as written>. The forms are the four the
-# guards use: `check "<label>"`, `say FAIL "<label>"`, `printf 'FAIL ...' "<label>"` and `echo "FAIL  <label>"`.
+# line as <form><US><printf format, for the printf form><US><label as written>. The forms are the four the
+# guards use in shell: `check "<label>"`, `say FAIL "<label>"`, `printf 'FAIL ...' "<label>"` and
+# `echo "FAIL  <label>"`, and a fifth, `py`, for a call to a Python helper in one of the script's heredocs,
+# whose second field is the line that call prints failing, rendered by pycalls below.
 sites() {
+  pycalls floor "$1" "$2"
   python3 - "$1" "$2" <<'PY'
 import re, sys
 path, frag = sys.argv[1], re.compile(sys.argv[2])
@@ -278,7 +305,128 @@ render() {
     say)   ( eval "$(helper_def "$1" say)"; say FAIL "$4" "a" ) 2>&1 ;;
     printf) ( printf -- "$3" "$4" ) 2>&1 ;;
     echo)  printf 'FAIL  %s\n' "$4" ;;
+    py)    printf '%s\n' "$3" ;;
   esac
+}
+
+# pycalls floor <file> <ERE> | pycalls scan <file>...: every call to a Python helper (a function that prints
+# FAIL) whose label is a literal, in the body of every heredoc of a shell script and in a whole .py file, as
+# <file:line><US><helper><US><premise word: 1 or 0><US><label as written><US><the line it prints failing>
+# (scan mode), or, for the calls whose label matches <ERE>, as `py<US><the line it prints failing><US><the
+# label>`, the shape sites() prints (floor mode). The failing line is the
+# helper's OWN: its source is executed with the call's label (each {...} of an f-string read as T), every
+# other argument False (a cond, an ok) or, when that prints no FAIL, a distinct string each (an actual
+# against an expected), and any global it reads set to T (a run label). `UNPARSED<US><file:line>` marks a
+# heredoc that reads as Python (a def or an import) but does not parse, so a scan cannot skip one silently.
+pycalls() {
+  python3 - "$@" <<'PY'
+import ast, builtins, contextlib, io, re, sys, textwrap, warnings
+warnings.simplefilter("ignore", SyntaxWarning)   # a shell heredoc's `\$` is not this scan's to judge
+mode, args = sys.argv[1], sys.argv[2:]
+frag = re.compile(args.pop()) if mode == "floor" else None
+PREMISE = re.compile(r'\b(?:liveness(?:\s+witness(?:es)?)?|witness(?:es)?|precondition|setup|fixture|guard)'
+                     r'\s*(?:\([^)]{1,4}\))?\s*:', re.I)
+HEREDOC = re.compile(r'(?<!<)<<-?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\1')
+PYISH = re.compile(r'^\s*(?:def \w+\(|import \w|from [\w.]+ import )', re.M)
+US = "\x1f"
+
+def heredocs(text, base):
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        m = HEREDOC.search(lines[i]) if not lines[i].lstrip().startswith("#") else None
+        if not m:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and lines[j].lstrip("\t").rstrip() != m.group(2):
+            j += 1
+        yield base + i + 1, "\n".join(lines[i + 1:j])
+        i = j + 1
+
+def bodies(path):
+    # A body that does not parse is searched for heredocs of its own: lock_timeout_pairing_demo.sh feeds
+    # its Python through a `$(python3 - <<'PY' ...)` inside a `<<EOF` heredoc.
+    text = open(path, errors="replace").read()
+    todo = [(0, text)] if path.endswith(".py") else list(heredocs(text, 0))
+    while todo:
+        off, src = todo.pop(0)
+        try:
+            yield off, src, ast.parse(src)
+        except SyntaxError:
+            inner = list(heredocs(src, off))
+            if inner:
+                todo[:0] = inner
+            elif PYISH.search(src):
+                yield off, src, None
+
+def literal(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "T" for v in node.values)
+    return None
+
+def render(fn, src, label, at):
+    code = textwrap.dedent(ast.get_source_segment(src, fn))
+    params = [a.arg for a in fn.args.args]
+    free = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} - set(params) - set(dir(builtins))
+    for attempt in ("false", "distinct"):
+        ns = {n: (__import__(n) if n in ("sys", "os", "re", "json") else "T") for n in free}
+        try:
+            exec(code, ns)
+        except Exception:
+            return ""
+        call = [label if k == at else (False if attempt == "false" else f"v{k}") for k in range(len(params))]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                ns[fn.name](*call)
+        except BaseException:
+            pass
+        fails = [line for line in buf.getvalue().split("\n") if line.startswith("FAIL")]
+        if fails:
+            return fails[0]
+    return ""
+
+for path in args:
+    for off, src, tree in bodies(path):
+        if tree is None:
+            print(f"UNPARSED{US}{path}:{off}")
+            continue
+        helpers = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef):
+                seg = ast.get_source_segment(src, fn) or ""
+                if "FAIL" in seg and "print(" in seg:
+                    helpers[fn.name] = fn
+        for call in ast.walk(tree):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in helpers):
+                continue
+            fn = helpers[call.func.id]
+            params = [a.arg for a in fn.args.args]
+            at, label, written = None, None, None
+            for k, a in enumerate(call.args):
+                if literal(a) is not None:
+                    at, label, written = k, literal(a), ast.get_source_segment(src, a)
+                    break
+            if at is None:
+                for kw in call.keywords:
+                    if kw.arg in params and literal(kw.value) is not None:
+                        at, label, written = params.index(kw.arg), literal(kw.value), ast.get_source_segment(src, kw.value)
+                        break
+            if at is None or at >= len(params):
+                continue
+            written = " ".join(written.split())
+            if frag is not None and not frag.search(label):
+                continue
+            line = render(fn, src, label, at).replace(US, " ")
+            prem = 1 if PREMISE.search(label) else 0
+            if frag is not None:
+                print(f"py{US}{line}{US}{label}")
+            else:
+                print(f"{path}:{off + call.lineno}{US}{fn.name}{US}{prem}{US}{written}{US}{line}")
+PY
 }
 
 judged=0; want=0; seen_w=" "; seen_d=" "; floor_guards=" "
@@ -413,6 +561,94 @@ if [ "$hits" = 0 ]; then ok "no guard prints a premise word anywhere but at a la
 else
   bad "no guard prints a premise word anywhere but at a label's head" "$hits found"
   grep '^HIT' "$work/scan.out" | cut -f2- | sed "s|$ROOT/||; s/^/      /"
+fi
+
+# ---- SPELLING: what the Python helpers print, rendered, reads as a premise where it carries one ---------
+# Held to planted helpers first, the way the shell scan is: the pos_ ones print a premise-worded label where
+# starved() cannot read it, the neg_ ones where it can (or carry no premise at all).
+mkdir -p "$work/py"
+# Two helpers of the archive decoders' shape (the run label ahead of the name, and the #1380 one that hoists
+# the prefix), each in a shell heredoc, and one head-first say() of the doc guards' shape in .py files.
+cat > "$work/py/pos_run_label_first.sh" <<'EOF'
+python3 - "$hex" "$label" <<'PYEOF'
+def check(name, detail, cond):
+    print(("PASS  " if cond else "FAIL  ") + f"{label + ': ' + name:<58} {detail}")
+check("LIVENESS: rows were read at all", "0 rows", True)
+PYEOF
+EOF
+cat > "$work/py/neg_hoisted.sh" <<'EOF'
+python3 - "$hex" "$label" <<'PYEOF'
+def check(name, detail, cond):
+    head = "LIVENESS: " if name.startswith("LIVENESS: ") else ""
+    print(("PASS  " if cond else "FAIL  ") + f"{head + label + ': ' + name[len(head):]:<58} {detail}")
+check("LIVENESS: rows were read at all", "0 rows", True)
+PYEOF
+EOF
+cat > "$work/py/say.py" <<'EOF'
+def say(ok, what, detail=""):
+    global fail
+    print(f"{'PASS' if ok else 'FAIL'}  {what:<62} {detail}")
+    fail = fail or not ok
+EOF
+pyplant() { { cat "$work/py/say.py"; printf '%s\n' "$2"; } > "$work/py/$1"; }
+pyplant pos_fstring_tag.py     'say(True, f"{r}: LIVENESS: the doc was read", "1")'
+pyplant pos_miscased.py        'say(True, "Liveness: the doc was read", "1")'
+pyplant neg_head.py            'say(True, "LIVENESS: the doc was read", "1")'
+pyplant neg_fixture_head.py    'say(True, f"fixture: {r} was built")'
+pyplant neg_prose.py           'say(True, "every LIVENESS witness held", "1")'
+pyplant neg_not_a_helper.py    'print(f"{r}: LIVENESS: printed by print, not a FAIL helper")'
+{ echo 'python3 - <<PY'; cat "$work/py/say.py"; echo 'say(True, "WITNESS: the doc was read")'; echo 'PY'; } \
+  > "$work/py/pos_witness_word.sh"
+rm "$work/py/say.py"
+# pyjudge <pycalls output>: a HIT line for every premise-worded call whose rendered line starved() does not
+# read as starved (or that rendered no FAIL line at all), and the UNPARSED marks as they are.
+pyjudge() {
+  local where helper prem written line
+  while IFS=$'\x1f' read -r where helper prem written line; do
+    if [ "$where" = UNPARSED ]; then printf 'UNPARSED\t%s\n' "$helper"; continue; fi
+    # a file judged in place of a guard is named as that guard
+    if [ -n "$ONLY_NAME" ]; then where="${where/#"$ONLY"/$ROOT/bench/$ONLY_NAME.sh}"; fi
+    printf 'CALL\t%s\t%s\n' "$where" "$written"
+    [ "$prem" = 1 ] || continue
+    printf 'JUDGED\t%s\t%s\n' "$where" "$written"
+    printf '%s\n' "$line" > "$work/pyrun.log"
+    if [[ "$line" != FAIL* ]] || ! starved "$work/pyrun.log"; then
+      printf 'HIT\t%s\t%s -> %s\n' "$where" "$written" "${line:-no FAIL line}"
+    fi
+  done
+}
+py_ok=1
+for f in "$work"/py/*; do
+  n=$(basename "$f"); n="${n%.*}"
+  if pycalls scan "$f" | pyjudge | grep -q '^HIT'; then got=pos; else got=neg; fi
+  if [ "$got" != "${n%%_*}" ]; then py_ok=0; bad "LIVENESS: the Python scan reads the planted $n right" "read as $got"; fi
+done
+[ "$py_ok" = 1 ] && ok "LIVENESS: the Python scan reads every planted helper right" "4 refused, 5 passed"
+
+pyfiles=("${files[@]}")
+for f in "$ROOT"/bench/*.py; do pyfiles+=("$f"); done
+pycalls scan "${pyfiles[@]}" | pyjudge > "$work/py.out"
+# Its witness: the helper calls of the heredocs and the .py files (323 at #1380, 100 of them premise-worded),
+# among them a defect check and the witness of the decoder half #1380 is about, and a bench/*.py file's.
+ncalls=$(grep -c '^CALL' "$work/py.out")
+njudged=$(grep -c '^JUDGED' "$work/py.out")
+if [ "$ncalls" -ge 250 ] && [ "$njudged" -ge 50 ] \
+   && grep -qE '^CALL	[^	]*archive_to_s3_compress[^	]*	"the ids are the partition.s, each once' "$work/py.out" \
+   && grep -qE '^JUDGED	[^	]*archive_to_s3_compress[^	]*	"LIVENESS: rows were read at all"' "$work/py.out" \
+   && grep -qE '^CALL	[^	]*lock_view_selftest\.py:' "$work/py.out"; then
+  ok "LIVENESS: the Python scan read the helper calls of the heredocs and .py files" "$ncalls calls, $njudged premises"
+else
+  bad "LIVENESS: the Python scan read the helper calls of the heredocs and .py files" "$ncalls calls, $njudged premises"
+fi
+if grep -q '^UNPARSED' "$work/py.out"; then
+  bad "GUARD: every heredoc that reads as Python parses" "$(grep -c '^UNPARSED' "$work/py.out") do not"
+  grep '^UNPARSED' "$work/py.out" | cut -f2 | sed "s|$ROOT/||; s/^/      /"
+fi
+pyhits=$(grep -c '^HIT' "$work/py.out")
+if [ "$pyhits" = 0 ]; then ok "no Python helper prints a premise where starved() cannot read it" "0 found"
+else
+  bad "no Python helper prints a premise where starved() cannot read it" "$pyhits found"
+  grep '^HIT' "$work/py.out" | cut -f2- | sed "s|$ROOT/||; s/^/      /"
 fi
 
 # ---- SPELLING: the pgTAP files the wrappers run label their premises at the head -------------------------

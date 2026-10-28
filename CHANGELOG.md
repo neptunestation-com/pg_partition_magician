@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **A lock guard's overlap witness can fail** (#1379). The probes of `bench/maintain_lock.sh` and
+  `bench/regrain_outgoing_fk_lock.sh` set `saw := true` after their poll loop, unconditionally, so "LIVENESS: the
+  probe overlapped a running tick" (and "... a running swap") read true when the poll ran out of turns having seen
+  nothing: the vacuous witness `bench/restore_fk_lock.sh` retired under #416. Each now sets it where the poll finds
+  the work. `bench/probe_overlap_witness.sh` runs each lock guard's own probe block (those two,
+  `retire_detach_lock.sh`'s and `transmute_lock.sh`'s) with nothing running, where the witness must read false,
+  and beside a session doing what the poll looks for, where it must read true, and fails on a `bench/*.sh` probe
+  of that shape it does not list. Mutations `probe_witness_unconditional_maintain` and
+  `probe_witness_unconditional_rofk`.
+
+- **A premise printed from Python reads as one** (#1380). `bench/discriminate.sh`'s `starved()` reads only the
+  head of a FAIL line, and `bench/archive_to_s3_compress.sh`'s decoder half printed
+  `FAIL  single: LIVENESS: rows were read at all`, the run label ahead of the prefix,
+  `bench/archive_parquet_snapshot.sh`'s printed its liveness witness "pyarrow read rows at all" with no prefix,
+  and `bench/lock_trace.sh`'s premise "the probe attached and is delivering events" failed unprefixed before its
+  `exit 1`, so a mutant run that failed only one of them was certified as a catch. The decoders' helper now puts
+  the prefix ahead of the run label, and both premises carry it. `bench/liveness_witness_labels.sh` now reads
+  Python too: every helper that prints FAIL, in a heredoc of a `bench/*.sh` or in a `bench/*.py`, has each call
+  whose label carries a premise word rendered failing through the helper itself and judged by `starved()`, and its
+  floor holds the three sites. Mutations `witness_label_py_run_label_first`, `witness_label_py_unprefixed` and
+  `witness_label_probe_attached_unprefixed`.
+
 - **Every statement on a relation or function pgpm identified reaches it, or refuses** (the schema-swap class:
   #1358, #1362, #1366 and the statements their fixes did not own). A statement that names a table or function pgpm
   identified by oid renders the name before it waits for its lock and resolves it again once granted, and a schema

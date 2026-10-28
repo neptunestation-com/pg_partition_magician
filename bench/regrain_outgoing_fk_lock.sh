@@ -117,13 +117,16 @@ docker exec "$C" psql -U postgres -d "$DB" -qtA -c "
 do \$p\$
 declare n int := 0; t int := 0; saw boolean := false;
 begin
+  -- saw is set where the poll finds the swap and nowhere else (#1379): set after the loop, it read true
+  -- when the loop ran out of turns having seen nothing, the vacuous witness restore_fk_lock.sh retired.
   for i in 1 .. 2000000 loop
-    exit when exists(select 1 from pg_stat_activity
-                      where datname = current_database() and pid <> pg_backend_pid()
-                        and query like '%regrain_step%' and state = 'active');
+    if exists(select 1 from pg_stat_activity
+               where datname = current_database() and pid <> pg_backend_pid()
+                 and query like '%regrain_step%' and state = 'active') then
+      saw := true; exit;
+    end if;
     commit;
   end loop;
-  saw := true;
   while not exists(select 1 from public.done) loop
     begin
       set local lock_timeout = '50ms';
