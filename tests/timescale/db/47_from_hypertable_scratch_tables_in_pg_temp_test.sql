@@ -24,7 +24,7 @@
 -- bench/hypertable_scratch_tables_in_pg_temp.sh runs this file against the mutations that put each
 -- unqualified site back. Autocommit, disposable-db: every committing procedure is a top-level CALL, and
 -- run_timescale fails the track on any `ERROR:` line.
-select plan(20);
+select plan(21);
 
 create table public.pgpm_dbatch (note text primary key);
 insert into public.pgpm_dbatch values ('operator dbatch A'), ('operator dbatch B');
@@ -68,13 +68,31 @@ select is((select array_agg(id || ':' || v order by id) from public.g3_a_pgpm_de
   'LIVENESS: the drain procedure applied the update to id 3 and the insert of id 7');
 select is(g3_notes('public.pgpm_dbatch'), 'operator dbatch A,operator dbatch B',
   'the operator''s public.pgpm_dbatch and its 2 rows survive the drain procedure');
+-- The cutover's pre-drain reaches pgpm_dbatch only through the drain step, and its loop calls the step only
+-- while the delta holds more than p_drain_batch rows (#1377): at the default 5000 this update's 2 delta rows
+-- never reach it, and the under-lock reconcile, which has no pgpm_dbatch, applies the update alone. So the
+-- batch is 1, and each write into the copy is recorded with whether this backend held the hypertable's
+-- ACCESS EXCLUSIVE lock then: a write without it is the pre-drain's step.
+create table public.g3_a_src as select 'public.g3_a'::regclass::oid as src;
+create table public.g3_a_writes (id bigint, v text, locked boolean);
+create function public.g3_a_write_seen() returns trigger language plpgsql as $$
+begin
+  insert into public.g3_a_writes values (new.id, new.v,
+    exists (select 1 from pg_locks l where l.pid = pg_backend_pid() and l.relation = (select src from public.g3_a_src)
+              and l.mode = 'AccessExclusiveLock' and l.granted));
+  return null;
+end $$;
+create trigger g3_a_write_seen after insert on public.g3_a_pgpm_dest for each row execute function public.g3_a_write_seen();
 update public.g3_a set v = 'a4-new' where id = 4;
-call pgpm.from_hypertable_cutover('public.g3_a', 'ts', interval '1 day');
+call pgpm.from_hypertable_cutover('public.g3_a', 'ts', interval '1 day', p_drain_batch => 1);
 select is((select relkind::text from pg_class where oid = 'public.g3_a'::regclass), 'p',
   'LIVENESS: the tracked cutover converted the table');
 select is((select array_agg(id || ':' || v order by id) from public.g3_a),
   array['1:a1', '2:a2-new', '3:a3-new', '4:a4-new', '6:a6', '7:a7'],
-  'LIVENESS: with the update its pre-drain applied');
+  'LIVENESS: with the update to id 4');
+select is((select array_agg(id || ':' || v order by id) from public.g3_a_writes where not locked),
+  array['4:a4-new'],
+  'LIVENESS: its pre-drain applied the update to id 4 in a drain step, online, before the hypertable''s lock');
 select is(g3_notes('public.pgpm_dbatch'), 'operator dbatch A,operator dbatch B',
   'the operator''s public.pgpm_dbatch and its 2 rows survive the tracked cutover');
 

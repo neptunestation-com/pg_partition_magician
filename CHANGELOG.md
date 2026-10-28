@@ -42,6 +42,26 @@
   `capture_fn_create_or_replace` and `drop_fn_by_oid_unchecked`, and `bench/by_name_after_wait_lint.sh` judges the
   lint against four mutants of it.
 
+- **The timescale tests that claim the cutover's pre-drain ran now witness it** (#1377).
+  `tests/timescale/db/14`'s automatic pre-drain section asserted only the cutover's end state, which the under-lock
+  reconcile produces with no pre-drain at all, and a drain-key index nothing has built since #175;
+  `tests/timescale/db/47` (B) witnessed "its pre-drain applied" the update at the default `p_drain_batch` of 5000,
+  under which a 2-row delta never reaches the drain step, `pgpm_dbatch`'s only site. Both now record each write
+  into the copy with whether the hypertable's `ACCESS EXCLUSIVE` lock was held, and assert backlog keys written
+  without it (14: in more than one batch, with at most one batch's residual under the lock; 47: with
+  `p_drain_batch => 1`, the update to id 4). `bench/tests_witness_the_step.sh` runs both against a cutover that
+  skips its tracked pre-drain, and fails against `predrain_witnessed_by_end_state_ts14` and
+  `predrain_witnessed_by_end_state_ts47`.
+
+- **Two core witnesses no longer hold before, or without, what they vouch for** (#1378). `tests/190` (E) witnessed
+  that the later regrain steps were copying by one copy not attached, which the step before them made true, so
+  steps that did nothing passed "do not ANALYZE it again"; it now reads the in-flight copy's ids before them (1)
+  and after them (1, 2, 3). `tests/279` part 3 and `tests/129` read `progress()` columns as scalar subqueries
+  asserted null, which an empty result also gives; they now read them as an array over the table's row, which
+  `is()` refuses when the row is missing. `bench/tests_witness_the_step.sh` runs tests/190 against later steps
+  made no-ops and tests/279 against a `progress()` that loses a table with a hand-detached cell, and fails against
+  `later_steps_witnessed_before_them_190` and `detached_write_child_scalar_null_279`.
+
 - **`bench/guards_run_on_clean_code.sh` credits only the tracks `test.sh` runs** (#1385). It counted a guard as
   run against the unmodified code when any `run_<track>()` body named it, though `test.sh` runs a track only by
   calling its function, so a guard whose only call sat in a `run_*` function nothing called (run against its
