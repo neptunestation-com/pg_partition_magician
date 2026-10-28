@@ -37,6 +37,28 @@
   name. A stranger is judged at every level of the parent's partition tree, as `retire()` reads attachment
   (mutation `unanchored_stranger_direct_only`).
 
+- **A lock guard's overlap witness can fail** (#1379). The probes of `bench/maintain_lock.sh` and
+  `bench/regrain_outgoing_fk_lock.sh` set `saw := true` after their poll loop, unconditionally, so "LIVENESS: the
+  probe overlapped a running tick" (and "... a running swap") read true when the poll ran out of turns having seen
+  nothing: the vacuous witness `bench/restore_fk_lock.sh` retired under #416. Each now sets it where the poll finds
+  the work. `bench/probe_overlap_witness.sh` runs each lock guard's own probe block (those two,
+  `retire_detach_lock.sh`'s and `transmute_lock.sh`'s) with nothing running, where the witness must read false,
+  and beside a session doing what the poll looks for, where it must read true, and fails on a `bench/*.sh` probe
+  of that shape it does not list. Mutations `probe_witness_unconditional_maintain` and
+  `probe_witness_unconditional_rofk`.
+
+- **A premise printed from Python reads as one** (#1380). `bench/discriminate.sh`'s `starved()` reads only the
+  head of a FAIL line, and `bench/archive_to_s3_compress.sh`'s decoder half printed
+  `FAIL  single: LIVENESS: rows were read at all`, the run label ahead of the prefix,
+  `bench/archive_parquet_snapshot.sh`'s printed its liveness witness "pyarrow read rows at all" with no prefix,
+  and `bench/lock_trace.sh`'s premise "the probe attached and is delivering events" failed unprefixed before its
+  `exit 1`, so a mutant run that failed only one of them was certified as a catch. The decoders' helper now puts
+  the prefix ahead of the run label, and both premises carry it. `bench/liveness_witness_labels.sh` now reads
+  Python too: every helper that prints FAIL, in a heredoc of a `bench/*.sh` or in a `bench/*.py`, has each call
+  whose label carries a premise word rendered failing through the helper itself and judged by `starved()`, and its
+  floor holds the three sites. Mutations `witness_label_py_run_label_first`, `witness_label_py_unprefixed` and
+  `witness_label_probe_attached_unprefixed`.
+
 - **Every statement on a relation or function pgpm identified reaches it, or refuses** (the schema-swap class:
   #1358, #1362, #1366 and the statements their fixes did not own). A statement that names a table or function pgpm
   identified by oid renders the name before it waits for its lock and resolves it again once granted, and a schema
@@ -54,6 +76,26 @@
   `own_like_parent_unchecked`, `scratch_mint_fn_unchecked`, `scratch_owner_follow_fn_unchecked`,
   `capture_fn_create_or_replace` and `drop_fn_by_oid_unchecked`, and `bench/by_name_after_wait_lint.sh` judges the
   lint against four mutants of it.
+
+- **The timescale tests that claim the cutover's pre-drain ran now witness it** (#1377).
+  `tests/timescale/db/14`'s automatic pre-drain section asserted only the cutover's end state, which the under-lock
+  reconcile produces with no pre-drain at all, and a drain-key index nothing has built since #175;
+  `tests/timescale/db/47` (B) witnessed "its pre-drain applied" the update at the default `p_drain_batch` of 5000,
+  under which a 2-row delta never reaches the drain step, `pgpm_dbatch`'s only site. Both now record each write
+  into the copy with whether the hypertable's `ACCESS EXCLUSIVE` lock was held, and assert backlog keys written
+  without it (14: in more than one batch, with at most one batch's residual under the lock; 47: with
+  `p_drain_batch => 1`, the update to id 4). `bench/tests_witness_the_step.sh` runs both against a cutover that
+  skips its tracked pre-drain, and fails against `predrain_witnessed_by_end_state_ts14` and
+  `predrain_witnessed_by_end_state_ts47`.
+
+- **Two core witnesses no longer hold before, or without, what they vouch for** (#1378). `tests/190` (E) witnessed
+  that the later regrain steps were copying by one copy not attached, which the step before them made true, so
+  steps that did nothing passed "do not ANALYZE it again"; it now reads the in-flight copy's ids before them (1)
+  and after them (1, 2, 3). `tests/279` part 3 and `tests/129` read `progress()` columns as scalar subqueries
+  asserted null, which an empty result also gives; they now read them as an array over the table's row, which
+  `is()` refuses when the row is missing. `bench/tests_witness_the_step.sh` runs tests/190 against later steps
+  made no-ops and tests/279 against a `progress()` that loses a table with a hand-detached cell, and fails against
+  `later_steps_witnessed_before_them_190` and `detached_write_child_scalar_null_279`.
 
 - **`bench/guards_run_on_clean_code.sh` credits only the tracks `test.sh` runs** (#1385). It counted a guard as
   run against the unmodified code when any `run_<track>()` body named it, though `test.sh` runs a track only by

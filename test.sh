@@ -646,6 +646,15 @@ run_timescale() {
     echo "--- the timescale files ask for leftover scratch records by the hypertables' oids (issue #1283) ---"
     bash "$(dirname "$0")/bench/hypertable_tests_scratch_by_hypertable_oid.sh" pgpm_test-timescale pgpm_perf391 || fail=1
 
+    # #1377's guard, the same way: tests_witness_the_step.sh judges tests/timescale/db/14 and 47 only when named, so
+    # the clean-code half of the pairs discriminate.sh completes with predrain_witnessed_by_end_state_ts14 and _ts47
+    # runs here, on this container.
+    echo "--- the timescale files' pre-drain witnesses fail when the cutover does not pre-drain (issue #1377) ---"
+    bash "$(dirname "$0")/bench/tests_witness_the_step.sh" pgpm_test-timescale pgpm_perf428 \
+      /repo/tests/timescale/db/14_from_hypertable_online_drain_test.sql || fail=1
+    bash "$(dirname "$0")/bench/tests_witness_the_step.sh" pgpm_test-timescale pgpm_perf428 \
+      /repo/tests/timescale/db/47_from_hypertable_scratch_tables_in_pg_temp_test.sql || fail=1
+
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
 
@@ -1317,6 +1326,7 @@ run_perf() {
     "bench/write_block_skips_hand_detached.sh pgpm_perf316"
     "bench/bound_contract_remedy.sh pgpm_perf318"
     "bench/liveness_witness_labels.sh pgpm_perf322"
+    "bench/probe_overlap_witness.sh pgpm_perf429"
     "bench/transmute_claim_owner_under_set_role.sh pgpm_perf325"
     "bench/retain_horizon_ambiguous_wall_time.sh pgpm_perf326"
     "bench/archive_retired_chunk_kept.sh pgpm_perf324"
@@ -1375,6 +1385,7 @@ run_perf() {
     "bench/screenshot_chrome_override.sh pgpm_perf434"
     "bench/schema_swap_leftovers.sh pgpm_perf439"
     "bench/by_name_after_wait_lint.sh pgpm_perf440"
+    "bench/tests_witness_the_step.sh pgpm_perf441"
   )
   local selected=()
   local n=${#guards[@]} idx

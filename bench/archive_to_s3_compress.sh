@@ -129,7 +129,10 @@ ok = True
 
 def check(name, detail, cond):
     global ok
-    print(("PASS  " if cond else "FAIL  ") + f"{label + ': ' + name:<58} {detail}")
+    # A LIVENESS: prefix leads the line, ahead of the run label: bench/discriminate.sh's starved() reads
+    # only the head of a FAIL line, so behind the label it would read the witness as a defect check (#1380).
+    head = "LIVENESS: " if name.startswith("LIVENESS: ") else ""
+    print(("PASS  " if cond else "FAIL  ") + f"{head + label + ': ' + name[len(head):]:<58} {detail}")
     ok = ok and cond
 
 
