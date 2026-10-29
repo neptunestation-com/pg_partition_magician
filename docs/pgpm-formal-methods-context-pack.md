@@ -8,7 +8,7 @@ version, a guard has a mutation, assert identity rather than cardinality.
 
 ## 1. Why this program exists
 
-The adversarial review loop works. Across passes 2 to 12 it has found and fixed several hundred
+The adversarial review loop works. Across passes 2 to 13 it has found and fixed several hundred
 defects, with measured precision, seed recall, coverage and lens rotation. It is also expensive: a
 loop (pass plus fix phase) is budgeted at about 27M agent tokens, and pass 12 alone spent 11.12M
 tokens for 42 findings, 4 of them Tier 1 (roughly 0.27M tokens per finding and 2.8M per Tier 1,
@@ -27,6 +27,19 @@ Two facts in the record say where a cheaper lever should aim:
    row (pass 10), the archive's recorded-chunk check comparing by count (pass 10).
 2. **Fixes are the injection channel.** The record repeatedly finds Tier 1 on the previous fix
    phase's surface ("young"), and the per-PR mode exists to close that channel.
+3. **Making an invariant explicit closes a class that per-site fixes keep reopening.** Pass 13
+   (`docs/reviews/2026-10-22-pass13.md`) is the clearest case. Its Tier 1s were regrain_step's swap
+   DETACH by a name rendered before a lock wait (#1362, old) and an upgrade-path state on the lever
+   phase's own surface (#1363, young), and the record names the class: seven Tier 1 to 3 findings
+   plus the re-finds of #1355 and #1358 were statements naming a relation by a name rendered before
+   a wait. The lever phase before it had fixed the sites its enumeration named, and the pass found
+   the enumeration incomplete. In the fix phase, #1392 (#1365) took nine per-PR rounds, each
+   finding one more place where an unanchored (pre-#421) `pgpm.part` row was resolved by name, four
+   of them Tier 1. Both classes closed only when the invariant was stated and enforced
+   mechanically: `_lock_oid` / `_effect_or_raise` with `scripts/check_by_name_after_wait.py` (#1409),
+   and the single resolver `pgpm._part_rel` with `scripts/check_part_row_by_name.py` (#1392 round 7).
+   That is `ResolveByRecord` (4.3) enforced by hand. This program does the same thing on purpose,
+   before the rounds are spent, and for invariants a lint cannot read.
 
 Nearly every Tier 1 above is a violation of one of a handful of **data-custody invariants**
 (no committed row is lost, no row is applied twice, nothing is dropped that is not provably
@@ -55,12 +68,12 @@ exhaustively at small scope, and binds the PL/pgSQL to the model.
 
 ## 3. Layers
 
-| layer | what | tool | binds to code by |
-| ----- | ---- | ---- | ---------------- |
-| A | protocol specs with custody invariants and an explicit environment | TLA+ (PlusCal where it reads better), TLC | B and C |
-| B | the same invariants as SQL over the live catalog and pgpm's tables | a `pgpm` test-schema function set | running inside every test and bench tick |
-| C | trace validation: recorded abstract states from real runs checked as legal spec steps | TLC trace checking, or a generated step checker | pgpm.log plus abstract state snapshots |
-| D (optional) | executable reference model of grid and encoding arithmetic | Python + Hypothesis, Dafny only if Phase 0 justifies it | differential testing against the SQL |
+| layer        | what                                                                                  | tool                                                    | binds to code by                         |
+|--------------|---------------------------------------------------------------------------------------|---------------------------------------------------------|------------------------------------------|
+| A            | protocol specs with custody invariants and an explicit environment                    | TLA+ (PlusCal where it reads better), TLC               | B and C                                  |
+| B            | the same invariants as SQL over the live catalog and pgpm's tables                    | a `pgpm` test-schema function set                       | running inside every test and bench tick |
+| C            | trace validation: recorded abstract states from real runs checked as legal spec steps | TLC trace checking, or a generated step checker         | pgpm.log plus abstract state snapshots   |
+| D (optional) | executable reference model of grid and encoding arithmetic                            | Python + Hypothesis, Dafny only if Phase 0 justifies it | differential testing against the SQL     |
 
 Layer A finds design defects. Layer B finds code that violates the invariants in any test that
 reaches the state, including tests written for other purposes. Layer C finds code that takes a
@@ -155,10 +168,21 @@ the oracle can compare expected and actual **by identity**, never by count.
 
 Wire it in:
 
-1. As a global postcondition at the end of every pgTAP file and after every bench tick. This turns
-   every existing test into a check of every invariant, which is the cheapest new coverage
-   available, and it directly attacks Tier 5 (assertions that pass for the wrong reason), because
-   the oracle asserts identity everywhere whether or not the test author did.
+1. As a global postcondition at the end of every pgTAP file and after every bench tick. Every
+   existing test then checks the structural invariants (`ResolveByRecord`, `DropOnlyCovered`
+   against the archive ledger, `ArchiveNoClobber`), which is the cheapest new coverage available.
+   It also directly attacks Tier 5 (assertions that pass for the wrong reason), because the oracle
+   asserts identity everywhere whether or not the test author did. Two limits, both to be stated in
+   `formal/README.md` and counted in the record rather than discovered later:
+   - **Scope.** Test files share databases (per-file database isolation was shelved for cost), so
+     a postcondition over the whole database would report one file's leftover state as another
+     file's violation. Scope each check to the parents the file created, which the fixture ledger
+     or a per-file registration helper records. The oracle's report names the scope it judged.
+   - **Row custody needs the ledger.** `NoLostRow` and `NoDuplicateRow` can only be judged where
+     the fixtures wrote through the ledger, and no existing test does. Until fixtures are migrated,
+     the oracle reports those two as `not judged` for the file, never as a pass. A green run that
+     judged nothing is exactly the defect `CLAUDE.md` opens with. Report the share of files where
+     each invariant was actually judged, as the oracle's liveness witness.
 2. In every bench harness that drives concurrency, at each observation point.
 3. Per `CLAUDE.md`: the oracle is a guard, so each invariant check gets a mutation in
    `bench/mutations/` and must fail against it under `./test.sh discriminate`. Pair it with a
@@ -177,7 +201,23 @@ honest and how sibling-copy defects show up.
    projects the concrete database (catalog, `pgpm.config`, the archive ledger, the fixture ledger,
    the archive store listing) into the spec's variables, as JSON.
 2. In test and bench runs, snapshot the abstract state at each transaction boundary of pgpm's
-   procedures (`pgpm.log` already marks operations; add only test-side instrumentation).
+   procedures (`pgpm.log` already marks operations; add only test-side instrumentation). A test
+   cannot run code between a procedure's internal COMMITs, so the capture point has to be inside
+   them. The proposed mechanism is a constraint trigger on `pgpm.log`
+   (`create constraint trigger ... after insert ... deferrable initially deferred for each row`),
+   installed only by the test schema, that records `abstract_state()` keyed by
+   `pg_current_xact_id()` and keeps one row per transaction. A deferred trigger fires at the
+   transaction's commit, after its last statement, so the snapshot is the transaction-end state that
+   section 4.1 makes one step. A plain `AFTER INSERT` trigger would not be: the swap logs
+   `regrain_attach` inside its attach loop, before the remaining children are attached and the source
+   is dropped, so it would record a half-done swap as a step the atomic model forbids. A transaction
+   that logs several rows fires the trigger once per row at commit, all seeing the same end state;
+   the per-transaction key coalesces them. pgpm never runs `SET CONSTRAINTS`, so nothing makes the
+   trigger fire early; a test that does must not be traced. A rolled-back transaction leaves no
+   snapshot, which is correct, since it is not a step. A transaction that writes no `pgpm.log` row
+   is invisible to it.
+   Enumerate those transactions per procedure, count them in the coverage metric (section 8), and
+   treat each one as a gap in the trace rather than as a step that was checked.
 3. Check each recorded trace against the spec: either TLC trace validation (a trace module that
    constrains behaviours to the recorded sequence) or a step checker generated from the spec's
    next-state relation. A trace that is not a behaviour of the spec is a claim: either the code is
@@ -191,11 +231,21 @@ honest and how sibling-copy defects show up.
 Do not disturb a pass in progress. Phase 0 can run beside one; later phases should land as a lever
 phase in the existing loop's sense, through the per-PR mode.
 
+Where this sits in the loop: after pass 13's fix phase (record PR #1421, main 057d080),
+`stop_check.py` reads `stop: ceiling`. The budget the maintainer set through pass 13 is spent and
+pass 14 is the maintainer's call. This program is proposed as the **fallback-mode lever**, the work
+done instead of another full pass, not as an addition to one. The maintainer decides whether it
+replaces pass 14 or runs beside it, and Phase 0's report should recommend which.
+
 **Phase 0: catalogue (about 1 to 2M tokens).** Read every pass record. Build
 `docs/formal/tier12-catalogue.md`: one row per Tier 1 and Tier 2 finding across all passes and
 verified backlogs, with its issue, pass, age, lens, the protocol it lives in, the invariant it
-violates (from 4.3, or a new one), the environment action that triggers it, and whether a
-finite-state model of the design could express it at all. Report: share of Tier 1/2 per protocol,
+violates (from 4.3, or a new one), the environment action that triggers it, whether a
+finite-state model of the design could express it at all, and whether a **class lever has since
+closed its mechanism** (a resolver, a preflight every entry point inherits, a lint such as
+`check_by_name_after_wait.py` or `check_part_row_by_name.py`), naming the lever. For a closed
+class, a model adds less finding value and mainly protects the lever's assumptions. Weigh the
+modelling order by the open mass, and report both shares. Report: share of Tier 1/2 per protocol,
 share expressible in a model, and the proposed modelling order. Use `gh` to read issues. Stop and
 present the catalogue to the maintainer before Phase 1.
 
@@ -233,17 +283,17 @@ Formal methods mostly prevent defects rather than find them, so the evaluation m
 yield and prevention separately. Record all of it in `docs/formal/record.md`, per phase, in the same
 spirit as the pass records.
 
-| metric | definition | why |
-| ------ | ---------- | --- |
-| retrodiction recall | historical Tier 1/2 on modelled protocols that a model mutation turns into a TLC violation, over those expressible | is the model capable of seeing the defects that matter; the analogue of seed recall |
-| expressible share | Tier 1/2 a finite model could express, over all Tier 1/2 (Phase 0) | the program's ceiling |
-| forward yield | verified findings from counterexamples, oracle failures and trace failures, by tier and age | new defects found |
-| model fell rate | counterexamples or trace failures that fell in verification, over those with a reproduction | the model's own precision; a rising rate means model drift |
-| cost per finding | agent tokens spent on the program, over findings; per Tier 1 separately; TLC CPU time reported beside it | compare with pass 12: about 0.27M tokens per finding, 2.8M per Tier 1 |
-| one-time vs recurring cost | tokens to build specs and oracle vs tokens per PR to maintain them | the amortisation argument |
-| fix-induced Tier 1 rate | young Tier 1/2 per merged fix PR, on modelled vs unmodelled protocols, from the next passes' age tags | the prevention signal; the symptom that started this program |
-| modelled-slice yield | in the next adversarial passes, findings per unit on modelled vs unmodelled surface, with seeds planted in both | does the next pass find less where the model is |
-| coverage | units of `install.sql` mapped to a spec action, over units in modelled protocols | what the model claims to cover |
+| metric                     | definition                                                                                                         | why                                                                                 |
+|----------------------------|--------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------|
+| retrodiction recall        | historical Tier 1/2 on modelled protocols that a model mutation turns into a TLC violation, over those expressible | is the model capable of seeing the defects that matter; the analogue of seed recall |
+| expressible share          | Tier 1/2 a finite model could express, over all Tier 1/2 (Phase 0)                                                 | the program's ceiling                                                               |
+| forward yield              | verified findings from counterexamples, oracle failures and trace failures, by tier and age                        | new defects found                                                                   |
+| model fell rate            | counterexamples or trace failures that fell in verification, over those with a reproduction                        | the model's own precision; a rising rate means model drift                          |
+| cost per finding           | agent tokens spent on the program, over findings; per Tier 1 separately; TLC CPU time reported beside it           | compare with pass 12: about 0.27M tokens per finding, 2.8M per Tier 1               |
+| one-time vs recurring cost | tokens to build specs and oracle vs tokens per PR to maintain them                                                 | the amortisation argument                                                           |
+| fix-induced Tier 1 rate    | young Tier 1/2 per merged fix PR, on modelled vs unmodelled protocols, from the next passes' age tags              | the prevention signal; the symptom that started this program                        |
+| modelled-slice yield       | in the next adversarial passes, findings per unit on modelled vs unmodelled surface, with seeds planted in both    | does the next pass find less where the model is                                     |
+| coverage                   | units of `install.sql` mapped to a spec action, over units in modelled protocols                                   | what the model claims to cover                                                      |
 
 Report the comparison to the adversarial loop honestly, including where the program costs more.
 
