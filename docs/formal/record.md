@@ -196,4 +196,11 @@ next scope to buy when a mutation or a claim needs it.
 
 ## Cost
 
-@@COST@@
+| Measure | Phase 1 |
+| --- | --- |
+| Tokens | about 1.2M of the 3.2M budget (ceiling 4.5M): 0.85M in the main thread, 0.35M in the blind re-classification and fidelity agents |
+| TLC CPU, one full `./test.sh formal` | 31,236 s (8.7 CPU-hours: user 30,808 s, sys 428 s), 39 minutes wall on 16 cores, 4.5 GB peak resident |
+| Of which the liveness config | 28 minutes wall; the rest of the track, every mutation included, is about 11 |
+
+On a 4-core runner the track should take two to three hours, which is why its workflow runs on a PR touching the
+model and not on every merge group.
