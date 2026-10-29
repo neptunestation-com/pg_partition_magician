@@ -40,6 +40,11 @@
 (*  A9 Environment actions are bounded by EnvBudget per behaviour, which   *)
 (*     bounds the depth of every counterexample in environment steps, not  *)
 (*     in pgpm steps. Time passing (Age) is bounded by the grid instead.   *)
+(*  A10 A statement the environment starts is one environment step even    *)
+(*     when it is two transactions: an operator's DETACH ... CONCURRENTLY  *)
+(*     finishes (OpFinalize) without spending budget, and under LiveSpec   *)
+(*     it is weakly fair, as a running statement finishes unless its       *)
+(*     session dies (CrashDetacher, which does spend budget).              *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, TLC
 
@@ -143,12 +148,15 @@ OpDetachConc(o, keep) ==   \* DETACH ... CONCURRENTLY: first transaction committ
     /\ Spend
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2>>
 
-OpFinalize(o) ==     \* the operator's live concurrent detach completes (it errors if finalized under it)
-    /\ Env("OD") /\ o \in liveDet /\ o \in opOwned
+\* The operator's live concurrent detach completes (it errors if finalized
+\* under it). This is the second transaction of a statement the environment
+\* already spent a step on (A10), so it spends none, whoever owns the table.
+\* The caller excludes pgpm's own job's detach, which finishes in JobPhase2.
+OpFinalize(o) ==
+    /\ "OD" \in EnvGroups /\ o \in liveDet
     /\ rel' = IF Pending(o) THEN [rel EXCEPT ![o].par = 0, ![o].pend = FALSE] ELSE rel
     /\ liveDet' = liveDet \ {o}
-    /\ Spend
-    /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned>>
+    /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, envLeft>>
 
 OpAttach(o, s) ==    \* ATTACH PARTITION back on a slot's bounds
     /\ Env("OD") /\ parentEx /\ rel[o].ex /\ rel[o].par = 0
@@ -159,8 +167,8 @@ OpAttach(o, s) ==    \* ATTACH PARTITION back on a slot's bounds
     /\ Spend
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet>>
 
-OpRename(o, nm) ==
-    /\ Env("OD") /\ rel[o].ex /\ Resolve(rel[o].nsp, nm) = 0
+OpRename(o, nm) ==   \* group "RN": renames are their own group, so a config can leave them out
+    /\ Env("RN") /\ rel[o].ex /\ Resolve(rel[o].nsp, nm) = 0
     /\ rel' = [rel EXCEPT ![o].name = nm]
     /\ Spend
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>

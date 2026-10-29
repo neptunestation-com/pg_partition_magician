@@ -59,7 +59,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Paths in a track body that name a file this repo ships. Anything else a body mentions (a database
 # name, a container, an S3 key) cannot need a filter entry.
-REF_RE = re.compile(r"(?:bench|scripts|tests)/[A-Za-z0-9_./*-]+")
+REF_RE = re.compile(r"(?:bench|scripts|tests|formal)/[A-Za-z0-9_./*-]+")
 
 # The floor. A parser that has stopped matching test.sh or the workflow directory would otherwise
 # report a clean sweep having examined nothing, which is the one result this script must never
