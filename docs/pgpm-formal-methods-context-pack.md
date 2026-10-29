@@ -203,9 +203,19 @@ honest and how sibling-copy defects show up.
 2. In test and bench runs, snapshot the abstract state at each transaction boundary of pgpm's
    procedures (`pgpm.log` already marks operations; add only test-side instrumentation). A test
    cannot run code between a procedure's internal COMMITs, so the capture point has to be inside
-   them. The proposed mechanism is an `AFTER INSERT` trigger on `pgpm.log`, installed only by the
-   test schema, that records `abstract_state()` inside the procedure's own transaction, giving one
-   snapshot per logged transaction. A transaction that writes no `pgpm.log` row is invisible to it.
+   them. The proposed mechanism is a constraint trigger on `pgpm.log`
+   (`create constraint trigger ... after insert ... deferrable initially deferred for each row`),
+   installed only by the test schema, that records `abstract_state()` keyed by
+   `pg_current_xact_id()` and keeps one row per transaction. A deferred trigger fires at the
+   transaction's commit, after its last statement, so the snapshot is the transaction-end state that
+   section 4.1 makes one step. A plain `AFTER INSERT` trigger would not be: the swap logs
+   `regrain_attach` inside its attach loop, before the remaining children are attached and the source
+   is dropped, so it would record a half-done swap as a step the atomic model forbids. A transaction
+   that logs several rows fires the trigger once per row at commit, all seeing the same end state;
+   the per-transaction key coalesces them. pgpm never runs `SET CONSTRAINTS`, so nothing makes the
+   trigger fire early; a test that does must not be traced. A rolled-back transaction leaves no
+   snapshot, which is correct, since it is not a step. A transaction that writes no `pgpm.log` row
+   is invisible to it.
    Enumerate those transactions per procedure, count them in the coverage metric (section 8), and
    treat each one as a gap in the trace rather than as a step that was checked.
 3. Check each recorded trace against the spec: either TLC trace validation (a trace module that
