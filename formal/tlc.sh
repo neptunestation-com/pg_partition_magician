@@ -22,7 +22,7 @@ fi
 echo "$TLA_SHA256  $jar" | sha256sum -c --quiet - || { echo "tla2tools.jar checksum mismatch" >&2; exit 2; }
 
 workers=${FORMAL_WORKERS:-auto}
-args=(-XX:+UseParallelGC -Xmx${FORMAL_HEAP:-4g} -cp /tla/tla2tools.jar tlc2.TLC -workers "$workers"
+args=(-XX:+UseParallelGC -Xmx"${FORMAL_HEAP:-4g}" -cp /tla/tla2tools.jar tlc2.TLC -workers "$workers"
       -deadlock -cleanup -metadir /tmp/tlc-meta -config "$cfg" "$@" "$spec")
 if [ "${FORMAL_LOCAL_JAVA:-0}" = 1 ]; then
   cd "$dir"

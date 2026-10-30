@@ -99,7 +99,9 @@ The single-guard form still runs, and is reported as `MASKED` when the later gua
 a claim about defence in depth.
 
 A mutation that the model misses stays in the table with its expected outcome, so a model change that
-starts catching it, or stops, fails the track either way. Every mutation is kept.
+starts catching it, or stops, fails the track either way. Every mutation is kept. A miss or a mask counts only
+when TLC finished and found nothing: a run that timed out, errored or violated a different invariant is
+`BROKEN` and fails the track whatever the mutation expects.
 
 ## When you change pgpm
 

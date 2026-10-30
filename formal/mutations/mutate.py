@@ -463,7 +463,7 @@ def main():
         c = m['cfg']
         open(os.path.join(args[2], 'M.cfg'), 'w').write(
             cfg_text(c['groups'], c['shapes'], fk=c.get('fk', False), budget=c.get('budget', 2), check=m['inv'],
-                     live=m.get('live', False)))
+                     live=m.get('live', False), hyp=c.get('hyp', DEFAULT_HYP)))
         return
     jobs = 4
     if '--jobs' in args:
@@ -475,13 +475,26 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(jobs) as ex:
         for r in ex.map(check_one, names):
             m = MUTATIONS[r['name']]
-            verdict = 'CAUGHT' if r['caught'] else ('CONFIG-NOT-CLEAN' if r['clean'] != 'clean' else 'MISSED')
+            # MISSED and MASKED mean TLC finished and found nothing. A run that timed out, errored or violated some
+            # other invariant answers nothing, so it is never read as a miss or a mask: it is BROKEN and fails the
+            # track, whatever the mutation expects. Otherwise a broken mutant would stand in for the evidence that
+            # the model genuinely misses a defect (M453).
+            want = 'violated:property' if m.get('live') else f"violated:{m['inv']}"
+            if r['clean'] != 'clean':
+                verdict = 'CONFIG-NOT-CLEAN'
+            elif r['caught']:
+                verdict = 'CAUGHT'
+            elif r['mutant'] == 'clean':
+                verdict = 'MISSED'
+            else:
+                verdict = f"BROKEN({r['mutant']})"
             single = r.get('single', '')
             if single:
-                want = 'violated:property' if m.get('live') else f"violated:{m['inv']}"
-                single = 'CAUGHT' if single == want else f'MASKED({single})'
+                single = ('CAUGHT' if single == want else 'MASKED(clean)' if single == 'clean'
+                          else f'BROKEN({single})')
             expect = m.get('expect', 'CAUGHT')
-            ok = 'ok' if verdict == expect else f'UNEXPECTED(want {expect})'
+            ok = ('ok' if verdict == expect and not single.startswith('BROKEN')
+                  else f'UNEXPECTED(want {expect})')
             line = '\t'.join([r['name'], ','.join(m['rcs']), m['inv'], m.get('catalogue', ''), verdict,
                               r['clean'], r['mutant'], single, ok])
             print(line, flush=True)
