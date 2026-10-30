@@ -249,8 +249,8 @@ MUTATIONS = {
     'M778': dict(rcs=['#778'], inv='NoLostRowLive', live=True, guards=['G778'],
                  cfg=dict(groups=['OD', 'T'], shapes=FRESH, fk=True, budget=2),
                  note='the recall resolves in the parent\'s schema: a moved parent\'s retirement is never taken back. '
-                      'No RN: a hand rename of a detached retired table also leaves it un-recalled for ever, and '
-                      'the contract is silent on that (open question Q1 in docs/formal/record.md)'),
+                      'No RN: a hand rename of a detached retired table also leaves it un-recalled for ever, '
+                      'until #1424 releases it by oid (Q1 in docs/formal/record.md)'),
     'M788': dict(rcs=['#788'], inv='NoWedge', guards=['G788'],
                  cfg=dict(groups=['SG', 'T'], shapes=FRESH, budget=0),
                  note='the chunk stop round-trips through session text: no chunk, nothing logged'),

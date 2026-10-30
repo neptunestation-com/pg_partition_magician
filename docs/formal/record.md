@@ -15,7 +15,7 @@ passed at 8 of 10.
 
 Every counterexample of the unmutated spec is triaged. Two are **claims** for Phase 2 (C1, a recall re-attach
 racing a launched detach run; C2, a tracked rename making recorded chunks orphans so that retire drops rows
-nothing vouches for), and one is an **open question** for the maintainer (Q1). The model also caught itself
+nothing vouches for), and one was a question for the maintainer (Q1), decided as #1424. The model also caught itself
 passing vacuously once, and the track now runs liveness witnesses before it trusts a clean check.
 
 ## What was built
@@ -70,7 +70,7 @@ three free catches:
 - **M778** (a liveness mutation) first could not run, because the unmutated spec violated `NoLostRowLive`
   three times over. Two were fairness artefacts in the model: hypothesis H_C1 was a guard that only blocked,
   and an operator's started `DETACH ... CONCURRENTLY` could not finish without spending environment budget
-  (now Base A10). The third is open question Q1 below. M778's config now leaves renames out.
+  (now Base A10). The third is question Q1 below, now decided as #1424. M778's config now leaves renames out.
 
 Two mutants were broken rather than caught or missed, and were fixed before counting: M1054b2 (the model keyed
 a ledger row's object by its lo's raw text rather than its instant) and M1335b10 (a by-name drop resolving to
@@ -108,7 +108,7 @@ by the spec's author). Most were the model being wrong:
 | Abstraction gap, closed | 4 | a queued pg_cron run versus `DROP TABLE` on the parent; a run naming no table; the job model re-done as launch, resolve-and-pend, finalize |
 | Fairness artefact, closed | 2 | H_C1 as a pure block; an operator's concurrent detach unable to finish |
 | Documented limitation | 1 | the substitute detach `reference.md` "What retire checks" describes |
-| Open question | 1 | Q1, below |
+| Question for the maintainer | 1 | Q1, below, decided as #1424 |
 | **Claim** for Phase 2 | 2 | C1 and C2, below |
 
 ### Claim C1: the recall's re-attach races a launched detach run
@@ -145,14 +145,18 @@ C2 appeared as a full counterexample only once DropOnlyCovered was stated as the
 attributed to the dropped relation's identity), on the fidelity read's advice. Under the looser "rows in some
 object" the same path checked clean.
 
-### Open question Q1 (for the maintainer, not a claim)
+### Question Q1, decided: a renamed retirement is released, by oid (#1424)
 
 A partition pgpm's detach took out of the parent, whose retirement retention then stops reaching, is re-attached
 by the recall. If the operator renames that detached table first, the recall, which resolves by name, never finds
 it, and the rows stay out of the parent for good (they are not lost: the renamed table holds them). The contract
 says what the recall does but not what a hand rename of a retirement in custody means. Either it makes the
 table the operator's, and the docs should say so, or the recall should resolve by its recorded oid.
-`CustodyLive.cfg` and M778 leave renames out until this is decided.
+**Decided by the maintainer on 2026-10-30, as #1424:** the recall resolves by oid, and finding the name changed,
+releases the table to the operator with a logged disown instead of re-attaching it. That keeps the operator's
+intent (re-attaching could let a later retention drop rows renamed to be kept) without leaving rows out of the
+parent silently. `CustodyLive.cfg` and M778 leave renames out until #1424 lands; then `NoLostRowLive` becomes
+"taken back or explicitly released" and renames come back in.
 
 ## Independent fidelity read
 
