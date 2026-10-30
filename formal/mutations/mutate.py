@@ -332,18 +332,21 @@ NOT_MODELLED = {
 }
 
 
-def build(name, guards, dst):
+def build(name, guards, dst, specs=None):
     os.makedirs(dst, exist_ok=True)
     for f in ('Base.tla', 'Custody.tla'):
-        shutil.copy(os.path.join(SPECS, f), dst)
+        shutil.copy(os.path.join(specs or SPECS, f), dst)
     p = os.path.join(dst, 'Custody.tla')
     s = open(p).read()
     for gid in guards:
         old, new = M[gid]
-        n = s.count(old)
+        # The whole line, not a substring: text added before or after a tagged line (a renamed definition, a note
+        # after the tag) is drift, and the mutant would otherwise be built against code the guard no longer is.
+        pat = re.compile(r'^([ \t]*)' + re.escape(old) + r'([ \t]*)$', re.M)
+        n = len(pat.findall(s))
         if n != 1:
-            raise SystemExit(f'{name}: guard {gid} matched {n} sites, expected 1; refusing to build a stale mutant')
-        s = s.replace(old, new)
+            raise SystemExit(f'{name}: guard {gid} matched {n} whole lines, expected 1; refusing to build a stale mutant')
+        s = pat.sub(lambda mo: mo.group(1) + new + mo.group(2), s)
     open(p, 'w').write(s)
 
 
@@ -413,6 +416,99 @@ WITNESSES = [('WitTwoChunks', 'Custody.cfg', PGPM_ONLY), ('WitArchivedDrop', 'Cu
              ('WitStrategyOvertaken', 'CustodyFK.cfg', None), ('WitCustody', 'CustodyFK.cfg', None)]
 
 
+# What each must-be-clean config checks, and a floor under how much of the world it explores. A clean result is
+# evidence only about what was checked: a config cut to TypeOK, or to EnvBudget 0, still says "No error has been
+# found". The floors sit about 5% under the 2026-10-29 counts (5,250,812 / 12,202,405 / 3,913,646 distinct states)
+# so a change to the model that shrinks the explored world has to lower them in the same commit, on purpose.
+SCOPE = {
+    'Custody.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
+                    5_000_000),
+    'CustodyFK.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
+                      11_600_000),
+    'CustodyLive.cfg': ((), ('NoLostRowLive',), 3_700_000),
+}
+
+
+def cfg_list(text, head):
+    m = re.search(rf'^{head}\n((?:[ \t]+\S.*\n?)+)', text, re.M)
+    return tuple(l.strip() for l in m.group(1).splitlines()) if m else ()
+
+
+def scope_errors(cfg, text, out):
+    invs, props, floor = SCOPE[cfg]
+    errs = []
+    if set(cfg_list(text, 'INVARIANTS')) != set(invs):
+        errs.append(f'INVARIANTS are {cfg_list(text, "INVARIANTS")}, expected {invs}')
+    if set(cfg_list(text, 'PROPERTIES')) != set(props):
+        errs.append(f'PROPERTIES are {cfg_list(text, "PROPERTIES")}, expected {props}')
+    m = re.findall(r'([\d,]+) distinct states found', out)
+    n = int(m[-1].replace(',', '')) if m else 0
+    if n < floor:
+        errs.append(f'{n} distinct states, under the floor of {floor}')
+    return errs, n
+
+
+def scope(cfg, tlc_out):
+    invs, props, floor = SCOPE[cfg]
+    errs, n = scope_errors(cfg, open(os.path.join(SPECS, cfg)).read(), open(tlc_out).read())
+    for e in errs:
+        print(f'SCOPE: {cfg}: {e}', flush=True)
+    if errs:
+        sys.exit(1)
+    print(f'{cfg}: checks {", ".join(invs + props)} over {n} distinct states (floor {floor})', flush=True)
+
+
+def selftest():
+    """The harness's own checks must be able to fail (CLAUDE.md, "Prove the guard discriminates"): each is run
+    against an input built to trip it, and against the real one."""
+    fails = []
+
+    def expect(desc, cond):
+        print(f"selftest: {desc}: {'ok' if cond else 'FAILS TO DISCRIMINATE'}", flush=True)
+        if not cond:
+            fails.append(desc)
+
+    # judge(): a broken run is never a miss or a mask, and a single-guard outcome is held both ways.
+    m453, m452 = MUTATIONS['M453'], MUTATIONS['M452']
+    ok = lambda m, **r: judge(m, dict(dict(clean='clean', mutant='clean', caught=False), **r))[2] == 'ok'
+    expect('M453 missed on a clean mutant run', ok(m453))
+    for bad in ('TIMEOUT', 'error', 'violated:NoWedge'):
+        expect(f'M453 refuses a {bad} mutant run as a miss', not ok(m453, mutant=bad))
+    expect('M453 refuses a catch', not ok(m453, mutant='violated:NoLostRow', caught=True))
+    hit = dict(mutant='violated:DropOnlyCovered', caught=True)
+    expect('M452 caught, single masked', ok(m452, single='clean', **hit))
+    expect('M452 refuses a single that starts catching', not ok(m452, single='violated:DropOnlyCovered', **hit))
+    expect('M452 refuses a broken single run', not ok(m452, single='TIMEOUT', **hit))
+    expect('a config that is not clean is never a catch', not ok(m452, clean='violated:NoWedge', **hit))
+
+    # scope_errors(): the clean configs' check lists and the floor under their state counts.
+    for cfg, (invs, props, floor) in SCOPE.items():
+        text = open(os.path.join(SPECS, cfg)).read()
+        full = f'{floor + 1} distinct states found, 0 states left on queue.'
+        expect(f'{cfg} as it stands, at the floor', not scope_errors(cfg, text, full)[0])
+        gutted = re.sub(r'^(INVARIANTS|PROPERTIES)\n(?:[ \t]+\S.*\n?)+', r'\1\n  TypeOK\n', text, flags=re.M)
+        expect(f'{cfg} cut to TypeOK', bool(scope_errors(cfg, gutted, full)[0]))
+        expect(f'{cfg} under its floor', bool(scope_errors(cfg, text, '6604 distinct states found')[0]))
+
+    # build(): a tagged line with text added after the tag, or before the definition, is drift.
+    src = open(os.path.join(SPECS, 'Custody.tla')).read()
+    with tempfile.TemporaryDirectory() as t:
+        for desc, drift in (('a note after the tag', G['G502'] + ' (sign)'), ('a renamed definition', 'Old' + G['G502'])):
+            os.makedirs(os.path.join(t, 'src'), exist_ok=True)
+            shutil.copy(os.path.join(SPECS, 'Base.tla'), os.path.join(t, 'src'))
+            open(os.path.join(t, 'src', 'Custody.tla'), 'w').write(src.replace(G['G502'], drift))
+            try:
+                build('M502', ['G502'], os.path.join(t, 'out'), specs=os.path.join(t, 'src'))
+                refused = False
+            except SystemExit:
+                refused = True
+            expect(f'build refuses {desc}', refused)
+        build('M502', ['G502'], os.path.join(t, 'real'))
+        expect('build accepts the real spec', True)
+    if fails:
+        sys.exit(1)
+
+
 def witness_cfg(w, base, groups):
     c = open(os.path.join(SPECS, base)).read()
     c = re.sub(r'INVARIANTS\n(  .*\n)+', '', c) + f'INVARIANTS\n  {w}\n'
@@ -454,6 +550,12 @@ def main():
         for k, why in NOT_MODELLED.items():
             print(f'-\t{k}\tnot modelled\t-\t{why}')
         return
+    if args[0] == 'selftest':
+        selftest()
+        return
+    if args[0] == 'scope':
+        scope(args[1], args[2])
+        return
     if args[0] == 'witness':
         witness()
         return
@@ -475,26 +577,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(jobs) as ex:
         for r in ex.map(check_one, names):
             m = MUTATIONS[r['name']]
-            # MISSED and MASKED mean TLC finished and found nothing. A run that timed out, errored or violated some
-            # other invariant answers nothing, so it is never read as a miss or a mask: it is BROKEN and fails the
-            # track, whatever the mutation expects. Otherwise a broken mutant would stand in for the evidence that
-            # the model genuinely misses a defect (M453).
-            want = 'violated:property' if m.get('live') else f"violated:{m['inv']}"
-            if r['clean'] != 'clean':
-                verdict = 'CONFIG-NOT-CLEAN'
-            elif r['caught']:
-                verdict = 'CAUGHT'
-            elif r['mutant'] == 'clean':
-                verdict = 'MISSED'
-            else:
-                verdict = f"BROKEN({r['mutant']})"
-            single = r.get('single', '')
-            if single:
-                single = ('CAUGHT' if single == want else 'MASKED(clean)' if single == 'clean'
-                          else f'BROKEN({single})')
-            expect = m.get('expect', 'CAUGHT')
-            ok = ('ok' if verdict == expect and not single.startswith('BROKEN')
-                  else f'UNEXPECTED(want {expect})')
+            verdict, single, ok = judge(m, r)
             line = '\t'.join([r['name'], ','.join(m['rcs']), m['inv'], m.get('catalogue', ''), verdict,
                               r['clean'], r['mutant'], single, ok])
             print(line, flush=True)
@@ -507,6 +590,33 @@ def main():
             f.write(line + '\n')
     if any(not l.endswith('\tok') for l in rows):
         sys.exit(1)
+
+
+def judge(m, r):
+    # MISSED and MASKED mean TLC finished and found nothing. A run that timed out, errored or violated some
+    # other invariant answers nothing, so it is never read as a miss or a mask: it is BROKEN and fails the
+    # track, whatever the mutation expects. Otherwise a broken mutant would stand in for the evidence that
+    # the model genuinely misses a defect (M453).
+    want = 'violated:property' if m.get('live') else f"violated:{m['inv']}"
+    if r['clean'] != 'clean':
+        verdict = 'CONFIG-NOT-CLEAN'
+    elif r['caught']:
+        verdict = 'CAUGHT'
+    elif r['mutant'] == 'clean':
+        verdict = 'MISSED'
+    else:
+        verdict = f"BROKEN({r['mutant']})"
+    single = r.get('single', '')
+    if single:
+        single = ('CAUGHT' if single == want else 'MASKED(clean)' if single == 'clean'
+                  else f'BROKEN({single})')
+    # A single-guard outcome is a recorded claim about defence in depth (docs/formal/record.md), so it is held
+    # to its expectation both ways like the composite: a mask that starts catching, or stops, fails.
+    expect = m.get('expect', 'CAUGHT')
+    want_single = m.get('expect_single', 'MASKED(clean)') if 'single' in m else ''
+    ok = ('ok' if verdict == expect and single == want_single
+          else f"UNEXPECTED(want {expect}{' / single ' + want_single if want_single else ''})")
+    return verdict, single, ok
 
 
 if __name__ == '__main__':

@@ -188,6 +188,23 @@ archived rows on each path, a dispatched detach, a read a detach overtook, and r
 reachable. A mutation that kills the archive must make the progress witnesses unreachable, so the witness check
 is itself shown to discriminate.
 
+## Per-PR verification of this PR
+
+An independent agent tried to make `./test.sh formal` pass where it should fail. A model with no reachable
+archive, and one whose retire never drops, failed at the witness stage. A clean config made violated, or a claim
+config made clean, failed. So did a missing config, a parse error, and an out-of-memory crash. It found three
+holes, all fixed before landing, each with a case in `mutate.py selftest`:
+
+- a clean config cut to `TypeOK`, or to `EnvBudget = 0` (6,604 states), still passed: the clean configs' check
+  lists and a state floor are now pinned (`SCOPE`);
+- a single-guard outcome was never enforced, so the seven masks above could flip with the track green;
+- `build` matched a guard as a substring, so a tagged line with text added still built: it now matches whole lines.
+
+Two weaker points are left as they are. A recall or regrain that becomes unreachable is caught by retrodiction
+(M724, M511, M1160 stop being caught) rather than by a witness. `check_track_filters.py` sees only the files
+`run_formal` names, not the specs those files read, which the workflow's `formal/**` filter covers today. Codex
+raised two more (a broken mutant read as M453's miss; `build` ignoring a mutation's hypotheses), both fixed.
+
 ## Not done in Phase 1
 
 - **The 24 custody per-PR verification rounds** (the catalogue's second, reported set) were not retrodicted.

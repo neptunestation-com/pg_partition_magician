@@ -1653,6 +1653,8 @@ run_lockview() {
 run_formal() {
   local f=formal/specs out c want
   out=$(mktemp -d "${TMPDIR:-/tmp}/pgpm_formal.XXXXXX")
+  echo ">>> formal: the harness's own checks discriminate"
+  python3 formal/mutations/mutate.py selftest
   echo ">>> formal: liveness witnesses (archive, drop, dispatch, overtaken read, custody all reachable)"
   python3 formal/mutations/mutate.py witness
   for c in Custody CustodyFK CustodyLive; do
@@ -1661,7 +1663,8 @@ run_formal() {
     if ! grep -q 'No error has been found' "$out/$c.out"; then
       tail -60 "$out/$c.out"; echo "FAIL: formal/specs/$c.cfg did not check clean"; exit 1
     fi
-    grep -E 'distinct states found|Finished in' "$out/$c.out" | tail -2
+    grep -E 'Finished in' "$out/$c.out" | tail -1
+    python3 formal/mutations/mutate.py scope "$c.cfg" "$out/$c.out"
   done
   for c in CustodyFK-asis:NoLostRow Custody-asisC2:DropOnlyCovered; do
     want=${c#*:}; c=${c%%:*}

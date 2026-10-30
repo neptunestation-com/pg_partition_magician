@@ -29,6 +29,7 @@ session's actions break an invariant pgpm promises? The program behind it is
 formal/tlc.sh formal/specs Custody.tla Custody.cfg # one config, in Docker
 FORMAL_LOCAL_JAVA=1 formal/tlc.sh formal/specs Custody.tla Custody.cfg   # the same jar on the host's java
 python3 formal/mutations/mutate.py --list          # every mutation, its root causes and its invariant
+python3 formal/mutations/mutate.py selftest        # the harness's own checks, each shown to fail on bad input
 python3 formal/mutations/mutate.py check M454      # one mutation: the clean run and the mutant run
 python3 formal/mutations/mutate.py build M454 DIR  # write the mutant and its config into DIR by hand
 scripts/formal/trace_diff.py < tlc-output.txt      # read a counterexample
@@ -101,7 +102,14 @@ a claim about defence in depth.
 A mutation that the model misses stays in the table with its expected outcome, so a model change that
 starts catching it, or stops, fails the track either way. Every mutation is kept. A miss or a mask counts only
 when TLC finished and found nothing: a run that timed out, errored or violated a different invariant is
-`BROKEN` and fails the track whatever the mutation expects.
+`BROKEN` and fails the track whatever the mutation expects. A single-guard outcome is held to its expectation
+both ways too.
+
+A clean result is evidence only about what was checked, so the track also pins the clean configs' scope: each
+must check its full list of invariants or properties and explore at least a floor of distinct states
+(`SCOPE` in `mutations/mutate.py`, about 5% under the recorded counts). A change that shrinks the explored world
+lowers the floor in the same commit, on purpose. `mutate.py selftest`, the track's first stage, shows each of the
+harness's own checks failing on an input built to trip it.
 
 ## When you change pgpm
 
