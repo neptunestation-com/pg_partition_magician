@@ -1,0 +1,45 @@
+name: Formal model
+
+# TLC over the custody spec (formal/README.md): the default configs must check clean, the as-shipped
+# configs must keep claims C1 and C2 violated, and every retrodiction mutation must keep its recorded outcome
+# (formal/mutations/mutate.py), which is this track's version of discriminate: a spec that checks clean is
+# evidence only while it can still be shown to catch the defects it claims to.
+#
+# Its own workflow because it needs nothing the database tracks build: a pinned tla2tools jar (checked by
+# sha256) on a pinned JRE image (by digest), both in formal/tlc.sh.
+# NOT on merge_group, deliberately: the track takes about 42 minutes on a 16-core machine, and merge_group
+# has no paths filter, so it would run on every queued group whatever the group touched. It is not one of
+# the summaries main requires, so the queue would not wait for it anyway; it would only burn runner hours.
+# A PR touching the model runs it, and so does the push to main that lands it.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'formal/**'
+      - 'scripts/formal/**'
+      - 'test.sh'
+      - '.github/workflows/formal.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'formal/**'
+      - 'scripts/formal/**'
+      - 'test.sh'
+      - '.github/workflows/formal.yml'
+  workflow_dispatch:
+
+# One run per PR head: a rebase or a fix pushed to a PR cancels the superseded head's runs (#644). A push
+# to main is keyed by its sha, so those never cancel or queue behind one another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  formal:
+    name: TLC custody spec and retrodiction
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the formal track
+        run: ./test.sh formal

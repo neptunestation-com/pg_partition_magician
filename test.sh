@@ -89,8 +89,9 @@ for arg in "$@"; do
     locktrace) TRACK="locktrace" ;;
     lockview) TRACK="lockview" ;;
     lint) TRACK="lint" ;;
+    formal) TRACK="formal" ;;
     ci) TRACK="ci" ;;
-    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | lint | ci"; exit 1 ;;
+    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | formal | lint | ci"; exit 1 ;;
   esac
 done
 
@@ -1627,6 +1628,57 @@ run_lockview() {
   echo "lockview track: PASS"
 }
 
+# The `formal` track: TLC over the custody spec (formal/README.md, docs/formal/record.md). Five parts, and
+# each one fails the track.
+#
+#   0. The liveness witnesses are REACHABLE: a chunk past the first, a drop of archived rows, a dispatched
+#      detach, a strategy read a detach overtook, rows in custody. Every invariant below is a negative, and a
+#      model whose archive never completes checks every one of them clean (it did, once: docs/formal/record.md).
+#      A mutation that kills the archive is run too, and the progress witnesses must go unreachable under it.
+#   1. The default configs check CLEAN: the design, as the documented contracts state it, keeps every
+#      invariant over every behaviour in scope. Custody.cfg is the one-step retire path, CustodyFK.cfg the
+#      detach path. Both assume hypotheses H_C1 and H_C2 (guards the shipped code lacks; the spec's header).
+#   2. CustodyLive.cfg checks NoLostRowLive under fairness: a retirement retention stops reaching is taken
+#      back, so the custody exemption NoLostRow grants is never a place rows stay for good.
+#   3. The as-shipped configs are VIOLATED: CustodyFK-asis.cfg keeps claim C1 (NoLostRow) and
+#      Custody-asisC2.cfg claim C2 (DropOnlyCovered) on record. The day one checks clean, either the model
+#      lost the path or the code was fixed and its hypothesis should go; either way somebody has to look.
+#   4. Retrodiction: formal/mutations/mutate.py puts each historical Tier 1/2 custody defect's mechanism
+#      back and requires the outcome recorded for it (caught, by the invariant that defect broke, with the
+#      unmutated spec clean under the same config). This is the model's discriminate track: a spec that
+#      checks clean is evidence only while it can still be shown to catch the defects it claims to.
+#
+# The jar and the JRE are pinned by checksum and digest (formal/tlc.sh), so the track needs Docker and
+# nothing the database tracks build.
+run_formal() {
+  local f=formal/specs out c want
+  out=$(mktemp -d "${TMPDIR:-/tmp}/pgpm_formal.XXXXXX")
+  echo ">>> formal: the harness's own checks discriminate"
+  python3 formal/mutations/mutate.py selftest
+  echo ">>> formal: liveness witnesses (archive, drop, dispatch, overtaken read, custody all reachable)"
+  python3 formal/mutations/mutate.py witness
+  for c in Custody CustodyFK CustodyLive; do
+    echo ">>> formal: $c.cfg must check clean"
+    formal/tlc.sh "$f" Custody.tla "$c.cfg" > "$out/$c.out" 2>&1 || true
+    if ! grep -q 'No error has been found' "$out/$c.out"; then
+      tail -60 "$out/$c.out"; echo "FAIL: formal/specs/$c.cfg did not check clean"; exit 1
+    fi
+    grep -E 'Finished in' "$out/$c.out" | tail -1
+    python3 formal/mutations/mutate.py scope "$c.cfg" "$out/$c.out"
+  done
+  for c in CustodyFK-asis:NoLostRow Custody-asisC2:DropOnlyCovered; do
+    want=${c#*:}; c=${c%%:*}
+    echo ">>> formal: $c.cfg must keep its claim's violation of $want"
+    formal/tlc.sh "$f" Custody.tla "$c.cfg" > "$out/$c.out" 2>&1 || true
+    if ! grep -q "Invariant $want is violated" "$out/$c.out"; then
+      tail -60 "$out/$c.out"; echo "FAIL: formal/specs/$c.cfg no longer reports its claim ($want)"; exit 1
+    fi
+  done
+  echo ">>> formal: retrodiction (every mutation's recorded outcome)"
+  python3 formal/mutations/mutate.py check
+  rm -rf "$out"
+}
+
 # The `lint` track: every job .github/workflows/lint.yml's required `Lint summary` needs, run here the way
 # CI runs it (#1183). `./test.sh ci` used to run every TEST track and none of these, so it printed PASS over
 # a tree whose Lint summary was red, while saying it ran everything CI runs.
@@ -1776,6 +1828,12 @@ if [ "$TRACK" = "lint" ]; then
   exit "$lint_rc"
 fi
 
+if [ "$TRACK" = "formal" ]; then
+  run_formal
+  echo; echo "All requested tests passed."
+  exit 0
+fi
+
 if [ "$TRACK" = "perf" ]; then
   run_perf
   echo; echo "All requested tests passed."
@@ -1819,7 +1877,7 @@ if [ "$TRACK" = "archive" ]; then
 fi
 
 # `ci`: every test track the CI workflows run (test.yml's matrix and packages, timescale, observe, archive,
-# perf, discriminate, locktrace, lockview) AND the lint track (every job lint.yml's required Lint summary
+# perf, discriminate, formal, locktrace, lockview) AND the lint track (every job lint.yml's required Lint summary
 # needs), in one invocation, so "green locally" can mean the same thing as "green in CI" for the three
 # summaries main requires. Nothing else: pages.yml, release.yml and publish-dbdev.yml publish rather than
 # check, and test.yml's dbdev-cap job is informational. Every track runs to completion rather than
@@ -1850,7 +1908,7 @@ if [ "$TRACK" = "ci" ]; then
   esac
   rm -f "$lint_skips"
   for v in 15 16 17 18; do "$0" "$v" || ci_failed="$ci_failed pg$v"; done
-  for t in timescale observe archive perf discriminate; do
+  for t in timescale observe archive perf discriminate formal; do
     "$0" "$t" || ci_failed="$ci_failed $t"
   done
 
