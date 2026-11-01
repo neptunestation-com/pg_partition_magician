@@ -20,17 +20,22 @@
 --           before (fail_retain_identity), left attached and the mark kept (tests/204 part C, with a squatter).
 --   PART E  the two anchors disagree (a mark recorded on another relation than the row's): the relation the mark
 --           names is not handed over on its say alone; refused as before.
+--   PART F  the row has no child_oid (an older install's, upgraded: v0.5.0 recorded retiring_oid only) and a
+--           squatter took the old name: the release's remedy ATTACH names the renamed table by the oid the mark
+--           recorded, never the squatter that holds the name now.
+--   PART G  the operator renamed the detached retirement and attached it to a partitioned table of THEIR OWN:
+--           it is no partition of this parent, so it is released all the same, and left where they put it.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in for
 -- cron.job and cron.alter_job and runs whatever the standing job holds at the top level, as tests/204 does.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2; B 5, 6, 7; C 11;
--- D 21, 22; E 31, and E's foreign table 77), and B's squatter 99, so a re-attach of the wrong relation or a lost
+-- D 21, 22; E 31, and E's foreign table 77; F 41, 42, 43; G 51, 52), and the squatters B 99 and F 98, so a re-attach of the wrong relation or a lost
 -- row cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(41);
+select plan(52);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -199,5 +204,50 @@ select pgpm.set_retain('pgpm_t361.re', '45000');
 select is(pgpm_t361.actions('pgpm_t361.re', '0'), array['retain_detach', 'fail_retain_identity'],
   'E: refused as exactly fail_retain_identity, the foreign relation not released');
 select is(pgpm_t361.ids('pgpm_t361.re_foreign'), array[77]::bigint[], 'E: the foreign relation is untouched');
+
+-- ========== PART F: an older install's row, no child_oid; the remedy names the renamed table, not the squatter ==========
+call pgpm_t361.landed('rf', array[41, 42, 43]);
+select child_name as f_doomed, hi as f_hi, child_oid as f_oid from pgpm.part
+ where parent_table = 'pgpm_t361.rf'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t361.rf', :'f_doomed'), 'fixture: (F) retire() dispatches the detach');
+select pgpm_t361.armed() \gexec
+-- the state a v0.5.0 install leaves (it had retiring_oid but neither child_oid nor detach_dispatched_oid)
+update pgpm.part set child_oid = null, detach_dispatched_oid = null
+ where parent_table = 'pgpm_t361.rf'::regclass and lo = '0';
+select format('alter table pgpm_t361.%I rename to rf_kept', :'f_doomed') \gexec
+select format('create table pgpm_t361.%I (id bigint, payload text)', :'f_doomed') \gexec
+select format('insert into pgpm_t361.%I values (98, ''squat'')', :'f_doomed') \gexec
+select ok((select child_oid is null and retiring_oid = :'f_oid'::oid from pgpm.part
+            where parent_table = 'pgpm_t361.rf'::regclass and lo = '0'),
+  'LIVENESS: (F) the row records the retirement by its mark alone, child_oid null');
+select pgpm.set_retain('pgpm_t361.rf', '45000');
+select is(pgpm_t361.actions('pgpm_t361.rf', '0'), array['retain_detach', 'retain_disown'],
+  'F: the renamed table is released, logged as exactly retain_detach, retain_disown');
+select ok((select method from pgpm.log where parent_table = 'pgpm_t361.rf'::regclass and lo = '0' and action = 'retain_disown')
+            like '%attach partition pgpm_t361.rf_kept for values%',
+  'F: the remedy ATTACH names the renamed table, by the oid the mark recorded');
+select ok((select method from pgpm.log where parent_table = 'pgpm_t361.rf'::regclass and lo = '0' and action = 'retain_disown')
+            not like format('%%attach partition pgpm_t361.%s for values%%', :'f_doomed'),
+  'F: and never the squatter that holds the old name');
+
+-- ========== PART G: renamed and attached to the operator's own partitioned table; released, left there ==========
+call pgpm_t361.landed('rg', array[51, 52]);
+select child_name as g_doomed, hi as g_hi, child_oid as g_oid from pgpm.part
+ where parent_table = 'pgpm_t361.rg'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t361.rg', :'g_doomed'), 'fixture: (G) retire() dispatches the detach');
+select pgpm_t361.armed() \gexec
+select format('alter table pgpm_t361.%I rename to rg_kept', :'g_doomed') \gexec
+create table pgpm_t361.mine (id bigint primary key, payload text) partition by range (id);
+alter table pgpm_t361.mine attach partition pgpm_t361.rg_kept for values from (0) to (10000);
+select is((select inhparent::regclass from pg_inherits where inhrelid = :'g_oid'::oid), 'pgpm_t361.mine'::regclass,
+  'LIVENESS: (G) the renamed table is a partition, of the operator''s own table');
+select pgpm.set_retain('pgpm_t361.rg', '45000');
+select is(pgpm_t361.actions('pgpm_t361.rg', '0'), array['retain_detach', 'retain_disown'],
+  'G: released, logged as exactly retain_detach, retain_disown (no fail_retain_identity)');
+select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t361.rg'::regclass and lo = '0'), null,
+  'G: the retirement mark is cleared');
+select is((select inhparent::regclass from pg_inherits where inhrelid = :'g_oid'::oid), 'pgpm_t361.mine'::regclass,
+  'G: the table stays where the operator put it');
+select is(pgpm_t361.ids('pgpm_t361.mine'), array[51, 52]::bigint[], 'G: its rows are whole, served by the operator''s table');
 
 select * from finish();

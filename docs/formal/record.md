@@ -159,9 +159,12 @@ parent silently. `CustodyLive.cfg` and M778 left renames out until #1424 landed.
 releases such a table to the operator (`RecallRelease`, guard `G1424`, mutation `M1424`), so `NoLostRowLive`
 reads "taken back or explicitly released" and renames are back in both. The model's release requires the name
 to have changed, not merely the lookup to have failed: with only the latter, M778's wrong-schema lookup was
-released instead of caught, and M778 went from caught to missed. The contract (`reference.md` `retire`) says
-renamed or moved; the model checks renames only, since known gap K2 leaves out a hand `SET SCHEMA` of a
-partition.
+released instead of caught, and M778 went from caught to missed. A table only moved to another schema under
+its own name is no rename: the code follows it by oid and re-attaches it, and known gap K2 leaves a hand
+`SET SCHEMA` of a partition out of the model anyway. The code releases a renamed table that is no partition
+of this parent, so one the operator attached to a partitioned table of their own is released too. The model
+has no third partitioned table, so its `par = 0` is that condition within its world. The only other parent
+it knows is the namesake (epoch 2), and nothing attaches a recorded retirement there.
 
 ## Independent fidelity read
 

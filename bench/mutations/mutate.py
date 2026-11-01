@@ -16924,7 +16924,7 @@ RECALL_RELEASE_COND = (
     "      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
     "         and v_rec is distinct from v_now::oid\n"
     "         and exists (select 1 from pg_class c where c.oid = v_rec)\n"
-    "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n"
+    "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n"
 )
 MUTATIONS["recall_rename_not_released"] = (
     "bench/retain_recall_renamed_detached.sh",
@@ -16938,7 +16938,7 @@ MUTATIONS["recall_release_attached"] = (
     "Issue #1424, the release without its partition check: a partition renamed while still attached is released "
     "as if the operator had taken a detached table, its mark cleared while it stays in the parent. One clause. "
     "tests/361 part D catches it.",
-    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n",
+    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n",
       "         then\n", 1)],
 )
 MUTATIONS["recall_release_gone"] = (
@@ -16955,6 +16955,21 @@ MUTATIONS["recall_release_unqualified"] = (
     "runs its recall with the schema on the path and catches it.",
     [("                 (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),\n",
       "                 v_rec::regclass,\n", 1)],
+)
+MUTATIONS["recall_release_remedy_by_name"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification V-03, the release not passing the oid it vouched for: on a row an older install left "
+    "without child_oid, _disown_retirement names the relation by the row's old name, so a squatter on it is the "
+    "table the remedy ATTACH tells the operator to put in the parent. tests/361 part F catches it.",
+    [("                 v_rec),\n          v_rec);\n", "                 v_rec));\n", 1)],
+)
+MUTATIONS["recall_release_any_parent"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification V-01, the release refusing a table that is a partition of anything rather than of this "
+    "parent: one the operator renamed and attached to a partitioned table of their own is refused as "
+    "fail_retain_identity on every tick, the mark kept for good. tests/361 part G catches it.",
+    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n",
+      "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n", 1)],
 )
 MUTATIONS["recall_release_anchors_disagree"] = (
     "bench/retain_recall_renamed_detached.sh",

@@ -1742,13 +1742,16 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   bounds, logged `retain_reattach`, and the `CHECK` constraint the concurrent detach left on it is
   dropped again. A re-attach that fails is logged `fail_retain_reattach`, counts in
   `status().retain_drop_failures`, leaves the table and its rows whole, and is retried on the next tick.
-- detached, and renamed (or moved to another schema) by hand since: **a hand rename of a detached
-  retirement makes the table the operator's.** The recall finds the relation by the oid pgpm recorded,
-  sees that it stands under another name and is no partition of anything, and releases it rather than
+- detached, and renamed by hand since: **a hand rename of a detached retirement makes the table the
+  operator's.** The recall finds the relation by the oid pgpm recorded, sees that it stands under another
+  name and is no partition of this parent, and releases it rather than
   attach it back: the job is returned to idle, the mark cleared, and one `retain_disown` row logged whose
   `method` names the new name and spells the `ATTACH` that would put it back on its bounds. pgpm never
   re-attaches it, because a table back in the parent is retention's again, and a later tightening could
-  retire rows the operator renamed it to keep. Its `pgpm.part` row stays, recording the old name: after
+  retire rows the operator renamed it to keep. A table the operator has since attached to a partitioned
+  table of their own is released the same way. A table only moved to another schema, under its own name,
+  is no rename: the recall follows it there by oid and re-attaches it as above. Its `pgpm.part` row stays,
+  recording the old name: after
   the `ATTACH`, rename the table back too, or delete the row if you keep the table apart. A partition
   renamed while still attached, or a recorded relation that is gone, is not released: both are still
   refused as `fail_retain_identity`. So is the renamed table itself while retention still reaches its

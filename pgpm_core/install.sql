@@ -3900,8 +3900,15 @@ $$;
 --
 -- The statements name the relation the row records by its oid (where it is now; a row with no oid, by its name in
 -- _child_nsp's schema) and the parent by its schema-qualified name, never through the search path, and the ATTACH
--- carries the bounds the grid encodes for the row's range, as _retain_recall's own re-attach does.
-create or replace function pgpm._disown_retirement(p_parent regclass, p_child name, p_why text)
+-- carries the bounds the grid encodes for the row's range, as _retain_recall's own re-attach does. p_rel, when
+-- given, is the oid the caller vouched for and the statements name it instead: _retain_recall's release (#1424)
+-- hands over the relation its mark recorded, which a row an older install left without child_oid would otherwise
+-- name by its old name, where another table may stand now.
+--
+-- The three-argument signature is dropped, not left behind: an upgrade that kept it would make every
+-- three-argument call ambiguous between it and this one.
+drop function if exists pgpm._disown_retirement(regclass, name, text);
+create or replace function pgpm._disown_retirement(p_parent regclass, p_child name, p_why text, p_rel oid default null)
 returns boolean language plpgsql as $$
 declare
   cfg pgpm.config; v_lo text; v_hi text; v_child_oid oid; v_rel_q text; v_parent_q text;
@@ -3909,7 +3916,7 @@ declare
 begin
   update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
    where parent_table = p_parent and child_name = p_child and retiring_at is not null
-  returning lo, hi, child_oid into v_lo, v_hi, v_child_oid;
+  returning lo, hi, coalesce(p_rel, child_oid) into v_lo, v_hi, v_child_oid;
   if not found then return false; end if;
   select format('%I.%I', n.nspname, c.relname) into v_rel_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child_oid;
@@ -4837,7 +4844,8 @@ begin
        or (r.child_oid is not null and v_now::oid is distinct from r.child_oid) then
       perform pgpm._idle_detach_job(v_cmd_q);
       -- #1424: the relation the anchors record, when they agree, still stands under another name and is no
-      -- partition of anything: the detach took it out of the parent and the operator renamed (or moved) it since.
+      -- partition of this parent: the detach took it out and the operator renamed it since (a move to another
+      -- schema under its own name is no rename: _child_nsp follows the oid there, and the recall re-attaches it).
       -- A hand rename of a detached retirement makes it the operator's table, so the retirement is released
       -- (_disown_retirement: the mark cleared, retain_disown logged with the ATTACH that would put it back),
       -- never re-attached under the operator's name, where a later tightening could retire rows renamed to be
@@ -4846,12 +4854,13 @@ begin
       if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)
          and v_rec is distinct from v_now::oid
          and exists (select 1 from pg_class c where c.oid = v_rec)
-         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then
+         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then
         perform pgpm._disown_retirement(p_parent, r.child_name,
           format('retention no longer reaches %I.%I, which its retirement''s detach took out of the parent and which has since been renamed to %s (oid %s): a hand rename of a detached retirement makes it the operator''s table, so it is released rather than re-attached',
                  v_nsp, r.child_name,
                  (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
-                 v_rec));
+                 v_rec),
+          v_rec);
         continue;
       end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)
