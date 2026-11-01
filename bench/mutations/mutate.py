@@ -16980,6 +16980,13 @@ MUTATIONS["recall_release_name_unchanged"] = (
     "tests/361 part H catches it.",
     [("         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name\n", "", 1)],
 )
+MUTATIONS["recall_release_remedy_no_rename"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification round 2 V-06, the release's remedy without its rename back: the ATTACH alone leaves "
+    "the pgpm.part row naming a relation that is not there, which retire() refuses as fail_retain_identity on every "
+    "call once retention reaches the range. tests/361 part A runs the whole remedy and catches it.",
+    [("  if v_cur is distinct from p_child and v_cur is not null then\n", "  if false then\n", 1)],
+)
 MUTATIONS["recall_release_anchors_disagree"] = (
     "bench/retain_recall_renamed_detached.sh",
     "Issue #1424, the release without its anchor agreement: a mark recorded on another relation than the row's "

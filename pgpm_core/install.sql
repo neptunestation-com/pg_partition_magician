@@ -3912,13 +3912,13 @@ create or replace function pgpm._disown_retirement(p_parent regclass, p_child na
 returns boolean language plpgsql as $$
 declare
   cfg pgpm.config; v_lo text; v_hi text; v_child_oid oid; v_rel_q text; v_parent_q text;
-  v_boundary text; v_reached boolean; v_unjudged text; v_attach text; v_unencoded text; v_remedy text;
+  v_boundary text; v_reached boolean; v_unjudged text; v_attach text; v_unencoded text; v_remedy text; v_cur name; v_rename_q text;
 begin
   update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
    where parent_table = p_parent and child_name = p_child and retiring_at is not null
   returning lo, hi, coalesce(p_rel, child_oid) into v_lo, v_hi, v_child_oid;
   if not found then return false; end if;
-  select format('%I.%I', n.nspname, c.relname) into v_rel_q
+  select format('%I.%I', n.nspname, c.relname), c.relname into v_rel_q, v_cur
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child_oid;
   v_rel_q := coalesce(v_rel_q, format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child));   -- part-row-by-name: text of the remedy message, resolves nothing
   select format('%I.%I', n.nspname, c.relname) into v_parent_q
@@ -3942,6 +3942,15 @@ begin
     v_attach := null; v_unencoded := sqlerrm;
   end;
   v_attach := coalesce(v_attach, format('(its bounds [%s, %s) could not be encoded: %s)', v_lo, v_hi, v_unencoded));
+  -- a relation standing under another name than the row's (the release of a renamed retirement, #1424): the ATTACH
+  -- alone leaves the row naming a relation that is not there, which retire() refuses as fail_retain_identity on
+  -- every call, so the repair renames it back too (#1272: a remedy is the whole repair)
+  if v_cur is distinct from p_child and v_cur is not null then
+    -- by-name-ok: a remedy text a log row carries; nothing runs it
+    v_rename_q := format('alter table %s rename to %I;', v_rel_q, p_child);
+    v_attach := v_attach || format(' then rename it back, so its pgpm.part row names it again (moving aside first anything that has taken that name): %s',
+                                   v_rename_q);
+  end if;
 
   if v_reached then
     v_remedy := format('Retention reaches its range under the policy in force (horizon %s). If it was pgpm''s own aged retirement, once its detach is finished either attach it back to the parent on its bounds so retention retires it: %s ', v_boundary, v_attach)

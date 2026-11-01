@@ -38,7 +38,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(58);
+select plan(60);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -138,6 +138,13 @@ select coalesce((select substring(method from 'alter table [^;]* attach partitio
 select ok(:'a_attach' like '%attach partition pgpm_t361.ra_kept %', 'A: the remedy''s ATTACH names the renamed table');
 select lives_ok(:'a_attach', 'A: the remedy''s ATTACH runs');
 select is(pgpm_t361.ids('pgpm_t361.ra', 20000), array[1, 2]::bigint[], 'A: and serves ids 1 and 2 through the parent again');
+-- and the rename back the remedy spells after it, which makes the row name the table again (#1272: the whole repair)
+select coalesce((select substring(method from 'alter table [^;]* rename to [^;]*;') from pgpm.log
+                  where parent_table = 'pgpm_t361.ra'::regclass and lo = '0' and action = 'retain_disown'),
+                'select ''no rename in the remedy'' :: int') as a_rename \gset
+select lives_ok(:'a_rename', 'A: the remedy''s rename back runs');
+select is(pgpm._part_rel('pgpm_t361.ra', :'a_doomed')::oid, :'a_oid'::oid,
+  'A: after the whole remedy, the row''s name denotes the table again');
 
 -- ========== PART B: a squatter took the old name; the renamed table is released all the same ==========
 call pgpm_t361.landed('rb', array[5, 6, 7]);

@@ -1746,15 +1746,14 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   operator's.** The recall finds the relation by the oid pgpm recorded, sees that it stands under another
   name and is no partition of this parent, and releases it rather than
   attach it back: the job is returned to idle, the mark cleared, and one `retain_disown` row logged whose
-  `method` names the new name and spells the `ATTACH` that would put it back on its bounds. pgpm never
-  re-attaches it, because a table back in the parent is retention's again, and a later tightening could
+  `method` names the new name and spells the `ATTACH` that would put it back on its bounds, and the
+  rename back that makes its `pgpm.part` row name it again. pgpm never re-attaches it, because a table back in the parent is retention's again, and a later tightening could
   retire rows the operator renamed it to keep. A table the operator has since attached to a partitioned
   table of their own is released the same way. A table only moved to another schema, under its own name,
   is no rename: the recall follows it there by oid and re-attaches it as above (on a row an older install
   left without `child_oid` it cannot follow it, and refuses it as `fail_retain_identity`, as before; move it
-  back). Its `pgpm.part` row stays,
-  recording the old name: after
-  the `ATTACH`, rename the table back too, or delete the row if you keep the table apart. A partition
+  back). Its `pgpm.part` row stays, recording the old name: after the `ATTACH`, rename the table back too,
+  as the remedy spells, or delete the row if you keep the table apart. A partition
   renamed while still attached, or a recorded relation that is gone, is not released: both are still
   refused as `fail_retain_identity`. So is the renamed table itself while retention still reaches its
   range: `retire` neither drops it nor releases it, and the identity failure stays until you rename it back

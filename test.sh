@@ -653,7 +653,7 @@ run_timescale() {
     echo "--- the timescale files' pre-drain witnesses fail when the cutover does not pre-drain (issue #1377) ---"
     bash "$(dirname "$0")/bench/tests_witness_the_step.sh" pgpm_test-timescale pgpm_perf428 \
       /repo/tests/timescale/db/14_from_hypertable_online_drain_test.sql || fail=1
-    bash "$(dirname "$0")/bench/tests_witness_the_step.sh" pgpm_test-timescale pgpm_perf428 \
+    bash "$(dirname "$0")/bench/tests_witness_the_step.sh" pgpm_test-timescale pgpm_perf443 \
       /repo/tests/timescale/db/47_from_hypertable_scratch_tables_in_pg_temp_test.sql || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
