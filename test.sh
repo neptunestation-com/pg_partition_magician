@@ -1720,6 +1720,10 @@ lint_job_by_name_statements() {
   python3 scripts/check_by_name_after_wait.py --selftest
   python3 scripts/check_by_name_after_wait.py
 }
+lint_job_test_clock() {
+  python3 scripts/check_test_clock.py --selftest
+  python3 scripts/check_test_clock.py
+}
 lint_job_minifier() {
   python3 scripts/minify_sql.py --selftest
   PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
@@ -1777,6 +1781,7 @@ run_lint() {
     quoted-splices
     archive-object-keys
     by-name-statements
+    test-clock
     minifier
     core-growth
     track-filters

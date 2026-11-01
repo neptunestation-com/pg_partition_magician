@@ -44,6 +44,8 @@ select throws_like(
   'pg_partition_magician:%' || :'rel55' || '_p2026_01%64 bytes%63-byte%1 byte%',
   '_part_name refuses a 64-byte fine name, naming it, its 64 bytes and the 1 byte to shorten by');
 
+-- clock-ok: these coarse names are _part_name's output over the explicit bounds beside them, and the names a
+-- transmute below makes are derived from now() where they are asserted, so no literal here comes from the clock
 -- 43 + 2 + 7 + 4 + 7 = 63: the last relation name whose coarse (monolith) monthly name fits
 select is(
   pgpm._part_name(:'rel43', 'time', '1 month', '2026-01-01 00:00:00+00', '2026-04-01 00:00:00+00', 'UTC')::text,

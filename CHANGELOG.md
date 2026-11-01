@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Tests no longer depend on the month they run in** (#1425). transmute's first partition runs to the month after
+  now(), and tests/317 and tests/334 spelled out the partition names and grid an October 2026 run makes, so on 1
+  November both failed on main with nothing changed. Each now pins now() for its transmute calls with a
+  search_path shim (the tests/311 precedent), and a new lint job, `Test clock` (`scripts/check_test_clock.py`,
+  also in test.sh's lint track), fails a test that converts a table and names a partition by its months without
+  pinning the clock or giving a `-- clock-ok:` reason.
 - **`retire()` retires the partition `pgpm.part` anchors, not a namesake in another schema** (#1365). Its
   referenced path picked the partition to retire out of `pg_inherits` by relname alone, so an operator's
   partition of the same parent under the same name in another schema could be the one recorded as `retiring_oid`
