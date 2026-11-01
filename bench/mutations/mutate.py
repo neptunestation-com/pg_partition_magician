@@ -16924,6 +16924,7 @@ RECALL_RELEASE_COND = (
     "      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
     "         and v_rec is distinct from v_now::oid\n"
     "         and exists (select 1 from pg_class c where c.oid = v_rec)\n"
+    "         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name\n"
     "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n"
 )
 MUTATIONS["recall_rename_not_released"] = (
@@ -16970,6 +16971,14 @@ MUTATIONS["recall_release_any_parent"] = (
     "fail_retain_identity on every tick, the mark kept for good. tests/361 part G catches it.",
     [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n",
       "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n", 1)],
+)
+MUTATIONS["recall_release_name_unchanged"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification round 2 P1-02, the release without its name-changed clause (the formal model's G1424 "
+    "has it): on a row with no child_oid, a detached retirement only moved to another schema under its own name "
+    "fails the name lookup and is released, mark cleared, with a remedy naming the schema it left. One clause. "
+    "tests/361 part H catches it.",
+    [("         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name\n", "", 1)],
 )
 MUTATIONS["recall_release_anchors_disagree"] = (
     "bench/retain_recall_renamed_detached.sh",

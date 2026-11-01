@@ -4845,7 +4845,8 @@ begin
       perform pgpm._idle_detach_job(v_cmd_q);
       -- #1424: the relation the anchors record, when they agree, still stands under another name and is no
       -- partition of this parent: the detach took it out and the operator renamed it since (a move to another
-      -- schema under its own name is no rename: _child_nsp follows the oid there, and the recall re-attaches it).
+      -- schema under its own name is no rename: _child_nsp follows the oid there, and the recall re-attaches it; on
+      -- a row with no child_oid it cannot, and the unchanged name keeps it out of the release, refused below).
       -- A hand rename of a detached retirement makes it the operator's table, so the retirement is released
       -- (_disown_retirement: the mark cleared, retain_disown logged with the ATTACH that would put it back),
       -- never re-attached under the operator's name, where a later tightening could retire rows renamed to be
@@ -4854,6 +4855,7 @@ begin
       if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)
          and v_rec is distinct from v_now::oid
          and exists (select 1 from pg_class c where c.oid = v_rec)
+         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name
          and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then
         perform pgpm._disown_retirement(p_parent, r.child_name,
           format('retention no longer reaches %I.%I, which its retirement''s detach took out of the parent and which has since been renamed to %s (oid %s): a hand rename of a detached retirement makes it the operator''s table, so it is released rather than re-attached',

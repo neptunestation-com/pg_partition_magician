@@ -25,17 +25,20 @@
 --           recorded, never the squatter that holds the name now.
 --   PART G  the operator renamed the detached retirement and attached it to a partitioned table of THEIR OWN:
 --           it is no partition of this parent, so it is released all the same, and left where they put it.
+--   PART H  the row has no child_oid and the operator only MOVED the detached retirement to another schema, under
+--           its own name: no rename, so no release; pgpm cannot follow it without the anchor, and refuses it as before
+--           (fail_retain_identity), the mark kept and the table where the operator put it.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in for
 -- cron.job and cron.alter_job and runs whatever the standing job holds at the top level, as tests/204 does.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2; B 5, 6, 7; C 11;
--- D 21, 22; E 31, and E's foreign table 77; F 41, 42, 43; G 51, 52), and the squatters B 99 and F 98, so a re-attach of the wrong relation or a lost
+-- D 21, 22; E 31, and E's foreign table 77; F 41, 42, 43; G 51, 52; H 61), and the squatters B 99 and F 98, so a re-attach of the wrong relation or a lost
 -- row cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(52);
+select plan(58);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -249,5 +252,25 @@ select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t361.rg'
 select is((select inhparent::regclass from pg_inherits where inhrelid = :'g_oid'::oid), 'pgpm_t361.mine'::regclass,
   'G: the table stays where the operator put it');
 select is(pgpm_t361.ids('pgpm_t361.mine'), array[51, 52]::bigint[], 'G: its rows are whole, served by the operator''s table');
+
+-- ========== PART H: an older install's row, the table only moved to another schema; refused, not released ==========
+call pgpm_t361.landed('rh', array[61]);
+select child_name as h_doomed, hi as h_hi, child_oid as h_oid from pgpm.part
+ where parent_table = 'pgpm_t361.rh'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t361.rh', :'h_doomed'), 'fixture: (H) retire() dispatches the detach');
+select pgpm_t361.armed() \gexec
+update pgpm.part set child_oid = null, detach_dispatched_oid = null
+ where parent_table = 'pgpm_t361.rh'::regclass and lo = '0';
+create schema pgpm_t361_else;
+select format('alter table pgpm_t361.%I set schema pgpm_t361_else', :'h_doomed') \gexec
+select is((select relname::text from pg_class where oid = :'h_oid'::oid), :'h_doomed',
+  'LIVENESS: (H) the table kept its name, in another schema');
+select pgpm.set_retain('pgpm_t361.rh', '45000');
+select is(pgpm_t361.actions('pgpm_t361.rh', '0'), array['retain_detach', 'fail_retain_identity'],
+  'H: a move is no rename: refused as exactly fail_retain_identity, not released');
+select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t361.rh'::regclass and lo = '0'), null,
+  'H: the mark is kept');
+select ok(not pgpm_t361.is_partition(:'h_oid'::oid), 'H: the table is not re-attached');
+select is(pgpm_t361.ids(format('pgpm_t361_else.%I', :'h_doomed')), array[61]::bigint[], 'H: its rows are whole');
 
 select * from finish();
