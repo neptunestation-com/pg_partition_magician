@@ -109,6 +109,21 @@ jobs:
           python3 scripts/check_by_name_after_wait.py --selftest
           python3 scripts/check_by_name_after_wait.py
 
+  test-clock:
+    name: Test clock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # scripts/check_test_clock.py (#1425): a test that converts a table and then names a partition by its months
+      # (`_p2026_01_to_2026_11`) pins now() with a search_path shim, or says why its literals do not come from the
+      # clock. transmute's first partition ends the month after now(), so such a test is green only in the month it
+      # was written: tests/317 and 334 went red on main on 1 November with nothing changed. Its --selftest runs
+      # first and requires the tree to hold in-scope tests, so a scanner that has stopped matching fails here.
+      - name: Every month-naming test pins the clock or gives its reason
+        run: |
+          python3 scripts/check_test_clock.py --selftest
+          python3 scripts/check_test_clock.py
+
   minifier:
     name: dbdev minifier
     runs-on: ubuntu-latest
@@ -243,7 +258,7 @@ jobs:
   summary:
     name: Lint summary
     runs-on: ubuntu-latest
-    needs: [markdown-lint, living-docs, quoted-splices, archive-object-keys, by-name-statements, minifier, core-growth, track-filters, review-tooling-selftest, shellcheck, lock-view-selftest, sql-syntax]
+    needs: [markdown-lint, living-docs, quoted-splices, archive-object-keys, by-name-statements, test-clock, minifier, core-growth, track-filters, review-tooling-selftest, shellcheck, lock-view-selftest, sql-syntax]
     if: always()
     steps:
       - run: |
@@ -252,6 +267,7 @@ jobs:
           [ "${{ needs.quoted-splices.result }}" = "success" ] || { echo "quoted-splices failed"; exit 1; }
           [ "${{ needs.archive-object-keys.result }}" = "success" ] || { echo "archive-object-keys failed"; exit 1; }
           [ "${{ needs.by-name-statements.result }}" = "success" ] || { echo "by-name-statements failed"; exit 1; }
+          [ "${{ needs.test-clock.result }}" = "success" ] || { echo "test-clock failed"; exit 1; }
           [ "${{ needs.minifier.result }}" = "success" ] || { echo "minifier failed"; exit 1; }
           [ "${{ needs.core-growth.result }}" = "success" ] || { echo "core-growth failed"; exit 1; }
           [ "${{ needs.track-filters.result }}" = "success" ] || { echo "track-filters failed"; exit 1; }

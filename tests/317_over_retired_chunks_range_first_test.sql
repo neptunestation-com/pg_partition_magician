@@ -33,6 +33,14 @@ select plan(13);
 
 create schema t317;
 
+-- THE CLOCK IS PINNED for part C's transmute (#1425). transmute's first partition runs to the month after now(), so
+-- the partition this file names (b_p2026_01_to_2026_11, hi 1 November) is the one a run in October 2026 makes.
+-- pgpm reads now() unqualified, so a now() ahead of pg_catalog on the search_path stands in for the wall clock
+-- during the call, and the name and bound below hold in any month. The LIVENESS check on that partition fails
+-- loudly if pgpm ever stops reading the clock this way.
+create schema t317_clock;
+create function t317_clock.now() returns timestamptz language sql immutable as $$ select timestamptz '2026-10-15 12:00:00+00' $$;
+
 -- ledger tuples (heap rows returned or fetched, index entries returned) read so far in this transaction
 create function t317.ledger_counter() returns bigint language sql volatile as $$
   select pg_stat_get_xact_tuples_returned('pgpm.archive_ledger'::regclass)
@@ -96,7 +104,9 @@ select cmp_ok(t317.reads_of($$select count(*) from pgpm._over_retired_chunks('t3
 -- instant but above it as text, one the reverse, and one has an offset-less bound.
 create table t317.b (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t317.b (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+set search_path = t317_clock, pg_catalog, public;
 call pgpm.transmute('t317.b', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
+reset search_path;
 select pgpm.set_archive_fn('t317.b', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, retired_at, child_oid)
 select 't317.b'::regclass, pgpm._ts_text(timestamptz '2020-01-01 00:00:00+00' + g * interval '1 hour'),

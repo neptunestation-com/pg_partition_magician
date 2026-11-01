@@ -39,9 +39,19 @@ select plan(30);
 
 create schema t334;
 
+-- THE CLOCK IS PINNED for every transmute (#1425). transmute's first partition runs to the month after now(), so
+-- the grid this file is built around ([Jan, Nov), [Nov, Dec), [Dec, Jan)) is the one a run in October 2026 makes.
+-- pgpm reads now() unqualified, so a now() ahead of pg_catalog on the search_path stands in for the wall clock
+-- during each call, and the grid, the chunks placed on its boundaries and the names below hold in any month.
+-- The GUARD on the first partition's name fails loudly if pgpm ever stops reading the clock this way.
+create schema t334_clock;
+create function t334_clock.now() returns timestamptz language sql immutable as $$ select timestamptz '2026-10-15 12:00:00+00' $$;
+
 create table t334.t (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t334.t (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.t', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
+reset search_path;
 select pgpm.set_archive_fn('t334.t', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 
 -- what the call holds, one line per partition
@@ -126,7 +136,9 @@ set timezone = 'Asia/Tokyo';
 create table t334.u (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 set timezone = 'UTC';
 insert into t334.u (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.u', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
+reset search_path;
 select pgpm.set_archive_fn('t334.u', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, retired_at, child_oid) values
   ('t334.u', '2025-12-31 20:00:00+00', '2026-01-01 03:00:00', 'gone_u', 'obj/u', now(), 4290000106);
@@ -147,7 +159,9 @@ set timezone = 'UTC';
 -- ends two and a half hours BEFORE that partition's lo.
 create table t334.v (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t334.v (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.v', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
+reset search_path;
 select pgpm.set_archive_fn('t334.v', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, retired_at, child_oid) values
   ('t334.v', '2025-12-31 20:00:00+00', '01/01/2026 03:00:00 IST', 'gone_v', 'obj/v', now(), 4290000107);
@@ -184,7 +198,9 @@ set timezone = 'UTC';
 set timezone = 'Asia/Tokyo';
 create table t334.w (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t334.w (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.w', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
+reset search_path;
 select pgpm.set_archive_fn('t334.w', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 select is((select string_agg(format('%s [%s, %s)', child_name, lo, hi), '; ' order by child_name)
              from pgpm.part where parent_table = 't334.w'::regclass and attached),
