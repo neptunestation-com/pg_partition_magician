@@ -16917,6 +16917,46 @@ MUTATIONS["upgrade_create_body_column_no_backfill"] = (
       "  obtain_note      text,\n", 1)],
 )
 
+# Issue #1424: a detached retirement the operator renamed is released (retain_disown), never re-attached and never
+# refused as an identity failure on every tick. bench/retain_recall_renamed_detached.sh runs tests/361 against the
+# mutant; one mutation for the release and one per clause of its condition.
+RECALL_RELEASE_COND = (
+    "      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
+    "         and v_rec is distinct from v_now::oid\n"
+    "         and exists (select 1 from pg_class c where c.oid = v_rec)\n"
+    "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n"
+)
+MUTATIONS["recall_rename_not_released"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the pre-fix shape: _retain_recall never releases a detached retirement the operator renamed, so "
+    "the name it resolves denotes nothing and it logs fail_retain_identity on every tick with the mark kept, counted "
+    "in status().retain_drop_failures for good. One site, the release's condition. tests/361 parts A and B catch it.",
+    [(RECALL_RELEASE_COND, "      if false then\n", 1)],
+)
+MUTATIONS["recall_release_attached"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the release without its partition check: a partition renamed while still attached is released "
+    "as if the operator had taken a detached table, its mark cleared while it stays in the parent. One clause. "
+    "tests/361 part D catches it.",
+    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n",
+      "         then\n", 1)],
+)
+MUTATIONS["recall_release_gone"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the release without its existence check: a recorded relation dropped after its detach is "
+    "\"released\" to an operator who has nothing, the identity failure that says so lost. One clause. tests/361 part C "
+    "catches it.",
+    [("         and exists (select 1 from pg_class c where c.oid = v_rec)\n", "", 1)],
+)
+MUTATIONS["recall_release_anchors_disagree"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the release without its anchor agreement: a mark recorded on another relation than the row's "
+    "anchor hands that relation over on the mark's say alone. One clause. tests/361 part E catches it.",
+    [("      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
+      "         and v_rec is distinct from v_now::oid\n",
+      "      if v_rec is distinct from v_now::oid\n", 1)],
+)
+
 # The schema-swap class as one lever (the pass-13 record): the statements the per-family fixes (#1399, #1400, #1402)
 # did not own, each locked by oid first or checked by its effect after. bench/schema_swap_leftovers.sh runs tests/359
 # and tests/360 against the mutant; one mutation per clause.

@@ -4798,7 +4798,9 @@ $$;
 --   later call, silently, as _detach_reap leaves a live one.
 --
 -- A name that no longer resolves to the relation either anchor recorded is not acted on beyond disarming
--- its own command: logged fail_retain_identity, as retire() does for the same mismatch.
+-- its own command: logged fail_retain_identity, as retire() does for the same mismatch. Except one case (#1424):
+-- the recorded relation still stands, detached, under another name. The operator renamed a retirement that was
+-- out of the parent, which makes it theirs: the mark is released (retain_disown), and the table is not re-attached.
 --
 -- p_reattach false is set_retain's call: recall only. set_retain is an operator's call with no
 -- lock_timeout of its own, and an ATTACH there would queue behind whatever holds the parent; the tick
@@ -4806,7 +4808,7 @@ $$;
 create or replace function pgpm._retain_recall(p_parent regclass, p_reattach boolean)
 returns int language plpgsql as $$
 declare
-  cfg pgpm.config; v_boundary text; v_nsp name; r record; v_now regclass; v_cmd_q text;
+  cfg pgpm.config; v_boundary text; v_nsp name; r record; v_now regclass; v_cmd_q text; v_rec oid;
   v_armed boolean; v_pending boolean; v_check name; v_n int := 0;
   v_db oid := (select oid from pg_database where datname = current_database());
 begin
@@ -4834,6 +4836,22 @@ begin
     if (r.retiring_oid is not null and v_now::oid is distinct from r.retiring_oid)
        or (r.child_oid is not null and v_now::oid is distinct from r.child_oid) then
       perform pgpm._idle_detach_job(v_cmd_q);
+      -- #1424: the relation the anchors record, when they agree, still stands under another name and is no
+      -- partition of anything: the detach took it out of the parent and the operator renamed (or moved) it since.
+      -- A hand rename of a detached retirement makes it the operator's table, so the retirement is released
+      -- (_disown_retirement: the mark cleared, retain_disown logged with the ATTACH that would put it back),
+      -- never re-attached under the operator's name, where a later tightening could retire rows renamed to be
+      -- kept. A name taken by a squatter while the partition stays attached is still refused below (#778 part C).
+      v_rec := coalesce(r.retiring_oid, r.child_oid);
+      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)
+         and v_rec is distinct from v_now::oid
+         and exists (select 1 from pg_class c where c.oid = v_rec)
+         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then
+        perform pgpm._disown_retirement(p_parent, r.child_name,
+          format('retention no longer reaches %I.%I, which its retirement''s detach took out of the parent and which has since been renamed to %s (oid %s): a hand rename of a detached retirement makes it the operator''s table, so it is released rather than re-attached',
+                 v_nsp, r.child_name, v_rec::regclass, v_rec));
+        continue;
+      end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_retain_identity', r.lo, r.hi,
                 format('%I.%I is oid %s now, not the relation whose retirement retention no longer reaches; refusing to re-attach it',

@@ -85,6 +85,7 @@ G = {
     'G502': 'Key(lo) == lo  \\* @guard G502',
     'G727': 'OwnNsp(s) == IF part[s].oid # 0 /\\ rel[part[s].oid].ex THEN rel[part[s].oid].nsp ELSE parentNsp  \\* @guard G727',
     'G778': 'RecallNsp(s) == IF part[s].oid # 0 /\\ rel[part[s].oid].ex THEN rel[part[s].oid].nsp ELSE parentNsp  \\* @guard G778',
+    'G1424': 'RecallRelease(s, o) == (part[s].rOid = 0 \\/ part[s].oid = 0 \\/ part[s].rOid = part[s].oid) /\\ RecOid(s) # 0 /\\ RecOid(s) # o /\\ rel[RecOid(s)].ex /\\ rel[RecOid(s)].par = 0 /\\ rel[RecOid(s)].name # part[s].name  \\* @guard G1424',
     'G1259': 'PgpmHolds(s, o) == part[s].ret /\\ part[s].disp = o /\\ o # 0  \\* @guard G1259',
     'G651': 'IsBlocked(o) == rel[o].trig = "always"  \\* @guard G651',
     'G500': 'PartHi(s, z) == ParseIn(part[s].hiB, 0)  \\* @guard G500',
@@ -158,6 +159,7 @@ M = {
     'G724': e('G724', '          /\\ IF TRUE'),
     'G727': e('G727', 'OwnNsp(s) == parentNsp'),
     'G778': e('G778', 'RecallNsp(s) == parentNsp'),
+    'G1424': e('G1424', 'RecallRelease(s, o) == FALSE'),
     'G788': e('G788', 'ChunkStop(lo, z) == IF z # 0 THEN lo ELSE lo + 1'),
     'G822': e('G822', '    /\\ IF FALSE'),
     'G1260': e('G1260', 'ClaimHeld(k, sp) == k \\in claimed /\\ sp = "plain"'),
@@ -247,10 +249,12 @@ MUTATIONS = {
                  cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, budget=1),
                  note='every step resolves a partition in the parent\'s schema'),
     'M778': dict(rcs=['#778'], inv='NoLostRowLive', live=True, guards=['G778'],
-                 cfg=dict(groups=['OD', 'T'], shapes=FRESH, fk=True, budget=2),
-                 note='the recall resolves in the parent\'s schema: a moved parent\'s retirement is never taken back. '
-                      'No RN: a hand rename of a detached retired table also leaves it un-recalled for ever, '
-                      'until #1424 releases it by oid (Q1 in docs/formal/record.md)'),
+                 cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, fk=True, budget=2),
+                 note='the recall resolves in the parent\'s schema: a moved parent\'s retirement is never taken back'),
+    'M1424': dict(rcs=['Q1-1424'], inv='NoLostRowLive', live=True, guards=['G1424'], extra=True,
+                  cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, fk=True, budget=2),
+                  note='the recall never releases a detached retirement the operator renamed: resolved by name, it '
+                       'finds nothing, and the rows stay out of the parent for ever (Q1 in docs/formal/record.md)'),
     'M788': dict(rcs=['#788'], inv='NoWedge', guards=['G788'],
                  cfg=dict(groups=['SG', 'T'], shapes=FRESH, budget=0),
                  note='the chunk stop round-trips through session text: no chunk, nothing logged'),

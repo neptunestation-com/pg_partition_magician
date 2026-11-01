@@ -738,16 +738,30 @@ DetachReap(x) ==
 (* by set_retain or the next tick's retain(); reference.md `retire`, "A    *)
 (* retirement belongs to the retention policy that started it").           *)
 
+\* #1424 (Q1, decided): the relation the anchors record, when they agree, stands
+\* under another name and is no partition of anything. pgpm's detach took it out
+\* and the operator renamed it since, which makes it the operator's table. The
+\* contract says renamed or moved; no hand SET SCHEMA of a partition is modelled
+\* (K2), so here the name is what changed.
+RecOid(s) == IF part[s].rOid # 0 THEN part[s].rOid ELSE part[s].oid
+RecallRelease(s, o) == (part[s].rOid = 0 \/ part[s].oid = 0 \/ part[s].rOid = part[s].oid) /\ RecOid(s) # 0 /\ RecOid(s) # o /\ rel[RecOid(s)].ex /\ rel[RecOid(s)].par = 0 /\ rel[RecOid(s)].name # part[s].name  \* @guard G1424
+
 Recall(s, z) ==
     /\ upgraded /\ parentEx /\ part[s].pr /\ part[s].ret /\ ~Eligible(s, z)
     /\ LET o == Resolve(RecallNsp(s), part[s].name) IN
+       \* released, never re-attached (retain_disown): its rows are the operator's
+       \/ /\ RecallRelease(s, o)
+          /\ part' = [part EXCEPT ![s].ret = FALSE, ![s].rOid = 0, ![s].disp = 0]
+          /\ opOwned' = opOwned \cup {RecOid(s)}
+          /\ IdleIfHolds(RecallNsp(s), part[s].name)
+          /\ UNCHANGED rel
        \/ /\ o # 0 /\ Attached(o, 1)
           \* the job back to idle; the mark is cleared only once no detach of it is running (#724)
           /\ IdleIfHolds(rel[o].nsp, rel[o].name)
           /\ IF jobRun # [n |-> rel[o].nsp, nm |-> rel[o].name] /\ o \notin liveDet  \* @guard G724
              THEN part' = [part EXCEPT ![s].ret = FALSE, ![s].rOid = 0, ![s].disp = 0]
              ELSE UNCHANGED part
-          /\ UNCHANGED rel
+          /\ UNCHANGED <<rel, opOwned>>
        \* H_C1, as the attached branch does it: with a run of the command in
        \* flight, idle the job and come back; attach once no run is in flight
        \* (a wait that only blocks would leave the armed job relaunching for ever)
@@ -755,7 +769,7 @@ Recall(s, z) ==
           /\ o # 0 /\ rel[o].ex /\ rel[o].par = 0 /\ PgpmHolds(s, o)
           /\ jobRun = [n |-> rel[o].nsp, nm |-> rel[o].name]
           /\ IdleIfHolds(rel[o].nsp, rel[o].name)
-          /\ UNCHANGED <<rel, part>>
+          /\ UNCHANGED <<rel, part, opOwned>>
        \/ /\ o # 0 /\ rel[o].ex /\ rel[o].par = 0 /\ PgpmHolds(s, o)
           /\ ("H_C1" \in Hypotheses => jobRun # [n |-> rel[o].nsp, nm |-> rel[o].name])
           \* already detached by that detach: attach it back on its own bounds (retain_reattach)
@@ -763,7 +777,8 @@ Recall(s, z) ==
           /\ rel' = [rel EXCEPT ![o].par = 1, ![o].slot = s]
           /\ part' = [part EXCEPT ![s].ret = FALSE, ![s].rOid = 0, ![s].disp = 0]
           /\ IdleIfHolds(rel[o].nsp, rel[o].name)
-    /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet, envLeft>>
+          /\ UNCHANGED opOwned
+    /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft>>
     /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
