@@ -97,7 +97,11 @@ select is(to_regclass(format('pgpm_t361.%I', :'a_doomed')), null, 'LIVENESS: (A)
 select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t361.ra'::regclass and lo = '0'), null,
   'LIVENESS: (A) the retirement mark is still on the row');
 
+-- the recall runs with the table's schema ON the search_path, where a regclass renders unqualified: the method
+-- must name the new name schema-qualified all the same (a table in public, pg_cron's path, would read bare)
+set search_path = pgpm_t361, public;
 select pgpm.set_retain('pgpm_t361.ra', '45000');
+reset search_path;
 select ok(not pgpm_t361.reached('pgpm_t361.ra', :'a_hi'), 'LIVENESS: (A) retention no longer reaches the partition');
 select is(pgpm_t361.actions('pgpm_t361.ra', '0'), array['retain_detach', 'retain_disown'],
   'A: the recall released it, logged as exactly retain_detach, retain_disown (no fail_retain_identity)');
@@ -106,7 +110,7 @@ select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t361.ra'
 select is(pgpm_t361.armed(), 'select 1', 'A: the standing job is idle');
 select ok((select method from pgpm.log where parent_table = 'pgpm_t361.ra'::regclass and lo = '0' and action = 'retain_disown')
             like format('%%renamed to pgpm_t361.ra_kept (oid %s)%%', :'a_oid'),
-  'A: the method names the table''s new name and oid');
+  'A: the method names the table''s new name, schema-qualified though its schema is on the search_path, and oid');
 
 call pgpm.maintain('pgpm_t361.ra');
 call pgpm.maintain('pgpm_t361.ra');

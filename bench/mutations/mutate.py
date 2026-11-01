@@ -16948,6 +16948,14 @@ MUTATIONS["recall_release_gone"] = (
     "catches it.",
     [("         and exists (select 1 from pg_class c where c.oid = v_rec)\n", "", 1)],
 )
+MUTATIONS["recall_release_unqualified"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification P1-02, the release's method naming the new name as a regclass: rendered against the "
+    "caller's search_path, a table whose schema is on it (public, pg_cron's path) is logged bare. tests/361 part A "
+    "runs its recall with the schema on the path and catches it.",
+    [("                 (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),\n",
+      "                 v_rec::regclass,\n", 1)],
+)
 MUTATIONS["recall_release_anchors_disagree"] = (
     "bench/retain_recall_renamed_detached.sh",
     "Issue #1424, the release without its anchor agreement: a mark recorded on another relation than the row's "

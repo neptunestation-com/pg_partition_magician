@@ -4849,7 +4849,9 @@ begin
          and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then
         perform pgpm._disown_retirement(p_parent, r.child_name,
           format('retention no longer reaches %I.%I, which its retirement''s detach took out of the parent and which has since been renamed to %s (oid %s): a hand rename of a detached retirement makes it the operator''s table, so it is released rather than re-attached',
-                 v_nsp, r.child_name, v_rec::regclass, v_rec));
+                 v_nsp, r.child_name,
+                 (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
+                 v_rec));
         continue;
       end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)
