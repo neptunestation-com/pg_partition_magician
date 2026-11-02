@@ -4087,14 +4087,16 @@ begin
              join pg_class c on c.oid = coalesce(p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)
              join pg_namespace n on n.oid = c.relnamespace
             where p.retiring_at is not null and c.relname = p.child_name   -- part-row-by-name: found by oid; a rename drops out
-              -- #1429: an unanchored row's name is judged only where it agrees with the mark. A retiring_oid on
-              -- another relation that no longer carries the name (renamed since its detach, or gone) leaves a
-              -- squatter under it, which is not what was marked: disowning it would log an ATTACH of the
-              -- squatter. That row drops out as an anchored rename does, and the recall judges it by oid (#1424).
-              -- A mark on the relation under the name, or on a namesake that still carries it (#1365), is judged
-              -- by the name as before, and so is a v0.4.0 mark, which records no oid to judge.
-              and (p.child_oid is not null or p.retiring_oid is null
-                   or exists (select 1 from pg_class m where m.oid = p.retiring_oid and m.relname = p.child_name))   -- part-row-by-name: whether the mark's relation still carries the name, by its oid
+              -- #1429: an unanchored row's name is judged only where it agrees with the mark: the mark records the
+              -- relation under the name, or (a v0.4.0 mark) no oid at all. A retiring_oid on any other relation
+              -- (the retirement renamed, moved to another schema or dropped since its detach, or a namesake an older
+              -- retire() recorded, #1365) leaves something else under the name, a squatter as like as not, and
+              -- disowning that would log an ATTACH of it. Which of those it is the catalog cannot say (a moved
+              -- retirement and a namesake look alike), so the row drops out, as an anchored rename does, and the
+              -- paths that judge the mark by its oid take it: the recall releases a renamed retirement (#1424) and
+              -- refuses the rest as fail_retain_identity, as retire() does. A v0.4.0 mark has no oid to tell a
+              -- squatter under the name from the retirement, and is still judged by the name here (#1432).
+              and (p.child_oid is not null or p.retiring_oid is null or p.retiring_oid = c.oid)
   loop
     if r.pending is false then
       -- attached: a retirement under way, retire()'s to finish. One an older install dispatched (the job armed with

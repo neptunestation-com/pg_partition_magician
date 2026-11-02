@@ -9,12 +9,13 @@
 # acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run against the
 # mutant, in the shape of bench/retain_recall_renamed_detached.sh.
 #
-# FIVE mutations are required to fail against it (bench/mutations/mutate.py):
-#   install_pass_unanchored_by_name   -- the pre-#1429 shape: the pass judges the name alone. Part A.
-#   install_pass_v040_unjudged        -- a mark with no oid is never judged by the name. Part E.
-#   install_pass_namesake_unjudged    -- a mark on the relation under the name, or a namesake, is skipped. Parts B, C.
-#   recall_v040_skipped_silently      -- the pre-#1430 shape: the v0.4.0 mark is skipped, nothing logged. Part D.
-#   recall_v040_job_left_armed        -- the refusal leaves the job armed with the detach. Part D.
+# SIX mutations are required to fail against it (bench/mutations/mutate.py):
+#   install_pass_unanchored_by_name     -- the pre-#1429 shape: the pass judges the name alone. Parts A, C, F.
+#   install_pass_v040_unjudged          -- a mark with no oid is never judged by the name. Part E.
+#   install_pass_mark_on_name_unjudged  -- a mark on the relation under the name is skipped. Part B.
+#   install_pass_relname_agrees         -- agreement read off the marked relation's name, not its oid. Parts C, F.
+#   recall_v040_skipped_silently        -- the pre-#1430 shape: the v0.4.0 mark is skipped, nothing logged. Part D.
+#   recall_v040_job_left_armed          -- the refusal leaves the job armed with the detach. Part D.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree

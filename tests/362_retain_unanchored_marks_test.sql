@@ -17,8 +17,12 @@
 --           releases it by the recorded oid, its remedy naming the renamed table, never the squatter.
 --   PART B  a v0.5.0 row whose mark and name agree (no rename): the install pass disowns it, as before, once,
 --           its remedy naming the partition.
---   PART C  a v0.5.0 row whose mark records a NAMESAKE in another schema (#1365): the name is judged as before, so
---           the detached partition under it is disowned, its remedy naming the partition, never the namesake.
+--   PART C  a v0.5.0 row whose mark records a NAMESAKE in another schema (#1365): the mark is on another relation
+--           than the one under the name, so the install pass leaves it alone too (nothing logged, the mark kept,
+--           neither table touched), and a later tick refuses it as exactly fail_retain_identity.
+--   PART F  a v0.5.0 row whose detached retirement was MOVED to another schema under its own name, a squatter then
+--           created under the name in the old one: catalog-alike to C, and left alone the same way, so the squatter
+--           is never disowned in its place.
 --   PART E  a v0.4.0 row, no oid at all, NOT renamed: the install pass judges it by its name as before and
 --           disowns it, its remedy naming the partition.
 --   PART D  (#1430) a v0.4.0 row, no oid at all, its detached table renamed: the recall logs exactly
@@ -29,12 +33,12 @@
 -- cron.job and cron.alter_job and runs whatever the standing job holds at the top level, as tests/361 does.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2, 3; B 5, 6; C 11, 12, 13,
--- 14; D 21; E 31, 32), the squatter A 98 and the namesake C 77, so a disown or re-attach of the wrong relation, or a lost
+-- 14; D 21; E 31, 32; F 41, 42), the squatters A 98 and F 97 and the namesake C 77, so a disown or re-attach of the wrong relation, or a lost
 -- row, cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(38);
+select plan(45);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -88,15 +92,17 @@ begin
 end;
 $$;
 
--- ========== the three v0.5.0 rows, each detached by its retirement's own dispatched detach ==========
+-- ========== the v0.5.0 and v0.4.0 rows, each detached by its retirement's own dispatched detach ==========
 call pgpm_t362.landed('ua', array[1, 2, 3]);
 call pgpm_t362.landed('ub', array[5, 6]);
 call pgpm_t362.landed('uc', array[11, 12, 13, 14]);
 call pgpm_t362.landed('ue', array[31, 32]);
+call pgpm_t362.landed('uf', array[41, 42]);
 select child_name as a_doomed, child_oid as a_oid from pgpm.part where parent_table = 'pgpm_t362.ua'::regclass and lo = '0' \gset
 select child_name as b_doomed, child_oid as b_oid from pgpm.part where parent_table = 'pgpm_t362.ub'::regclass and lo = '0' \gset
 select child_name as c_doomed, child_oid as c_oid from pgpm.part where parent_table = 'pgpm_t362.uc'::regclass and lo = '0' \gset
 select child_name as e_doomed, child_oid as e_oid from pgpm.part where parent_table = 'pgpm_t362.ue'::regclass and lo = '0' \gset
+select child_name as f_doomed, child_oid as f_oid from pgpm.part where parent_table = 'pgpm_t362.uf'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t362.ua', :'a_doomed'), 'fixture: (A) retire() dispatches the detach');
 select pgpm_t362.armed() \gexec
 update cron.job set command = 'select 1' where jobname = 'pgpm_detach';   -- the job idle again for the next part
@@ -109,13 +115,18 @@ update cron.job set command = 'select 1' where jobname = 'pgpm_detach';   -- the
 select ok(not pgpm.retire('pgpm_t362.ue', :'e_doomed'), 'fixture: (E) retire() dispatches the detach');
 select pgpm_t362.armed() \gexec
 update cron.job set command = 'select 1' where jobname = 'pgpm_detach';   -- the job idle again for the next part
+select ok(not pgpm.retire('pgpm_t362.uf', :'f_doomed'), 'fixture: (F) retire() dispatches the detach');
+select pgpm_t362.armed() \gexec
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';   -- the job idle again for the next part
 select ok(not pgpm_t362.is_partition(:'a_oid'::oid) and not pgpm_t362.is_partition(:'b_oid'::oid)
-          and not pgpm_t362.is_partition(:'c_oid'::oid) and not pgpm_t362.is_partition(:'e_oid'::oid),
-  'LIVENESS: the four detaches landed: each partition is out of its parent');
+          and not pgpm_t362.is_partition(:'c_oid'::oid) and not pgpm_t362.is_partition(:'e_oid'::oid)
+          and not pgpm_t362.is_partition(:'f_oid'::oid),
+  'LIVENESS: the five detaches landed: each partition is out of its parent');
 
 -- the state a v0.5.0 install leaves (it had retiring_oid but neither child_oid nor detach_dispatched_oid)
 update pgpm.part set child_oid = null, detach_dispatched_oid = null
- where parent_table in ('pgpm_t362.ua'::regclass, 'pgpm_t362.ub'::regclass, 'pgpm_t362.uc'::regclass) and lo = '0';
+ where parent_table in ('pgpm_t362.ua'::regclass, 'pgpm_t362.ub'::regclass, 'pgpm_t362.uc'::regclass,
+                        'pgpm_t362.uf'::regclass) and lo = '0';
 -- A: renamed, and a squatter created under the old name
 select format('alter table pgpm_t362.%I rename to ua_kept', :'a_doomed') \gexec
 select format('create table pgpm_t362.%I (id bigint, payload text)', :'a_doomed') \gexec
@@ -126,6 +137,11 @@ select format('create table pgpm_t362_else.%I (id bigint, payload text)', :'c_do
 select format('insert into pgpm_t362_else.%I values (77, ''namesake'')', :'c_doomed') \gexec
 update pgpm.part set retiring_oid = to_regclass(format('pgpm_t362_else.%I', :'c_doomed'))::oid
  where parent_table = 'pgpm_t362.uc'::regclass and lo = '0';
+-- F: moved to another schema under its own name, and a squatter created under the name in the old one
+select format('alter table pgpm_t362.%I set schema pgpm_t362_else', :'f_doomed') \gexec
+select format('create table pgpm_t362.%I (id bigint, payload text)', :'f_doomed') \gexec
+select format('insert into pgpm_t362.%I values (97, ''squat'')', :'f_doomed') \gexec
+select to_regclass(format('pgpm_t362.%I', :'f_doomed'))::oid as f_squat \gset
 -- E: the state a v0.4.0 install leaves, retiring_at alone
 update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t362.ue'::regclass and lo = '0';
@@ -140,12 +156,15 @@ select ok((select child_oid is null and detach_dispatched_oid is null and retiri
   'LIVENESS: (B) the row records the retirement by its mark alone, on the table under its name');
 select isnt((select retiring_oid from pgpm.part where parent_table = 'pgpm_t362.uc'::regclass and lo = '0'), :'c_oid'::oid,
   'LIVENESS: (C) the mark records another relation than the one under the name');
+select ok((select retiring_oid = :'f_oid'::oid from pgpm.part where parent_table = 'pgpm_t362.uf'::regclass and lo = '0')
+          and to_regclass(format('pgpm_t362_else.%I', :'f_doomed'))::oid = :'f_oid'::oid,
+  'LIVENESS: (F) the mark records the moved table, which carries the row''s name in the other schema');
 
 -- ========== the install pass, as an upgrade runs it ==========
 select ok((select retiring_at is not null and retiring_oid is null and child_oid is null from pgpm.part
             where parent_table = 'pgpm_t362.ue'::regclass and lo = '0'),
   'LIVENESS: (E) the mark records no oid');
-select is(pgpm._disown_unvouched_retirements(), 3, 'the install pass disowned exactly three marks (B, C and E, not A)');
+select is(pgpm._disown_unvouched_retirements(), 2, 'the install pass disowned exactly two marks (B and E; not A, C or F)');
 
 -- PART A: left alone
 select is(pgpm_t362.actions('pgpm_t362.ua', '0'), array['retain_detach'],
@@ -164,14 +183,22 @@ select ok(pgpm_t362.disown_method('pgpm_t362.ub') like format('%%attach partitio
 select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t362.ub'::regclass and lo = '0'), null,
   'B: the mark is cleared');
 
--- PART C: the namesake case judged by the name, as before
-select is(pgpm_t362.actions('pgpm_t362.uc', '0'), array['retain_detach', 'retain_disown'],
-  'C: the install pass disowned the row whose mark records a namesake, logged as exactly retain_disown');
-select ok(pgpm_t362.disown_method('pgpm_t362.uc') like format('%%attach partition pgpm_t362.%s for values%%', :'c_doomed'),
-  'C: its remedy ATTACH names the partition under the name');
-select ok(pgpm_t362.disown_method('pgpm_t362.uc') not like '%pgpm_t362_else%',
-  'C: and never the namesake');
+-- PART C: the namesake case, left alone
+select is(pgpm_t362.actions('pgpm_t362.uc', '0'), array['retain_detach'],
+  'C: the install pass logged nothing for the row whose mark records a namesake');
+select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t362.uc'::regclass and lo = '0'), null,
+  'C: the mark is kept');
 select is(pgpm_t362.ids(format('pgpm_t362_else.%I', :'c_doomed')), array[77]::bigint[], 'C: the namesake is untouched');
+select is(pgpm_t362.ids(format('pgpm_t362.%I', :'c_doomed')), array[11, 12, 13, 14]::bigint[],
+  'C: the partition under the name keeps its rows');
+
+-- PART F: the moved retirement, left alone; the squatter never disowned in its place
+select is(pgpm_t362.actions('pgpm_t362.uf', '0'), array['retain_detach'],
+  'F: the install pass logged nothing for the row (no retain_disown naming the squatter)');
+select is((select retiring_oid from pgpm.part where parent_table = 'pgpm_t362.uf'::regclass and lo = '0'), :'f_oid'::oid,
+  'F: the mark is kept, on the moved table');
+select is(pgpm_t362.ids(format('pgpm_t362.%I', :'f_doomed')), array[97]::bigint[], 'F: the squatter is untouched');
+select is(pgpm_t362.ids(format('pgpm_t362_else.%I', :'f_doomed')), array[41, 42]::bigint[], 'F: the moved table keeps its rows');
 
 -- PART E: judged by its name, as before
 select is(pgpm_t362.actions('pgpm_t362.ue', '0'), array['retain_detach', 'retain_disown'],
@@ -222,5 +249,11 @@ call pgpm.maintain('pgpm_t362.ud');
 select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t362.ud'::regclass and lo = '0'), null,
   'D: once repaired, the next tick clears the mark');
 select is(pgpm_t362.ids('pgpm_t362.ud', 100), array[21]::bigint[], 'D: and the row is served through the parent again');
+
+-- PART C, continued, last (its tick retires the next partition, and one detach is in flight at a time): retention
+-- still reaches it, and retire() judges the mark by its oid
+call pgpm.maintain('pgpm_t362.uc');
+select is(pgpm_t362.actions('pgpm_t362.uc', '0'), array['retain_detach', 'fail_retain_identity'],
+  'C: a later tick refuses it as exactly fail_retain_identity, counted, never a disown of either table');
 
 select * from finish();
