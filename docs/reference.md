@@ -1757,8 +1757,8 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   renamed while still attached, or a recorded relation that is gone, is not released: both are still
   refused as `fail_retain_identity`. While retention still reaches its range, `retire` releases the renamed
   table the same way, by the same test, and never drops it: one `retain_disown` row whose `method` spells the
-  remedy for a range retention reaches (attach it back and rename it back, so retention retires it; or drop it
-  and delete its `pgpm.part` row). On that call and every later one `retire` then refuses the row as a table
+  remedy for a range retention reaches (attach it back and rename it back, so retention retires it; or, since it
+  is detached, drop it and delete its `pgpm.part` row). On that call and every later one `retire` then refuses the row as a table
   detached by hand, `fail_retain_drop`, with a `method` naming where the table is now. Like any table detached
   by hand it counts in `status().retain_drop_failures` and takes a `retain_batch` slot on every tick until you
   run one of the two remedies. A partition you detached and renamed yourself, with no retirement under way, is
