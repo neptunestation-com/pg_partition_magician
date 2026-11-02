@@ -16917,6 +16917,85 @@ MUTATIONS["upgrade_create_body_column_no_backfill"] = (
       "  obtain_note      text,\n", 1)],
 )
 
+# Issue #1424: a detached retirement the operator renamed is released (retain_disown), never re-attached and never
+# refused as an identity failure on every tick. bench/retain_recall_renamed_detached.sh runs tests/361 against the
+# mutant; one mutation for the release and one per clause of its condition.
+RECALL_RELEASE_COND = (
+    "      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
+    "         and v_rec is distinct from v_now::oid\n"
+    "         and exists (select 1 from pg_class c where c.oid = v_rec)\n"
+    "         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name\n"
+    "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n"
+)
+MUTATIONS["recall_rename_not_released"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the pre-fix shape: _retain_recall never releases a detached retirement the operator renamed, so "
+    "the name it resolves denotes nothing and it logs fail_retain_identity on every tick with the mark kept, counted "
+    "in status().retain_drop_failures for good. One site, the release's condition. tests/361 parts A and B catch it.",
+    [(RECALL_RELEASE_COND, "      if false then\n", 1)],
+)
+MUTATIONS["recall_release_attached"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the release without its partition check: a partition renamed while still attached is released "
+    "as if the operator had taken a detached table, its mark cleared while it stays in the parent. One clause. "
+    "tests/361 part D catches it.",
+    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n",
+      "         then\n", 1)],
+)
+MUTATIONS["recall_release_gone"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the release without its existence check: a recorded relation dropped after its detach is "
+    "\"released\" to an operator who has nothing, the identity failure that says so lost. One clause. tests/361 part C "
+    "catches it.",
+    [("         and exists (select 1 from pg_class c where c.oid = v_rec)\n", "", 1)],
+)
+MUTATIONS["recall_release_unqualified"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification P1-02, the release's method naming the new name as a regclass: rendered against the "
+    "caller's search_path, a table whose schema is on it (public, pg_cron's path) is logged bare. tests/361 part A "
+    "runs its recall with the schema on the path and catches it.",
+    [("                 (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),\n",
+      "                 v_rec::regclass,\n", 1)],
+)
+MUTATIONS["recall_release_remedy_by_name"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification V-03, the release not passing the oid it vouched for: on a row an older install left "
+    "without child_oid, _disown_retirement names the relation by the row's old name, so a squatter on it is the "
+    "table the remedy ATTACH tells the operator to put in the parent. tests/361 part F catches it.",
+    [("                 v_rec),\n          v_rec);\n", "                 v_rec));\n", 1)],
+)
+MUTATIONS["recall_release_any_parent"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification V-01, the release refusing a table that is a partition of anything rather than of this "
+    "parent: one the operator renamed and attached to a partitioned table of their own is refused as "
+    "fail_retain_identity on every tick, the mark kept for good. tests/361 part G catches it.",
+    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n",
+      "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n", 1)],
+)
+MUTATIONS["recall_release_name_unchanged"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification round 2 P1-02, the release without its name-changed clause (the formal model's G1424 "
+    "has it): on a row with no child_oid, a detached retirement only moved to another schema under its own name "
+    "fails the name lookup and is released, mark cleared, with a remedy naming the schema it left. One clause. "
+    "tests/361 part H catches it.",
+    [("         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name\n", "", 1)],
+)
+MUTATIONS["recall_release_remedy_no_rename"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "PR #1426 verification round 2 V-06, the release's remedy without its rename back: the ATTACH alone leaves "
+    "the pgpm.part row naming a relation that is not there, which retire() refuses as fail_retain_identity on every "
+    "call once retention reaches the range. tests/361 part A runs the whole remedy and catches it.",
+    [("  if v_cur is distinct from p_child and v_cur is not null then\n", "  if false then\n", 1)],
+)
+MUTATIONS["recall_release_anchors_disagree"] = (
+    "bench/retain_recall_renamed_detached.sh",
+    "Issue #1424, the release without its anchor agreement: a mark recorded on another relation than the row's "
+    "anchor hands that relation over on the mark's say alone. One clause. tests/361 part E catches it.",
+    [("      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
+      "         and v_rec is distinct from v_now::oid\n",
+      "      if v_rec is distinct from v_now::oid\n", 1)],
+)
+
 # The schema-swap class as one lever (the pass-13 record): the statements the per-family fixes (#1399, #1400, #1402)
 # did not own, each locked by oid first or checked by its effect after. bench/schema_swap_leftovers.sh runs tests/359
 # and tests/360 against the mutant; one mutation per clause.

@@ -962,6 +962,11 @@ substituted name is refused on every retirement path. If you genuinely need to r
 `pgpm.part.child_name` in the same transaction: a rename does not change an oid, so the recorded identity
 stays right, which is exactly what `regrain`'s own transitional rename does.
 
+One rename is read as a decision rather than a mistake: renaming a partition **after** pgpm's detach has
+taken it out of the parent, without updating `pgpm.part`, makes the table yours. If retention then stops
+reaching its range, pgpm does not attach it back; it releases the retirement, logged `retain_disown` with
+the `ATTACH` that would put it back, and leaves the table and its rows where you put them.
+
 ## Secondary indexes
 
 `transmute` copies the old table's non-unique secondary indexes onto the parent as partitioned indexes

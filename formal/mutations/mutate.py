@@ -85,6 +85,7 @@ G = {
     'G502': 'Key(lo) == lo  \\* @guard G502',
     'G727': 'OwnNsp(s) == IF part[s].oid # 0 /\\ rel[part[s].oid].ex THEN rel[part[s].oid].nsp ELSE parentNsp  \\* @guard G727',
     'G778': 'RecallNsp(s) == IF part[s].oid # 0 /\\ rel[part[s].oid].ex THEN rel[part[s].oid].nsp ELSE parentNsp  \\* @guard G778',
+    'G1424': 'RecallRelease(s, o) == (part[s].rOid = 0 \\/ part[s].oid = 0 \\/ part[s].rOid = part[s].oid) /\\ RecOid(s) # 0 /\\ RecOid(s) # o /\\ rel[RecOid(s)].ex /\\ rel[RecOid(s)].par = 0 /\\ rel[RecOid(s)].name # part[s].name  \\* @guard G1424',
     'G1259': 'PgpmHolds(s, o) == part[s].ret /\\ part[s].disp = o /\\ o # 0  \\* @guard G1259',
     'G651': 'IsBlocked(o) == rel[o].trig = "always"  \\* @guard G651',
     'G500': 'PartHi(s, z) == ParseIn(part[s].hiB, 0)  \\* @guard G500',
@@ -158,6 +159,7 @@ M = {
     'G724': e('G724', '          /\\ IF TRUE'),
     'G727': e('G727', 'OwnNsp(s) == parentNsp'),
     'G778': e('G778', 'RecallNsp(s) == parentNsp'),
+    'G1424': e('G1424', 'RecallRelease(s, o) == FALSE'),
     'G788': e('G788', 'ChunkStop(lo, z) == IF z # 0 THEN lo ELSE lo + 1'),
     'G822': e('G822', '    /\\ IF FALSE'),
     'G1260': e('G1260', 'ClaimHeld(k, sp) == k \\in claimed /\\ sp = "plain"'),
@@ -249,8 +251,12 @@ MUTATIONS = {
     'M778': dict(rcs=['#778'], inv='NoLostRowLive', live=True, guards=['G778'],
                  cfg=dict(groups=['OD', 'T'], shapes=FRESH, fk=True, budget=2),
                  note='the recall resolves in the parent\'s schema: a moved parent\'s retirement is never taken back. '
-                      'No RN: a hand rename of a detached retired table also leaves it un-recalled for ever, '
-                      'until #1424 releases it by oid (Q1 in docs/formal/record.md)'),
+                      'No RN: with renames the clean run is 388k states and passes CI\'s 30-minute bound only on '
+                      'a fast runner, and none is needed, since without G1424\'s name clause M778 is missed here too'),
+    'M1424': dict(rcs=['Q1-1424'], inv='NoLostRowLive', live=True, guards=['G1424'], extra=True,
+                  cfg=dict(groups=['RN', 'T'], shapes=FRESH, fk=True, budget=2),
+                  note='the recall never releases a detached retirement the operator renamed: resolved by name, it '
+                       'finds nothing, and the rows stay out of the parent for ever (Q1 in docs/formal/record.md)'),
     'M788': dict(rcs=['#788'], inv='NoWedge', guards=['G788'],
                  cfg=dict(groups=['SG', 'T'], shapes=FRESH, budget=0),
                  note='the chunk stop round-trips through session text: no chunk, nothing logged'),
@@ -418,14 +424,15 @@ WITNESSES = [('WitTwoChunks', 'Custody.cfg', PGPM_ONLY), ('WitArchivedDrop', 'Cu
 
 # What each must-be-clean config checks, and a floor under how much of the world it explores. A clean result is
 # evidence only about what was checked: a config cut to TypeOK, or to EnvBudget 0, still says "No error has been
-# found". The floors sit about 5% under the 2026-10-29 counts (5,250,812 / 12,202,405 / 3,913,646 distinct states)
-# so a change to the model that shrinks the explored world has to lower them in the same commit, on purpose.
+# found". The floors sit about 5% under the counts (5,250,812 / 12,204,879 / 5,064,825 distinct states; the last two
+# grew with #1424's release, which also put renames back into CustodyLive.cfg) so a change to the model that shrinks
+# the explored world has to lower them in the same commit, on purpose.
 SCOPE = {
     'Custody.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
                     5_000_000),
     'CustodyFK.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
                       11_600_000),
-    'CustodyLive.cfg': ((), ('NoLostRowLive',), 3_700_000),
+    'CustodyLive.cfg': ((), ('NoLostRowLive',), 4_800_000),
 }
 
 

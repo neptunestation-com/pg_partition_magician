@@ -78,7 +78,7 @@ VARIABLES
     parentNsp,  \* the managed parent's schema (ALTER TABLE ... SET SCHEMA moves it)
     parentEx,   \* the managed parent (epoch 1) exists
     epoch2,     \* a namesake parent (epoch 2) has been created
-    opOwned,    \* relations an operator detached by hand: their rows are the operator's
+    opOwned,    \* relations an operator detached by hand, or a retirement released to them (#1424): their rows are the operator's
     liveDet,    \* relations a live session is concurrently detaching (pending, session alive)
     envLeft     \* environment steps left
 

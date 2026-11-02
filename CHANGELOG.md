@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **A detached retirement the operator renamed is released, not refused on every tick** (#1424, from the formal
+  model's question Q1). Once pgpm's detach had taken a partition out of the parent and the operator renamed the
+  table, `_retain_recall` resolved the name, found nothing, and logged `fail_retain_identity` on every tick with
+  the mark kept, counted in `status().retain_drop_failures` for good. It now finds the relation by the oid both
+  anchors record and, when it stands under another name and is no partition of this parent, releases it: the job
+  idle, the mark cleared, one `retain_disown` row naming the new name, schema-qualified, and the `ATTACH` that
+  would put it back, then the rename back that makes the row name it again, which names the table by that oid even on a row an older install left without `child_oid`
+  (`_disown_retirement` takes the oid its caller vouched for). A table only moved to another schema, under its
+  own name, is still followed by oid and re-attached (or, on a row without `child_oid`, refused as before).
+  It never re-attaches it, since a table back in the parent is retention's again. A partition renamed while
+  still attached, a recorded relation that is gone, and a mark whose anchors disagree are refused as before.
+  `bench/retain_recall_renamed_detached.sh` runs `tests/361` (mutations `recall_rename_not_released`,
+  `recall_release_attached`, `recall_release_gone`, `recall_release_anchors_disagree`,
+  `recall_release_unqualified`, `recall_release_remedy_by_name`, `recall_release_any_parent`,
+  `recall_release_name_unchanged`, `recall_release_remedy_no_rename`).
+
 - **Tests no longer depend on the month they run in** (#1425). transmute's first partition runs to the month after
   now(), and tests/317 and tests/334 spelled out the partition names and grid an October 2026 run makes, so on 1
   November both failed on main with nothing changed. Each now pins now() for its transmute calls with a
