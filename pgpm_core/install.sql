@@ -3974,6 +3974,24 @@ begin
 end;
 $$;
 
+-- _renamed_retirement: the oid of the relation a pgpm.part row's anchors record, when it stands under another name
+-- than the row's and is no partition of the parent, or null. The anchors have to agree (either alone, or both the
+-- same oid), and p_now (the relation under the row's name, if any) must be another one. That is a partition pgpm's
+-- retirement detached, or the operator did, and renamed by hand since: the operator's table (#1424). One test for
+-- both callers, so they cannot drift: _retain_recall releases such a retirement once retention no longer reaches it,
+-- retire() while retention still does (#1427), and retire() then refuses the row as one detached by hand. A move
+-- to another schema under its own name is no rename: _child_nsp follows the oid there, so the name resolves to it.
+create or replace function pgpm._renamed_retirement(p_parent regclass, p_child name, p_retiring_oid oid,
+                                                    p_child_oid oid, p_now regclass)
+returns oid language sql stable as $$
+  select v.rec from (select coalesce(p_retiring_oid, p_child_oid) as rec) v
+   where (p_retiring_oid is null or p_child_oid is null or p_retiring_oid = p_child_oid)
+     and v.rec is distinct from p_now::oid
+     and exists (select 1 from pg_class c where c.oid = v.rec)
+     and (select c.relname from pg_class c where c.oid = v.rec) is distinct from p_child
+     and not exists (select 1 from pg_inherits i where i.inhrelid = v.rec and i.inhparent = p_parent);
+$$;
+
 -- _detach_job_holds: whether the standing pgpm_detach job of this database is armed with this partition's detach
 -- (_detach_cmd). False without pg_cron, the job, or the privilege to read cron.job. Read only for a partition still
 -- attached (see _disown_unvouched_retirements), never to vouch for a mark on a pending or detached one.
@@ -4363,7 +4381,7 @@ declare
   cfg pgpm.config; v_nsp name; v_boundary text; r record;
   v_referenced boolean; v_child regclass; v_now regclass; v_why text;
   v_cross text[]; v_coltype text; v_lo_lit text; v_hi_lit text; v_deleted int; v_reason text;
-  v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean;
+  v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean; v_rec oid;
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('retire', json_build_object('p_parent', p_parent, 'p_child', p_child));
@@ -4445,6 +4463,28 @@ begin
     if v_why <> '' then
       if r.retiring_oid is not null then
         perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));
+      end if;
+      -- #1427: the relation the anchors record stands under another name, out of the parent (_renamed_retirement,
+      -- the recall's own test). Detached and renamed, by pgpm's retirement or by the operator, it is the operator's
+      -- table: a mark on it is released (_disown_retirement, logged retain_disown once, with the remedy), and on this
+      -- call and every later one it is refused as a table detached by hand (fail_retain_drop, #652), which it is,
+      -- rather than as a name gone wrong. Never dropped: it is out of the parent under the operator's name.
+      v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);
+      if v_rec is not null then
+        if r.retiring_at is not null then
+          perform pgpm._disown_retirement(p_parent, p_child,
+            format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
+                   v_nsp, p_child,
+                   (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
+                   v_rec),
+            v_rec);
+        end if;
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+                  format('detached from the parent by something other than retirement, and renamed to %s (oid %s); not dropping it',
+                         (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
+                         v_rec));
+        return false;
       end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_retain_identity', r.lo, r.hi,
@@ -4870,12 +4910,8 @@ begin
       -- (_disown_retirement: the mark cleared, retain_disown logged with the ATTACH that would put it back),
       -- never re-attached under the operator's name, where a later tightening could retire rows renamed to be
       -- kept. A name taken by a squatter while the partition stays attached is still refused below (#778 part C).
-      v_rec := coalesce(r.retiring_oid, r.child_oid);
-      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)
-         and v_rec is distinct from v_now::oid
-         and exists (select 1 from pg_class c where c.oid = v_rec)
-         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name
-         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then
+      v_rec := pgpm._renamed_retirement(p_parent, r.child_name, r.retiring_oid, r.child_oid, v_now);
+      if v_rec is not null then
         perform pgpm._disown_retirement(p_parent, r.child_name,
           format('retention no longer reaches %I.%I, which its retirement''s detach took out of the parent and which has since been renamed to %s (oid %s): a hand rename of a detached retirement makes it the operator''s table, so it is released rather than re-attached',
                  v_nsp, r.child_name,

@@ -58,6 +58,28 @@ RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not
       if r.retiring_oid is not null then
         perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));
       end if;
+      -- #1427: the relation the anchors record stands under another name, out of the parent (_renamed_retirement,
+      -- the recall's own test). Detached and renamed, by pgpm's retirement or by the operator, it is the operator's
+      -- table: a mark on it is released (_disown_retirement, logged retain_disown once, with the remedy), and on this
+      -- call and every later one it is refused as a table detached by hand (fail_retain_drop, #652), which it is,
+      -- rather than as a name gone wrong. Never dropped: it is out of the parent under the operator's name.
+      v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);
+      if v_rec is not null then
+        if r.retiring_at is not null then
+          perform pgpm._disown_retirement(p_parent, p_child,
+            format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
+                   v_nsp, p_child,
+                   (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
+                   v_rec),
+            v_rec);
+        end if;
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+                  format('detached from the parent by something other than retirement, and renamed to %s (oid %s); not dropping it',
+                         (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
+                         v_rec));
+        return false;
+      end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_retain_identity', r.lo, r.hi,
                 format('%I.%I is oid %s now, %s; refusing to detach or drop it',
@@ -16921,11 +16943,8 @@ MUTATIONS["upgrade_create_body_column_no_backfill"] = (
 # refused as an identity failure on every tick. bench/retain_recall_renamed_detached.sh runs tests/361 against the
 # mutant; one mutation for the release and one per clause of its condition.
 RECALL_RELEASE_COND = (
-    "      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
-    "         and v_rec is distinct from v_now::oid\n"
-    "         and exists (select 1 from pg_class c where c.oid = v_rec)\n"
-    "         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name\n"
-    "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n"
+    "      v_rec := pgpm._renamed_retirement(p_parent, r.child_name, r.retiring_oid, r.child_oid, v_now);\n"
+    "      if v_rec is not null then\n"
 )
 MUTATIONS["recall_rename_not_released"] = (
     "bench/retain_recall_renamed_detached.sh",
@@ -16939,23 +16958,24 @@ MUTATIONS["recall_release_attached"] = (
     "Issue #1424, the release without its partition check: a partition renamed while still attached is released "
     "as if the operator had taken a detached table, its mark cleared while it stays in the parent. One clause. "
     "tests/361 part D catches it.",
-    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n",
-      "         then\n", 1)],
+    [("\n     and not exists (select 1 from pg_inherits i where i.inhrelid = v.rec and i.inhparent = p_parent);\n",
+      ";\n", 1)],
 )
 MUTATIONS["recall_release_gone"] = (
     "bench/retain_recall_renamed_detached.sh",
     "Issue #1424, the release without its existence check: a recorded relation dropped after its detach is "
     "\"released\" to an operator who has nothing, the identity failure that says so lost. One clause. tests/361 part C "
     "catches it.",
-    [("         and exists (select 1 from pg_class c where c.oid = v_rec)\n", "", 1)],
+    [("     and exists (select 1 from pg_class c where c.oid = v.rec)\n", "", 1)],
 )
 MUTATIONS["recall_release_unqualified"] = (
     "bench/retain_recall_renamed_detached.sh",
     "PR #1426 verification P1-02, the release's method naming the new name as a regclass: rendered against the "
     "caller's search_path, a table whose schema is on it (public, pg_cron's path) is logged bare. tests/361 part A "
     "runs its recall with the schema on the path and catches it.",
-    [("                 (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),\n",
-      "                 v_rec::regclass,\n", 1)],
+    [("                 v_nsp, r.child_name,\n"
+      "                 (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),\n",
+      "                 v_nsp, r.child_name,\n                 v_rec::regclass,\n", 1)],
 )
 MUTATIONS["recall_release_remedy_by_name"] = (
     "bench/retain_recall_renamed_detached.sh",
@@ -16969,8 +16989,8 @@ MUTATIONS["recall_release_any_parent"] = (
     "PR #1426 verification V-01, the release refusing a table that is a partition of anything rather than of this "
     "parent: one the operator renamed and attached to a partitioned table of their own is refused as "
     "fail_retain_identity on every tick, the mark kept for good. tests/361 part G catches it.",
-    [("         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec and i.inhparent = p_parent) then\n",
-      "         and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n", 1)],
+    [("     and not exists (select 1 from pg_inherits i where i.inhrelid = v.rec and i.inhparent = p_parent);\n",
+      "     and not exists (select 1 from pg_inherits i where i.inhrelid = v.rec);\n", 1)],
 )
 MUTATIONS["recall_release_name_unchanged"] = (
     "bench/retain_recall_renamed_detached.sh",
@@ -16978,7 +16998,7 @@ MUTATIONS["recall_release_name_unchanged"] = (
     "has it): on a row with no child_oid, a detached retirement only moved to another schema under its own name "
     "fails the name lookup and is released, mark cleared, with a remedy naming the schema it left. One clause. "
     "tests/361 part H catches it.",
-    [("         and (select c.relname from pg_class c where c.oid = v_rec) is distinct from r.child_name\n", "", 1)],
+    [("     and (select c.relname from pg_class c where c.oid = v.rec) is distinct from p_child\n", "", 1)],
 )
 MUTATIONS["recall_release_remedy_no_rename"] = (
     "bench/retain_recall_renamed_detached.sh",
@@ -16991,9 +17011,50 @@ MUTATIONS["recall_release_anchors_disagree"] = (
     "bench/retain_recall_renamed_detached.sh",
     "Issue #1424, the release without its anchor agreement: a mark recorded on another relation than the row's "
     "anchor hands that relation over on the mark's say alone. One clause. tests/361 part E catches it.",
-    [("      if (r.retiring_oid is null or r.child_oid is null or r.retiring_oid = r.child_oid)\n"
-      "         and v_rec is distinct from v_now::oid\n",
-      "      if v_rec is distinct from v_now::oid\n", 1)],
+    [("   where (p_retiring_oid is null or p_child_oid is null or p_retiring_oid = p_child_oid)\n"
+      "     and v.rec is distinct from p_now::oid\n",
+      "   where v.rec is distinct from p_now::oid\n", 1)],
+)
+
+# Issue #1427: retire() meets a detached retirement the operator renamed while retention still reaches it. It
+# releases the mark once (retain_disown, through the recall's own test, _renamed_retirement) and refuses the row as
+# one detached by hand (fail_retain_drop) on that call and every later one, never as an identity failure.
+# bench/retire_renamed_detached.sh runs tests/363 against the mutant. The test's own clauses live in the shared
+# helper, whose mutations above (recall_release_*) tests/361 already catches.
+RETIRE_RELEASE_COND = (
+    "      v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);\n"
+    "      if v_rec is not null then\n"
+)
+MUTATIONS["retire_rename_not_released"] = (
+    "bench/retire_renamed_detached.sh",
+    "Issue #1427, the pre-fix shape: retire() resolves a detached retirement the operator renamed by the row's name, "
+    "finds nothing, and refuses it as fail_retain_identity on every call with the mark kept. One site, the "
+    "release's condition. tests/363 parts A, B, D and E catch it.",
+    [(RETIRE_RELEASE_COND, "      if false then\n", 1)],
+)
+MUTATIONS["retire_release_keeps_mark"] = (
+    "bench/retire_renamed_detached.sh",
+    "Issue #1427, the refusal without the release: the row is refused as detached by hand, but the mark stays on a "
+    "table the operator took, no retain_disown is logged and no remedy spelled. One site. tests/363 parts A, B and "
+    "E catch it.",
+    [("        if r.retiring_at is not null then\n          perform pgpm._disown_retirement(p_parent, p_child,\n"
+      "            format('retire() found %I.%I, which retention reaches,",
+      "        if false then\n          perform pgpm._disown_retirement(p_parent, p_child,\n"
+      "            format('retire() found %I.%I, which retention reaches,", 1)],
+)
+MUTATIONS["retire_release_remedy_by_name"] = (
+    "bench/retire_renamed_detached.sh",
+    "Issue #1427, the release not passing the oid it vouched for: on a row an older install left without child_oid, "
+    "_disown_retirement names the relation by the row's old name, so the remedy ATTACH names the squatter that "
+    "holds it now. One site. tests/363 part E catches it.",
+    [("                   v_rec),\n            v_rec);\n", "                   v_rec));\n", 1)],
+)
+MUTATIONS["retire_release_marked_only"] = (
+    "bench/retire_renamed_detached.sh",
+    "Issue #1427, the maintainer's decision undone: only the call that releases a mark refuses the row as detached "
+    "by hand, and every later call, like a row the operator detached by hand with no mark, is an identity failure "
+    "again, on every tick. One site. tests/363 parts A and D catch it.",
+    [(RETIRE_RELEASE_COND, RETIRE_RELEASE_COND.replace("if v_rec is not null then", "if v_rec is not null and r.retiring_at is not null then"), 1)],
 )
 
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the

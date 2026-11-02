@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`retire` releases a detached retirement the operator renamed, and refuses it as detached by hand** (#1427).
+  While retention still reached the range, `retire` met such a table, resolved the row's name, found nothing,
+  and logged `fail_retain_identity` on every call with the mark kept, saying "oid nothing" about a table that
+  stood whole under its new name. It now asks the recall's own question (`_renamed_retirement`, one function for
+  both, so the two paths cannot drift): when the relation the anchors record stands under another name and is no
+  partition of the parent, a mark on it is released once (`retain_disown`, with the remedy for a range
+  retention reaches), and on that call and every later one the row is refused as a table detached by hand,
+  `fail_retain_drop`, naming where the table is now. It is never dropped. A partition detached and renamed by
+  hand with no mark is refused the same way. The refusal still counts in `status().retain_drop_failures` and
+  takes a `retain_batch` slot every tick until the operator runs the remedy, as for any table detached by hand.
+  `bench/retire_renamed_detached.sh` runs `tests/363` (mutations `retire_rename_not_released`,
+  `retire_release_keeps_mark`, `retire_release_remedy_by_name`, `retire_release_marked_only`); the formal model's
+  `RetireBegin` releases the same way (guard `G1427`, mutation `M1427`, caught by `NoWedge`).
+
 - **An older install's unanchored retirement mark is judged by what it marks, and never skipped silently**
   (#1429, #1430). The pass every `install.sql` run makes found a v0.5.0 row's relation by its name, so when the
   operator had renamed (or moved to another schema) the detached retirement and a table had since taken the old

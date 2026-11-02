@@ -1755,9 +1755,14 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   back). Its `pgpm.part` row stays, recording the old name: after the `ATTACH`, rename the table back too,
   as the remedy spells, or delete the row if you keep the table apart. A partition
   renamed while still attached, or a recorded relation that is gone, is not released: both are still
-  refused as `fail_retain_identity`. So is the renamed table itself while retention still reaches its
-  range: `retire` neither drops it nor releases it, and the identity failure stays until you rename it back
-  or retention stops reaching it.
+  refused as `fail_retain_identity`. While retention still reaches its range, `retire` releases the renamed
+  table the same way, by the same test, and never drops it: one `retain_disown` row whose `method` spells the
+  remedy for a range retention reaches (attach it back and rename it back, so retention retires it; or drop it
+  and delete its `pgpm.part` row). On that call and every later one `retire` then refuses the row as a table
+  detached by hand, `fail_retain_drop`, with a `method` naming where the table is now. Like any table detached
+  by hand it counts in `status().retain_drop_failures` and takes a `retain_batch` slot on every tick until you
+  run one of the two remedies. A partition you detached and renamed yourself, with no retirement under way, is
+  refused the same way, with no mark to release.
   The pass every `install.sql` run makes leaves such a retirement alone even when another table has since
   taken the old name: on a row with no `child_oid` it judges the name only when the mark records the relation
   under it, so a renamed, moved or dropped retirement drops out of the pass, the squatter is not disowned in
@@ -1780,6 +1785,11 @@ detach lands on it. pgpm cannot prevent that. What it does instead is record the
 side effect: the name must still resolve, and resolve to that OID. When it does not, `retire` logs
 `fail_retain_identity`, returns the standing job to idle, and does nothing else -- no re-dispatch, and in
 particular no `DROP`. The detach can still land on a substitute; the destructive half cannot.
+
+One mismatch is no substitution. When the relation the anchors record still stands under another name and is
+no partition of the parent, it was detached (by pgpm's retirement or by hand) and renamed since, which makes it
+the operator's table: `retire` releases a retirement mark on it, logged `retain_disown` once, and refuses the
+row as a table detached by hand, `fail_retain_drop`, on every call, as the recall's bullet above describes.
 
 `retiring_oid` is set only for a partition being retired through a detach. The ordinary one-step path,
 whose bare `DROP TABLE schema.child` has nothing else between it and the write block, is covered by
