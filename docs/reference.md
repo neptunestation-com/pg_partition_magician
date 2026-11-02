@@ -1766,10 +1766,11 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   that is no partition of anything. One you have attached to a partitioned table of your own is still refused as
   `fail_retain_identity` while retention reaches its range, the mark kept, because the remedy for a reached range
   offers a `DROP`, and that table is a live partition now.
-  A release, by either path, records the released table as the row's `child_oid` when an older install left the
+  Clearing a mark, by a release or by any other path (the pass every `install.sql` run makes, or a mark with no
+  record of pgpm's dispatch), records the marked table as the row's `child_oid` when an older install left the
   row without one (v0.5.0 recorded the mark's oid only). Without it the row would have no anchor left once the
   mark is cleared, and a table attached under the old name over the row's range would be taken for the partition
-  and retired. With it every later call compares the name against the released table, so such a table is left
+  and retired. With it every later call compares the name against the marked table, so such a table is left
   alone.
   The pass every `install.sql` run makes leaves such a retirement alone even when another table has since
   taken the old name: on a row with no `child_oid` it judges the name only when the mark records the relation

@@ -72,10 +72,8 @@ RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not
             format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
                    v_nsp, p_child,
                    (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
-                   v_rec),
-            v_rec);
+                   v_rec));
         end if;
-        perform pgpm._anchor_released(p_parent, p_child, v_rec);
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'fail_retain_drop', r.lo, r.hi,
                   format('detached from the parent by something other than retirement, and renamed to %s (oid %s); not dropping it',
@@ -16980,13 +16978,6 @@ MUTATIONS["recall_release_unqualified"] = (
       "                 (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),\n",
       "                 v_nsp, r.child_name,\n                 v_rec::regclass,\n", 1)],
 )
-MUTATIONS["recall_release_remedy_by_name"] = (
-    "bench/retain_recall_renamed_detached.sh",
-    "PR #1426 verification V-03, the release not passing the oid it vouched for: on a row an older install left "
-    "without child_oid, _disown_retirement names the relation by the row's old name, so a squatter on it is the "
-    "table the remedy ATTACH tells the operator to put in the parent. tests/361 part F catches it.",
-    [("                 v_rec),\n          v_rec);\n", "                 v_rec));\n", 1)],
-)
 MUTATIONS["recall_release_any_parent"] = (
     "bench/retain_recall_renamed_detached.sh",
     "PR #1426 verification V-01, the release refusing a table that is a partition of anything rather than of this "
@@ -17045,13 +17036,6 @@ MUTATIONS["retire_release_keeps_mark"] = (
       "        if false then\n          perform pgpm._disown_retirement(p_parent, p_child,\n"
       "            format('retire() found %I.%I, which retention reaches,", 1)],
 )
-MUTATIONS["retire_release_remedy_by_name"] = (
-    "bench/retire_renamed_detached.sh",
-    "Issue #1427, the release not passing the oid it vouched for: on a row an older install left without child_oid, "
-    "_disown_retirement names the relation by the row's old name, so the remedy ATTACH names the squatter that "
-    "holds it now. One site. tests/363 part E catches it.",
-    [("                   v_rec),\n            v_rec);\n", "                   v_rec));\n", 1)],
-)
 MUTATIONS["retire_release_marked_only"] = (
     "bench/retire_renamed_detached.sh",
     "Issue #1427, the maintainer's decision undone: only the call that releases a mark refuses the row as detached "
@@ -17060,20 +17044,16 @@ MUTATIONS["retire_release_marked_only"] = (
     [(RETIRE_RELEASE_COND, RETIRE_RELEASE_COND.replace("if v_rec is not null and", "if v_rec is not null and r.retiring_at is not null and"), 1)],
 )
 
-MUTATIONS["retire_release_unanchored"] = (
+MUTATIONS["disown_unanchored"] = (
     "bench/retire_renamed_detached.sh",
-    "PR #1433 verification V-01, the release leaving an older install's row with no anchor: on a row with no "
+    "PR #1433 verification V-01, a cleared mark leaving an older install's row with no anchor: on a row with no "
     "child_oid the mark was the only one, so the next calls resolve the name with nothing to compare it against "
-    "and retire an impostor attached under it, detached and dropped with its rows (#407's substitution). One site. "
-    "tests/363 part G catches it.",
-    [("        perform pgpm._anchor_released(p_parent, p_child, v_rec);\n", "", 1)],
-)
-MUTATIONS["recall_release_unanchored"] = (
-    "bench/retire_renamed_detached.sh",
-    "PR #1433 verification V-01 by the recall's road: _retain_recall releases an older install's row and leaves it "
-    "with no anchor, so once retention reaches the range again retire() takes an impostor attached under the name "
-    "for the partition. One site. tests/363 part I catches it.",
-    [("        perform pgpm._anchor_released(p_parent, r.child_name, v_rec);\n", "", 1)],
+    "and retire an impostor attached under it, detached and dropped with its rows (#407's substitution). One site, "
+    "_disown_retirement, which every path that clears such a mark goes through. tests/363 parts G (retire()'s "
+    "release), I (the recall's), J (the install pass) and K (retire()'s no-dispatch-record branch) catch it.",
+    [("  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null,\n"
+      "                       child_oid = coalesce(child_oid, retiring_oid)\n",
+      "  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null\n", 1)],
 )
 MUTATIONS["retire_release_attached_elsewhere"] = (
     "bench/retire_renamed_detached.sh",

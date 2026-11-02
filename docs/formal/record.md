@@ -177,10 +177,10 @@ detached by hand, which changes no state. `NoWedge`'s `falseRef` ghost now also 
 so mutation `M1427` (`RetireRelease` never true) is caught by `NoWedge` under `RN`, `T` and the FK path.
 The model's `par = 0` is "no partition of anything" here too, which is what `retire` requires. One thing the
 model cannot check: every row it starts from has a `child_oid` (`FreshPart`, and the upgrade adopts one), so a
-v0.5.0 row recording the mark's oid alone is outside it. That shape is where the release cleared the row's only
-anchor and a table attached under the old name was then retired (this PR's per-PR verification, V-01); the fix
-records the released table as `child_oid`, guarded by `bench/` mutations `retire_release_unanchored` and
-`recall_release_unanchored`, not by the model.
+v0.5.0 row recording the mark's oid alone is outside it. That shape is where clearing a mark cleared the row's
+only anchor and a table attached under the old name was then retired (this PR's per-PR verification, V-01); the
+fix records the marked table as `child_oid` wherever a mark is cleared, guarded by `bench/` mutation
+`disown_unanchored`, not by the model.
 
 ## Independent fidelity read
 

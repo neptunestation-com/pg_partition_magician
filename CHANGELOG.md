@@ -14,13 +14,13 @@
   takes a `retain_batch` slot every tick until the operator runs the remedy, as for any table detached by hand.
   `retire` releases only a table that is no partition of anything: one the operator attached to a partitioned
   table of their own stays refused as `fail_retain_identity`, since the reached-range remedy offers a `DROP`.
-  Both releases (this one and the recall's, #1424) now record the released table as the row's `child_oid` when an
-  older install left it without one; before, the recall's release left such a row with no anchor, and once
-  retention reached the range again a table attached under the old name was taken for the partition, detached and
-  dropped with its rows (found by this PR's verification).
+  Every path that clears a retirement mark (both releases, the install pass, and a mark with no record of pgpm's
+  dispatch) now records the marked table as the row's `child_oid` when an older install left it without one;
+  before, such a row was left with no anchor, and once retention reached the range a table attached under the old
+  name was taken for the partition, detached and dropped with its rows (found by this PR's verification).
   `bench/retire_renamed_detached.sh` runs `tests/363` (mutations `retire_rename_not_released`,
-  `retire_release_keeps_mark`, `retire_release_remedy_by_name`, `retire_release_marked_only`,
-  `retire_release_unanchored`, `recall_release_unanchored`, `retire_release_attached_elsewhere`); the formal model's
+  `retire_release_keeps_mark`, `retire_release_marked_only`, `disown_unanchored`,
+  `retire_release_attached_elsewhere`); the formal model's
   `RetireBegin` releases the same way (guard `G1427`, mutation `M1427`, caught by `NoWedge`).
 
 - **An older install's unanchored retirement mark is judged by what it marks, and never skipped silently**
@@ -49,7 +49,7 @@
   still attached, a recorded relation that is gone, and a mark whose anchors disagree are refused as before.
   `bench/retain_recall_renamed_detached.sh` runs `tests/361` (mutations `recall_rename_not_released`,
   `recall_release_attached`, `recall_release_gone`, `recall_release_anchors_disagree`,
-  `recall_release_unqualified`, `recall_release_remedy_by_name`, `recall_release_any_parent`,
+  `recall_release_unqualified`, `recall_release_any_parent`,
   `recall_release_name_unchanged`, `recall_release_remedy_no_rename`).
 
 - **Tests no longer depend on the month they run in** (#1425). transmute's first partition runs to the month after

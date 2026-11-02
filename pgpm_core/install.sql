@@ -3901,9 +3901,15 @@ $$;
 -- The statements name the relation the row records by its oid (where it is now; a row with no oid, by its name in
 -- _child_nsp's schema) and the parent by its schema-qualified name, never through the search path, and the ATTACH
 -- carries the bounds the grid encodes for the row's range, as _retain_recall's own re-attach does. p_rel, when
--- given, is the oid the caller vouched for and the statements name it instead: _retain_recall's release (#1424)
--- hands over the relation its mark recorded, which a row an older install left without child_oid would otherwise
--- name by its old name, where another table may stand now.
+-- given, is the oid the caller vouched for and the statements name it instead: the install pass hands over the
+-- relation it judged, which a v0.4.0 row (no oid at all) would otherwise name by its name alone. A row with a mark's
+-- oid is named by it without p_rel: the anchor below is written before the statements read it.
+--
+-- A row with no child_oid keeps the mark's own oid as its anchor once the mark is cleared. An older install left rows
+-- whose mark was their only anchor (v0.5.0 recorded retiring_oid alone), and with it cleared the next call resolved the
+-- name with nothing to compare it against, so a table attached under the name over the row's range since (tests/77's
+-- substitution, #407) was taken for the partition and retired, detached and dropped, whichever path cleared the mark
+-- (PR #1433 verification V-01). By the mark, which records the relation pgpm chose, never by the name.
 --
 -- The three-argument signature is dropped, not left behind: an upgrade that kept it would make every
 -- three-argument call ambiguous between it and this one.
@@ -3914,7 +3920,8 @@ declare
   cfg pgpm.config; v_lo text; v_hi text; v_child_oid oid; v_rel_q text; v_parent_q text;
   v_boundary text; v_reached boolean; v_unjudged text; v_attach text; v_unencoded text; v_remedy text; v_cur name; v_rename_q text;
 begin
-  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null,
+                       child_oid = coalesce(child_oid, retiring_oid)
    where parent_table = p_parent and child_name = p_child and retiring_at is not null
   returning lo, hi, coalesce(p_rel, child_oid) into v_lo, v_hi, v_child_oid;
   if not found then return false; end if;
@@ -3990,18 +3997,6 @@ returns oid language sql stable as $$
      and exists (select 1 from pg_class c where c.oid = v.rec)
      and (select c.relname from pg_class c where c.oid = v.rec) is distinct from p_child
      and not exists (select 1 from pg_inherits i where i.inhrelid = v.rec and i.inhparent = p_parent);
-$$;
-
--- _anchor_released: a released retirement's row keeps the relation the release vouched for as its anchor. A row an
--- older install left without child_oid (v0.5.0 recorded retiring_oid only) had the mark as its only anchor, and the
--- release clears it: with no anchor left, the next call resolved the name with nothing to compare it against, so a
--- table attached under the name over the row's range since (tests/77's substitution, #407) was taken for the
--- partition and retired, detached and dropped (PR #1433 verification V-01). child_oid is what the row has always been
--- about; the release just named it, so it is recorded, and every later call compares the name against it.
-create or replace function pgpm._anchor_released(p_parent regclass, p_child name, p_rel oid)
-returns void language sql as $$
-  update pgpm.part set child_oid = p_rel
-   where parent_table = p_parent and child_name = p_child and child_oid is null and p_rel is not null;
 $$;
 
 -- _detach_job_holds: whether the standing pgpm_detach job of this database is armed with this partition's detach
@@ -4490,10 +4485,8 @@ begin
             format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
                    v_nsp, p_child,
                    (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
-                   v_rec),
-            v_rec);
+                   v_rec));
         end if;
-        perform pgpm._anchor_released(p_parent, p_child, v_rec);
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'fail_retain_drop', r.lo, r.hi,
                   format('detached from the parent by something other than retirement, and renamed to %s (oid %s); not dropping it',
@@ -4931,9 +4924,7 @@ begin
           format('retention no longer reaches %I.%I, which its retirement''s detach took out of the parent and which has since been renamed to %s (oid %s): a hand rename of a detached retirement makes it the operator''s table, so it is released rather than re-attached',
                  v_nsp, r.child_name,
                  (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
-                 v_rec),
-          v_rec);
-        perform pgpm._anchor_released(p_parent, r.child_name, v_rec);
+                 v_rec));
         continue;
       end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)

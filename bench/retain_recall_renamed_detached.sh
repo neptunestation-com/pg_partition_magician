@@ -9,13 +9,12 @@
 # retain_disown, never re-attached). The file is the acceptance test; this wrapper exists so the mutations have a
 # guard the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# NINE mutations are required to fail against it (bench/mutations/mutate.py), one per clause of the release:
+# EIGHT mutations are required to fail against it (bench/mutations/mutate.py), one per clause of the release:
 #   recall_rename_not_released         -- the pre-fix shape: no release at all. Parts A and B.
 #   recall_release_attached            -- a renamed partition still attached to the parent is released. Part D.
 #   recall_release_gone                -- a recorded relation that no longer exists is "released". Part C.
 #   recall_release_anchors_disagree    -- the mark's relation is released when the row's anchor names another. Part E.
 #   recall_release_unqualified         -- the method names the new name through the search path. Part A.
-#   recall_release_remedy_by_name      -- the remedy names a row without child_oid by its old name. Part F.
 #   recall_release_any_parent          -- a table attached to the operator's own parent is refused. Part G.
 #   recall_release_name_unchanged      -- a table only moved to another schema is released. Part H.
 #   recall_release_remedy_no_rename    -- the remedy ATTACHes without renaming the table back. Part A.
