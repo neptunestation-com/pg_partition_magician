@@ -1758,6 +1758,17 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   refused as `fail_retain_identity`. So is the renamed table itself while retention still reaches its
   range: `retire` neither drops it nor releases it, and the identity failure stays until you rename it back
   or retention stops reaching it.
+  The pass every `install.sql` run makes leaves such a retirement alone even when another table has since
+  taken the old name: on a row with no `child_oid` it judges the name only when the mark records the relation
+  under it, so a renamed, moved or dropped retirement drops out of the pass, the squatter is not disowned in
+  its place, and the recall releases a renamed table by its oid as above (a moved one is refused as
+  `fail_retain_identity`). A mark written by a pgpm older than v0.5.0 records no oid at all, so once its
+  detached table is renamed nothing can find it by its oid. With nothing under the name, the recall refuses it
+  as `fail_retain_identity` on every tick (counted in `status().retain_drop_failures`), the job is returned to
+  idle, and the `method` spells the repair, the rename back and the `ATTACH`, after which the next tick clears
+  the mark. With a table created under the name since, every path still takes that table for the retirement:
+  do not create a table under the name of a renamed retirement from such an install until its mark is
+  cleared.
 
 ##### What `retire` checks a partition's identity against
 

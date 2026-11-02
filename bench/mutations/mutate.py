@@ -16996,6 +16996,61 @@ MUTATIONS["recall_release_anchors_disagree"] = (
       "      if v_rec is distinct from v_now::oid\n", 1)],
 )
 
+# Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the
+# name only where the name agrees with its mark, and the recall reports a v0.4.0 row with no oid and nothing under
+# its name instead of skipping it. bench/retain_unanchored_marks.sh runs tests/362 against the mutant; one mutation
+# for each fix and one per clause of the pass's condition.
+UNANCHORED_PASS_COND = (
+    "              and (p.child_oid is not null or p.retiring_oid is null or p.retiring_oid = c.oid)\n"
+)
+MUTATIONS["install_pass_unanchored_by_name"] = (
+    "bench/retain_unanchored_marks.sh",
+    "Issue #1429, the pre-fix shape: the install pass finds an unanchored row's relation by name alone, so a v0.5.0 "
+    "row whose mark records the renamed retirement is disowned as the squatter under the old name, its remedy an "
+    "ATTACH of the squatter. The whole condition. tests/362 parts A, C and F catch it.",
+    [(UNANCHORED_PASS_COND, "", 1)],
+)
+MUTATIONS["install_pass_v040_unjudged"] = (
+    "bench/retain_unanchored_marks.sh",
+    "PR for #1429, the pass's condition without its v0.4.0 clause: a mark that records no oid is never judged by the "
+    "name, so a v0.4.0 row detached without pgpm's record keeps its mark through the upgrade. One clause. tests/362 "
+    "part E catches it.",
+    [(UNANCHORED_PASS_COND,
+      "              and (p.child_oid is not null or p.retiring_oid = c.oid)\n", 1)],
+)
+MUTATIONS["install_pass_mark_on_name_unjudged"] = (
+    "bench/retain_unanchored_marks.sh",
+    "PR for #1429, the pass's condition without its agreement clause: a v0.5.0 mark on the very relation under the "
+    "name is skipped, so the detached partition keeps a mark with no record of pgpm's dispatch through the upgrade. "
+    "One clause. tests/362 part B catches it.",
+    [(UNANCHORED_PASS_COND,
+      "              and (p.child_oid is not null or p.retiring_oid is null)\n", 1)],
+)
+MUTATIONS["install_pass_relname_agrees"] = (
+    "bench/retain_unanchored_marks.sh",
+    "PR #1431 verification round 1 (P1-02, V-01), the agreement read off the marked relation's NAME instead of its "
+    "oid: a v0.5.0 retirement moved to another schema under its own name passes for agreement, and the pass "
+    "disowns the squatter under the name in the old schema, its remedy an ATTACH of the squatter. One clause. "
+    "tests/362 parts C and F catch it.",
+    [(UNANCHORED_PASS_COND,
+      "              and (p.child_oid is not null or p.retiring_oid is null\n"
+      "                   or exists (select 1 from pg_class m where m.oid = p.retiring_oid and m.relname = p.child_name))\n", 1)],
+)
+MUTATIONS["recall_v040_skipped_silently"] = (
+    "bench/retain_unanchored_marks.sh",
+    "Issue #1430, the pre-fix shape: a v0.4.0 mark with no oid and nothing under its name is skipped on every tick, "
+    "nothing logged, nothing counted. One site. tests/362 part D catches it.",
+    [("    if v_now is null then\n      perform pgpm._idle_detach_job(v_cmd_q);\n",
+      "    continue when v_now is null;\n    if false then\n      perform pgpm._idle_detach_job(v_cmd_q);\n", 1)],
+)
+MUTATIONS["recall_v040_job_left_armed"] = (
+    "bench/retain_unanchored_marks.sh",
+    "PR for #1430, the refusal without its disarm: the pgpm_detach job keeps the detach, and takes the table out "
+    "again once the operator runs the logged repair. One line. tests/362 part D catches it.",
+    [("    if v_now is null then\n      perform pgpm._idle_detach_job(v_cmd_q);\n",
+      "    if v_now is null then\n", 1)],
+)
+
 # The schema-swap class as one lever (the pass-13 record): the statements the per-family fixes (#1399, #1400, #1402)
 # did not own, each locked by oid first or checked by its effect after. bench/schema_swap_leftovers.sh runs tests/359
 # and tests/360 against the mutant; one mutation per clause.
