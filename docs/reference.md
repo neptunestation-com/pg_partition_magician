@@ -1795,9 +1795,10 @@ side effect: the name must still resolve, and resolve to that OID. When it does 
 particular no `DROP`. The detach can still land on a substitute; the destructive half cannot.
 
 One mismatch is no substitution. When the relation the anchors record still stands under another name and is
-no partition of the parent, it was detached (by pgpm's retirement or by hand) and renamed since, which makes it
-the operator's table: `retire` releases a retirement mark on it, logged `retain_disown` once, and refuses the
-row as a table detached by hand, `fail_retain_drop`, on every call, as the recall's bullet above describes.
+no partition of anything, it was detached (by pgpm's retirement or by hand) and renamed since, which makes it
+the operator's table: `retire` releases a retirement mark on it, logged `retain_disown` once (recording it as the
+row's `child_oid` if the row had none), and refuses the row as a table detached by hand, `fail_retain_drop`, on
+every call, as the recall's bullet above describes.
 
 `retiring_oid` is set only for a partition being retired through a detach. The ordinary one-step path,
 whose bare `DROP TABLE schema.child` has nothing else between it and the write block, is covered by
