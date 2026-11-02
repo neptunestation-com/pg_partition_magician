@@ -59,12 +59,14 @@ RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not
         perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));
       end if;
       -- #1427: the relation the anchors record stands under another name, out of the parent (_renamed_retirement,
-      -- the recall's own test). Detached and renamed, by pgpm's retirement or by the operator, it is the operator's
-      -- table: a mark on it is released (_disown_retirement, logged retain_disown once, with the remedy), and on this
-      -- call and every later one it is refused as a table detached by hand (fail_retain_drop, #652), which it is,
-      -- rather than as a name gone wrong. Never dropped: it is out of the parent under the operator's name.
+      -- the recall's own test) and, here, no partition of anything. Detached and renamed, by pgpm's retirement or by
+      -- the operator, it is the operator's table: a mark on it is released (_disown_retirement, logged retain_disown
+      -- once, with the remedy), and on this call and every later one it is refused as a table detached by hand
+      -- (fail_retain_drop, #652), which it is, rather than as a name gone wrong. Never dropped: it is out of the parent
+      -- under the operator's name. One the operator has attached to a table of their own is left to the identity
+      -- refusal below: the REACHED remedy would tell them to drop a live partition (PR #1433 verification V-03).
       v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);
-      if v_rec is not null then
+      if v_rec is not null and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then
         if r.retiring_at is not null then
           perform pgpm._disown_retirement(p_parent, p_child,
             format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
@@ -73,6 +75,7 @@ RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not
                    v_rec),
             v_rec);
         end if;
+        perform pgpm._anchor_released(p_parent, p_child, v_rec);
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'fail_retain_drop', r.lo, r.hi,
                   format('detached from the parent by something other than retirement, and renamed to %s (oid %s); not dropping it',
@@ -17023,7 +17026,7 @@ MUTATIONS["recall_release_anchors_disagree"] = (
 # helper, whose mutations above (recall_release_*) tests/361 already catches.
 RETIRE_RELEASE_COND = (
     "      v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);\n"
-    "      if v_rec is not null then\n"
+    "      if v_rec is not null and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then\n"
 )
 MUTATIONS["retire_rename_not_released"] = (
     "bench/retire_renamed_detached.sh",
@@ -17054,7 +17057,31 @@ MUTATIONS["retire_release_marked_only"] = (
     "Issue #1427, the maintainer's decision undone: only the call that releases a mark refuses the row as detached "
     "by hand, and every later call, like a row the operator detached by hand with no mark, is an identity failure "
     "again, on every tick. One site. tests/363 parts A and D catch it.",
-    [(RETIRE_RELEASE_COND, RETIRE_RELEASE_COND.replace("if v_rec is not null then", "if v_rec is not null and r.retiring_at is not null then"), 1)],
+    [(RETIRE_RELEASE_COND, RETIRE_RELEASE_COND.replace("if v_rec is not null and", "if v_rec is not null and r.retiring_at is not null and"), 1)],
+)
+
+MUTATIONS["retire_release_unanchored"] = (
+    "bench/retire_renamed_detached.sh",
+    "PR #1433 verification V-01, the release leaving an older install's row with no anchor: on a row with no "
+    "child_oid the mark was the only one, so the next calls resolve the name with nothing to compare it against "
+    "and retire an impostor attached under it, detached and dropped with its rows (#407's substitution). One site. "
+    "tests/363 part G catches it.",
+    [("        perform pgpm._anchor_released(p_parent, p_child, v_rec);\n", "", 1)],
+)
+MUTATIONS["recall_release_unanchored"] = (
+    "bench/retire_renamed_detached.sh",
+    "PR #1433 verification V-01 by the recall's road: _retain_recall releases an older install's row and leaves it "
+    "with no anchor, so once retention reaches the range again retire() takes an impostor attached under the name "
+    "for the partition. One site. tests/363 part I catches it.",
+    [("        perform pgpm._anchor_released(p_parent, r.child_name, v_rec);\n", "", 1)],
+)
+MUTATIONS["retire_release_attached_elsewhere"] = (
+    "bench/retire_renamed_detached.sh",
+    "PR #1433 verification V-03, retire()'s release without its 'no partition of anything' clause: a renamed "
+    "retirement the operator attached to a partitioned table of their own is released with the remedy for a range "
+    "retention reaches, which tells them to drop it, a live partition, rows and all. One clause. tests/363 part H "
+    "catches it.",
+    [(RETIRE_RELEASE_COND, RETIRE_RELEASE_COND.replace(" and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec)", ""), 1)],
 )
 
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the

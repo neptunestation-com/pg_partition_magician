@@ -3992,6 +3992,18 @@ returns oid language sql stable as $$
      and not exists (select 1 from pg_inherits i where i.inhrelid = v.rec and i.inhparent = p_parent);
 $$;
 
+-- _anchor_released: a released retirement's row keeps the relation the release vouched for as its anchor. A row an
+-- older install left without child_oid (v0.5.0 recorded retiring_oid only) had the mark as its only anchor, and the
+-- release clears it: with no anchor left, the next call resolved the name with nothing to compare it against, so a
+-- table attached under the name over the row's range since (tests/77's substitution, #407) was taken for the
+-- partition and retired, detached and dropped (PR #1433 verification V-01). child_oid is what the row has always been
+-- about; the release just named it, so it is recorded, and every later call compares the name against it.
+create or replace function pgpm._anchor_released(p_parent regclass, p_child name, p_rel oid)
+returns void language sql as $$
+  update pgpm.part set child_oid = p_rel
+   where parent_table = p_parent and child_name = p_child and child_oid is null and p_rel is not null;
+$$;
+
 -- _detach_job_holds: whether the standing pgpm_detach job of this database is armed with this partition's detach
 -- (_detach_cmd). False without pg_cron, the job, or the privilege to read cron.job. Read only for a partition still
 -- attached (see _disown_unvouched_retirements), never to vouch for a mark on a pending or detached one.
@@ -4465,12 +4477,14 @@ begin
         perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));
       end if;
       -- #1427: the relation the anchors record stands under another name, out of the parent (_renamed_retirement,
-      -- the recall's own test). Detached and renamed, by pgpm's retirement or by the operator, it is the operator's
-      -- table: a mark on it is released (_disown_retirement, logged retain_disown once, with the remedy), and on this
-      -- call and every later one it is refused as a table detached by hand (fail_retain_drop, #652), which it is,
-      -- rather than as a name gone wrong. Never dropped: it is out of the parent under the operator's name.
+      -- the recall's own test) and, here, no partition of anything. Detached and renamed, by pgpm's retirement or by
+      -- the operator, it is the operator's table: a mark on it is released (_disown_retirement, logged retain_disown
+      -- once, with the remedy), and on this call and every later one it is refused as a table detached by hand
+      -- (fail_retain_drop, #652), which it is, rather than as a name gone wrong. Never dropped: it is out of the parent
+      -- under the operator's name. One the operator has attached to a table of their own is left to the identity
+      -- refusal below: the REACHED remedy would tell them to drop a live partition (PR #1433 verification V-03).
       v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);
-      if v_rec is not null then
+      if v_rec is not null and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then
         if r.retiring_at is not null then
           perform pgpm._disown_retirement(p_parent, p_child,
             format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
@@ -4479,6 +4493,7 @@ begin
                    v_rec),
             v_rec);
         end if;
+        perform pgpm._anchor_released(p_parent, p_child, v_rec);
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'fail_retain_drop', r.lo, r.hi,
                   format('detached from the parent by something other than retirement, and renamed to %s (oid %s); not dropping it',
@@ -4918,6 +4933,7 @@ begin
                  (select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_rec),
                  v_rec),
           v_rec);
+        perform pgpm._anchor_released(p_parent, r.child_name, v_rec);
         continue;
       end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)

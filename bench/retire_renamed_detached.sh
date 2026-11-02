@@ -8,12 +8,15 @@
 # acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run against the
 # mutant, in the shape of bench/retain_recall_renamed_detached.sh.
 #
-# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
+# SEVEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   retire_rename_not_released        -- the pre-#1427 shape: refused as an identity failure. Parts A, B, D, E.
 #   retire_release_keeps_mark         -- refused as detached by hand, the mark never released. Parts A, B, E.
 #   retire_release_remedy_by_name     -- the release names the relation by the row's name, not the oid. Part E.
 #   retire_release_marked_only        -- only the call that releases is a hand-detached refusal; every later call,
 #                                        and a row with no mark, an identity failure again. Parts A, D.
+#   retire_release_unanchored         -- an older install's row left with no anchor, an impostor retired. Part G.
+#   recall_release_unanchored         -- the same by the recall's release. Part I.
+#   retire_release_attached_elsewhere -- a live partition of another table released, its remedy a DROP. Part H.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree

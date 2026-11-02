@@ -23,6 +23,13 @@
 --           the squatter.
 --   PART F  the recorded relation is GONE (dropped after its detach): nothing stands to hand over, so the
 --           identity failure stands, the mark kept.
+--   PART G  an older install's row (no child_oid), the original renamed aside and an impostor ATTACHED under its name
+--           over the same range (tests/77's substitution): released once, the row anchored to the renamed table, and
+--           every later call refuses it as detached by hand; the impostor is never detached or dropped.
+--   PART H  the renamed table attached to the operator's own partitioned table: refused as fail_retain_identity, as
+--           before, the mark kept; never released with a remedy that would drop a live partition.
+--   PART I  the recall released an older install's row, retention then reaches the range again and an impostor is
+--           attached under the name: the recall's release anchored the row, so retire() leaves the impostor alone.
 --   PART C  the partition was renamed while still ATTACHED (its detach dispatched, never run): it is no detached
 --           retirement, so it is refused as before (fail_retain_identity), left attached and the mark kept. Last,
 --           because its armed detach holds the database's one detach slot.
@@ -31,12 +38,13 @@
 -- cron.job and cron.alter_job and runs whatever the standing job holds at the top level, as tests/361 does.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2; B 5, 6, 7; C 21, 22;
--- D 31, 32, 33, 34; E 41, 42, 43; F 11), and the squatters B 99 and E 98, so a drop of the wrong relation or a
+-- D 31, 32, 33, 34; E 41, 42, 43; F 11; G 51, 52; H 61, 62; I 71, 72), the squatters B 99 and E 98, and the
+-- impostors G 57, 58, 59 and I 75, 76, so a drop of the wrong relation or a
 -- lost row cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(60);
+select plan(83);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -229,6 +237,100 @@ select is(pgpm_t363.actions('pgpm_t363.rf', '0'), array['retain_detach', 'fail_r
   'F: with nothing standing to hand over, it is refused as exactly fail_retain_identity');
 select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t363.rf'::regclass and lo = '0'), null,
   'F: and the mark is kept');
+update cron.job set command = 'select 1';
+
+-- ========== PART G: an older install's row, the original renamed aside and an impostor ATTACHED under its name ==========
+-- tests/77's #407 substitution on a row with no child_oid (PR #1433 verification V-01): the release used to clear the
+-- row's only anchor, so the next calls took the impostor for the partition, detached it and dropped it, rows and all.
+call pgpm_t363.landed('rg', array[51, 52]);
+select child_name as g_doomed, hi as g_hi, child_oid as g_oid from pgpm.part
+ where parent_table = 'pgpm_t363.rg'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t363.rg', :'g_doomed'), 'fixture: (G) retire() dispatches the detach');
+select pgpm_t363.armed() \gexec
+update cron.job set command = 'select 1';
+update pgpm.part set child_oid = null, detach_dispatched_oid = null
+ where parent_table = 'pgpm_t363.rg'::regclass and lo = '0';
+select format('alter table pgpm_t363.%I rename to rg_kept', :'g_doomed') \gexec
+select format('create table pgpm_t363.%I (id bigint primary key, payload text)', :'g_doomed') \gexec
+select format('insert into pgpm_t363.%I values (57, ''impostor''), (58, ''impostor''), (59, ''impostor'')', :'g_doomed') \gexec
+select format('alter table pgpm_t363.rg attach partition pgpm_t363.%I for values from (0) to (10000)', :'g_doomed') \gexec
+select to_regclass(format('pgpm_t363.%I', :'g_doomed'))::oid as g_imp \gset
+select ok(exists (select 1 from pg_inherits where inhrelid = :'g_imp'::oid and inhparent = 'pgpm_t363.rg'::regclass)
+          and (select child_oid is null and retiring_oid = :'g_oid'::oid from pgpm.part where parent_table = 'pgpm_t363.rg'::regclass and lo = '0'),
+  'LIVENESS: (G) an impostor is attached under the name of a row that records the retirement by its mark alone');
+select ok(pgpm_t363.reached('pgpm_t363.rg', :'g_hi'), 'LIVENESS: (G) retention reaches the partition');
+-- three calls, each detach the job holds run as pg_cron would
+select pgpm.retire('pgpm_t363.rg', :'g_doomed');
+select pgpm_t363.armed() \gexec
+select pgpm.retire('pgpm_t363.rg', :'g_doomed');
+select pgpm_t363.armed() \gexec
+select pgpm.retire('pgpm_t363.rg', :'g_doomed');
+select pgpm_t363.armed() \gexec
+select is(pgpm_t363.actions('pgpm_t363.rg', '0'),
+          array['retain_detach', 'retain_disown', 'fail_retain_drop', 'fail_retain_drop', 'fail_retain_drop'],
+  'G: released once, then refused as detached by hand on every call; nothing dispatched or dropped');
+select is((select child_oid from pgpm.part where parent_table = 'pgpm_t363.rg'::regclass and lo = '0'), :'g_oid'::oid,
+  'G: the release anchors the row to the renamed table');
+select ok(exists (select 1 from pg_inherits where inhrelid = :'g_imp'::oid and inhparent = 'pgpm_t363.rg'::regclass),
+  'G: the impostor is still attached');
+select is(pgpm_t363.ids(format('pgpm_t363.%I', :'g_doomed')), array[57, 58, 59]::bigint[], 'G: and keeps ids 57, 58, 59');
+select is(pgpm_t363.ids('pgpm_t363.rg_kept'), array[51, 52]::bigint[], 'G: the renamed table keeps ids 51, 52');
+update cron.job set command = 'select 1';
+
+-- ========== PART H: renamed and attached to the operator's own partitioned table; refused, not released ==========
+-- (PR #1433 verification V-03) a live partition of another table: the remedy for a range retention reaches would tell
+-- the operator to drop it, so retire() leaves it to the identity refusal, as before
+call pgpm_t363.landed('rh', array[61, 62]);
+select child_name as h_doomed, hi as h_hi, child_oid as h_oid from pgpm.part
+ where parent_table = 'pgpm_t363.rh'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t363.rh', :'h_doomed'), 'fixture: (H) retire() dispatches the detach');
+select pgpm_t363.armed() \gexec
+select format('alter table pgpm_t363.%I rename to rh_kept', :'h_doomed') \gexec
+create table pgpm_t363.mine (id bigint primary key, payload text) partition by range (id);
+alter table pgpm_t363.mine attach partition pgpm_t363.rh_kept for values from (0) to (10000);
+select is((select inhparent::regclass from pg_inherits where inhrelid = :'h_oid'::oid), 'pgpm_t363.mine'::regclass,
+  'LIVENESS: (H) the renamed table is a partition of the operator''s own table');
+select ok(pgpm_t363.reached('pgpm_t363.rh', :'h_hi'), 'LIVENESS: (H) retention reaches the partition');
+select ok(not pgpm.retire('pgpm_t363.rh', :'h_doomed'), 'H: retire() drops nothing');
+select is(pgpm_t363.actions('pgpm_t363.rh', '0'), array['retain_detach', 'fail_retain_identity'],
+  'H: refused as exactly fail_retain_identity, never released with a remedy that drops a live partition');
+select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t363.rh'::regclass and lo = '0'), null,
+  'H: the mark is kept');
+select is(pgpm_t363.ids('pgpm_t363.mine'), array[61, 62]::bigint[], 'H: its rows are whole, served by the operator''s table');
+update cron.job set command = 'select 1';
+
+-- ========== PART I: the recall released an older install's row; retention reaches it again; an impostor ==========
+-- The recall's release (#1424) clears the same mark, so it anchors the row too: once retention reaches the range
+-- again, retire() compares the name against the renamed table and leaves an impostor attached under it alone.
+call pgpm_t363.landed('ri', array[71, 72]);
+select child_name as i_doomed, hi as i_hi, child_oid as i_oid from pgpm.part
+ where parent_table = 'pgpm_t363.ri'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t363.ri', :'i_doomed'), 'fixture: (I) retire() dispatches the detach');
+select pgpm_t363.armed() \gexec
+update pgpm.part set child_oid = null, detach_dispatched_oid = null
+ where parent_table = 'pgpm_t363.ri'::regclass and lo = '0';
+select format('alter table pgpm_t363.%I rename to ri_kept', :'i_doomed') \gexec
+select pgpm.set_retain('pgpm_t363.ri', '45000');
+select ok(not pgpm_t363.reached('pgpm_t363.ri', :'i_hi'), 'LIVENESS: (I) retention no longer reaches the partition');
+select is(pgpm_t363.actions('pgpm_t363.ri', '0'), array['retain_detach', 'retain_disown'], 'LIVENESS: (I) the recall released it');
+select is((select child_oid from pgpm.part where parent_table = 'pgpm_t363.ri'::regclass and lo = '0'), :'i_oid'::oid,
+  'I: the recall''s release anchors the row to the renamed table');
+select format('create table pgpm_t363.%I (id bigint primary key, payload text)', :'i_doomed') \gexec
+select format('insert into pgpm_t363.%I values (75, ''impostor''), (76, ''impostor'')', :'i_doomed') \gexec
+select format('alter table pgpm_t363.ri attach partition pgpm_t363.%I for values from (0) to (10000)', :'i_doomed') \gexec
+select to_regclass(format('pgpm_t363.%I', :'i_doomed'))::oid as i_imp \gset
+-- newer rows move the frontier on (56000 - 45000 puts the horizon at 11000), and retention reaches the range again
+insert into pgpm_t363.ri values (56000, 'newer');
+select ok(pgpm_t363.reached('pgpm_t363.ri', :'i_hi'), 'LIVENESS: (I) retention reaches the partition again');
+select pgpm.retire('pgpm_t363.ri', :'i_doomed');
+select pgpm_t363.armed() \gexec
+select pgpm.retire('pgpm_t363.ri', :'i_doomed');
+select pgpm_t363.armed() \gexec
+select is(pgpm_t363.actions('pgpm_t363.ri', '0'), array['retain_detach', 'retain_disown', 'fail_retain_drop', 'fail_retain_drop'],
+  'I: retire() refuses the row as detached by hand; nothing dispatched or dropped');
+select ok(exists (select 1 from pg_inherits where inhrelid = :'i_imp'::oid and inhparent = 'pgpm_t363.ri'::regclass),
+  'I: the impostor is still attached');
+select is(pgpm_t363.ids(format('pgpm_t363.%I', :'i_doomed')), array[75, 76]::bigint[], 'I: and keeps ids 75, 76');
 update cron.job set command = 'select 1';
 
 -- ========== PART C: renamed while still attached; no detached retirement to hand over ==========

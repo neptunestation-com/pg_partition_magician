@@ -12,8 +12,15 @@
   `fail_retain_drop`, naming where the table is now. It is never dropped. A partition detached and renamed by
   hand with no mark is refused the same way. The refusal still counts in `status().retain_drop_failures` and
   takes a `retain_batch` slot every tick until the operator runs the remedy, as for any table detached by hand.
+  `retire` releases only a table that is no partition of anything: one the operator attached to a partitioned
+  table of their own stays refused as `fail_retain_identity`, since the reached-range remedy offers a `DROP`.
+  Both releases (this one and the recall's, #1424) now record the released table as the row's `child_oid` when an
+  older install left it without one; before, the recall's release left such a row with no anchor, and once
+  retention reached the range again a table attached under the old name was taken for the partition, detached and
+  dropped with its rows (found by this PR's verification).
   `bench/retire_renamed_detached.sh` runs `tests/363` (mutations `retire_rename_not_released`,
-  `retire_release_keeps_mark`, `retire_release_remedy_by_name`, `retire_release_marked_only`); the formal model's
+  `retire_release_keeps_mark`, `retire_release_remedy_by_name`, `retire_release_marked_only`,
+  `retire_release_unanchored`, `recall_release_unanchored`, `retire_release_attached_elsewhere`); the formal model's
   `RetireBegin` releases the same way (guard `G1427`, mutation `M1427`, caught by `NoWedge`).
 
 - **An older install's unanchored retirement mark is judged by what it marks, and never skipped silently**
