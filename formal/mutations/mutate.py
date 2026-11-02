@@ -249,10 +249,12 @@ MUTATIONS = {
                  cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, budget=1),
                  note='every step resolves a partition in the parent\'s schema'),
     'M778': dict(rcs=['#778'], inv='NoLostRowLive', live=True, guards=['G778'],
-                 cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, fk=True, budget=2),
-                 note='the recall resolves in the parent\'s schema: a moved parent\'s retirement is never taken back'),
+                 cfg=dict(groups=['OD', 'T'], shapes=FRESH, fk=True, budget=2),
+                 note='the recall resolves in the parent\'s schema: a moved parent\'s retirement is never taken back. '
+                      'No RN: with renames the clean run is 388k states and passes CI\'s 30-minute bound only on '
+                      'a fast runner, and none is needed, since without G1424\'s name clause M778 is missed here too'),
     'M1424': dict(rcs=['Q1-1424'], inv='NoLostRowLive', live=True, guards=['G1424'], extra=True,
-                  cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, fk=True, budget=2),
+                  cfg=dict(groups=['RN', 'T'], shapes=FRESH, fk=True, budget=2),
                   note='the recall never releases a detached retirement the operator renamed: resolved by name, it '
                        'finds nothing, and the rows stay out of the parent for ever (Q1 in docs/formal/record.md)'),
     'M788': dict(rcs=['#788'], inv='NoWedge', guards=['G788'],

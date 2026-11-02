@@ -70,7 +70,7 @@ three free catches:
 - **M778** (a liveness mutation) first could not run, because the unmutated spec violated `NoLostRowLive`
   three times over. Two were fairness artefacts in the model: hypothesis H_C1 was a guard that only blocked,
   and an operator's started `DETACH ... CONCURRENTLY` could not finish without spending environment budget
-  (now Base A10). The third is question Q1 below, now decided as #1424. M778's config now leaves renames out.
+  (now Base A10). The third is question Q1 below, now decided as #1424. M778's config leaves renames out (see Q1).
 
 Two mutants were broken rather than caught or missed, and were fixed before counting: M1054b2 (the model keyed
 a ledger row's object by its lo's raw text rather than its instant) and M1335b10 (a by-name drop resolving to
@@ -157,9 +157,11 @@ releases the table to the operator with a logged disown instead of re-attaching 
 intent (re-attaching could let a later retention drop rows renamed to be kept) without leaving rows out of the
 parent silently. `CustodyLive.cfg` and M778 left renames out until #1424 landed. With it, the model's recall
 releases such a table to the operator (`RecallRelease`, guard `G1424`, mutation `M1424`), so `NoLostRowLive`
-reads "taken back or explicitly released" and renames are back in both. The model's release requires the name
+reads "taken back or explicitly released" and renames are back in `CustodyLive.cfg`. M1424 checks the release
+under renames and time alone (`RN`, `T`, FK on; without the FK path it is missed). M778 keeps renames out: with
+them its clean run reached 388k states and overran the retrodiction's 30-minute bound on CI. The model's release requires the name
 to have changed, not merely the lookup to have failed: with only the latter, M778's wrong-schema lookup was
-released instead of caught, and M778 went from caught to missed. A table only moved to another schema under
+released instead of caught, and M778 went from caught to missed, as it still does under its rename-free config. A table only moved to another schema under
 its own name is no rename: the code follows it by oid and re-attaches it, and known gap K2 leaves a hand
 `SET SCHEMA` of a partition out of the model anyway. The code releases a renamed table that is no partition
 of this parent, so one the operator attached to a partitioned table of their own is released too. The model
