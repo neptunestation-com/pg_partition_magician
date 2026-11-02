@@ -1388,6 +1388,7 @@ run_perf() {
     "bench/by_name_after_wait_lint.sh pgpm_perf440"
     "bench/tests_witness_the_step.sh pgpm_perf441"
     "bench/retain_recall_renamed_detached.sh pgpm_perf442"
+    "bench/retain_unanchored_marks.sh pgpm_perf444"
   )
   local selected=()
   local n=${#guards[@]} idx

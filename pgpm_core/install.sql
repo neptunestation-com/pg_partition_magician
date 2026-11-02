@@ -4087,6 +4087,14 @@ begin
              join pg_class c on c.oid = coalesce(p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)
              join pg_namespace n on n.oid = c.relnamespace
             where p.retiring_at is not null and c.relname = p.child_name   -- part-row-by-name: found by oid; a rename drops out
+              -- #1429: an unanchored row's name is judged only where it agrees with the mark. A retiring_oid on
+              -- another relation that no longer carries the name (renamed since its detach, or gone) leaves a
+              -- squatter under it, which is not what was marked: disowning it would log an ATTACH of the
+              -- squatter. That row drops out as an anchored rename does, and the recall judges it by oid (#1424).
+              -- A mark on the relation under the name, or on a namesake that still carries it (#1365), is judged
+              -- by the name as before, and so is a v0.4.0 mark, which records no oid to judge.
+              and (p.child_oid is not null or p.retiring_oid is null
+                   or exists (select 1 from pg_class m where m.oid = p.retiring_oid and m.relname = p.child_name))   -- part-row-by-name: whether the mark's relation still carries the name, by its oid
   loop
     if r.pending is false then
       -- attached: a retirement under way, retire()'s to finish. One an older install dispatched (the job armed with
@@ -4104,7 +4112,7 @@ begin
     v_why_q := format('%I.%I is %s under a retirement mark for which pgpm recorded no dispatch of its own (a dispatch that failed, or a pgpm older than that record, which stamped the mark on an operator''s detach as on its own)',
                       r.nspname, r.child_name,
                       case when r.pending then 'pending a concurrent detach' else 'detached from the parent' end);
-    if pgpm._disown_retirement(r.parent_table, r.child_name, v_why_q) then
+    if pgpm._disown_retirement(r.parent_table, r.child_name, v_why_q, r.rel) then
       v_n := v_n + 1;
     end if;
   end loop;
@@ -4920,7 +4928,22 @@ begin
 
     -- the dispatched detach landed, if pgpm dispatched one (#705): a detached partition under a mark with no record of
     -- pgpm's dispatch is the operator's table (see _detach_dispatched), disowned rather than re-attached
-    continue when p_reattach is not true or v_now is null;
+    continue when p_reattach is not true;
+    -- #1430: nothing under the name, and no oid to find the relation by (the identity check above has taken every
+    -- row that records one): a v0.4.0 mark whose detached table was renamed or dropped since. It cannot be released
+    -- to a table it cannot name, nor re-attached, but it is not skipped silently either: refused, and counted. The
+    -- job is disarmed if it still holds the detach, or it would take the table out again once the remedy put it back.
+    if v_now is null then
+      perform pgpm._idle_detach_job(v_cmd_q);
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'fail_retain_identity', r.lo, r.hi,
+                -- by-name-ok: a remedy text a log row carries; nothing runs it
+                format('retention no longer reaches %I.%I, which resolves to nothing, and its retirement mark records no oid to find the relation by (a pgpm older than v0.5.0 wrote it); if its detached table was renamed, it holds the rows: rename it back to %I in %I, then alter table %s attach partition %I.%I for values from (%L) to (%L); and the next tick clears the mark',
+                       v_nsp, r.child_name, r.child_name, v_nsp, p_parent::text, v_nsp, r.child_name,
+                       pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+                       pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz)));
+      continue;
+    end if;
     if not pgpm._detach_dispatched(p_parent, r.child_name, v_now::oid) then
       perform pgpm._idle_detach_job(v_cmd_q);
       perform pgpm._disown_retirement(p_parent, r.child_name,

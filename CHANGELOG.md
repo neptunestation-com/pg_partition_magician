@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **An older install's unanchored retirement mark is judged by what it marks, and never skipped silently**
+  (#1429, #1430). The pass every `install.sql` run makes found a v0.5.0 row's relation by its name, so when the
+  operator had renamed the detached retirement and a table had since taken the old name, that table was disowned
+  in its place and the `retain_disown` remedy spelled an `ATTACH` of it. The pass now judges such a row by its
+  name only where the name agrees with the mark (or the mark records no oid, or a namesake that still carries
+  it); otherwise it leaves the row to the recall, which releases the renamed table by its oid (#1424). A v0.4.0
+  mark, which records no oid, whose detached table was renamed, was skipped by the recall on every tick with
+  nothing logged; it is now refused as `fail_retain_identity`, counted in `status().retain_drop_failures`, with
+  the job returned to idle and the repair spelled out. `bench/retain_unanchored_marks.sh` runs `tests/362`
+  (mutations `install_pass_unanchored_by_name`, `install_pass_v040_unjudged`, `install_pass_namesake_unjudged`,
+  `recall_v040_skipped_silently`, `recall_v040_job_left_armed`).
+
 - **A detached retirement the operator renamed is released, not refused on every tick** (#1424, from the formal
   model's question Q1). Once pgpm's detach had taken a partition out of the parent and the operator renamed the
   table, `_retain_recall` resolved the name, found nothing, and logged `fail_retain_identity` on every tick with
