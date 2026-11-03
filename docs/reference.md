@@ -2493,11 +2493,14 @@ retirement's oid in the mark alone) is checked against the mark's oid instead, s
 under the old name of a detached retirement you renamed is refused, never blocked. If an older pgpm did
 block it, pgpm lifts that block and says so: in the refusal's `method`, or in the `retain_disown` that
 releases the renamed retirement, whichever comes first. It looks for such a block under the old name in
-every schema, so moving the parent or the retirement since does not hide it, and it lifts only a block
-on a table that is no partition of anything and that no `pgpm.part` row records: a table detached by
-hand keeps its block, as before. The step asks on every tick while such a block stands, also once the
-row has become a table detached by hand, so a lift that waits out its lock timeout (at most 200 ms) is
-retried. Removal is deliberately *not* anchored: an older pgpm could have left that trigger on a
+every schema the parent's family lives in (the parent's, its partitions', and those of the tables its rows
+record), so moving the parent or the retirement since does not hide it, and a table of another parent's in
+a schema of its own is never reached. It lifts only a block on a table that is no partition of anything
+and that no `pgpm.part` row records: a table detached by hand keeps its block, as before. The step asks on
+every tick while such a block stands, also once the row has become a table detached by hand, so a lift
+that waits out its lock timeout (at most 200 ms) is retried. A release that cannot lift it (a reader holds
+the table, or your role may not drop its trigger) names it in its remedy as a `drop trigger` statement,
+since the remedy's own `delete` would leave no row for a later tick to retry through. Removal is deliberately *not* anchored: an older pgpm could have left that trigger on a
 substituted relation, rejecting every write to it, and removing by name is what lets an upgraded pgpm lift
 it off again.
 

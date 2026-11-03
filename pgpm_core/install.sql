@@ -3871,46 +3871,63 @@ returns regclass language sql stable as $$
     left join pgpm.part p on p.parent_table = p_parent and p.child_name = p_child;
 $$;
 
--- _lift_stale_write_blocks: lift pgpm_write_block from every table named p_child that carries pgpm's own block
--- (the trigger calls pgpm._write_block_raise), is no partition of anything, and is no relation any pgpm.part row
--- records (p_anchor, the row's own, included), and return their names (null when none). No current pgpm puts a block
--- on such a table, so each is an older pgpm's: v0.5.0 and v0.6.0 blocked whatever held a partition's name, the
--- operator's own table included (#1435). In ANY schema: where the old tick resolved the name is not recoverable, as
--- the row's schema follows its oid (#727) and the parent may have moved since (#727 too), so a guess at the schema
--- strands the block whenever the operator moved either (PR #1436 verification, rounds 2 and 3, V-01). The three
--- conditions keep it to pgpm's own leftovers: a partition keeps its block whatever it is a partition of, and so does
--- every relation pgpm still records, a table detached by hand included (#705, for the operator to drop with its row).
--- Defined here, ahead of _disown_retirement, which calls it and which the install pass below runs at install time;
--- the trigger function is looked up by to_regprocedure for the same reason (a fresh install has no block to lift).
+-- _stale_write_blocks: the tables named p_child that carry a block an older pgpm put on a table it never managed
+-- (#1435), as quoted names: pgpm's own trigger (pgpm_write_block calling pgpm._write_block_raise), on a table that is
+-- no partition of anything and no relation any pgpm.part row records (p_anchor, the row's own, included). v0.5.0 and
+-- v0.6.0 blocked whatever held a partition's name, the operator's own table included; no current pgpm puts a block
+-- on such a table. Where the old tick resolved the name is not recorded: the row's schema follows its oid (#727) and
+-- the parent may have moved since, so either schema alone misses a block whenever the operator moved the other (PR
+-- #1436 verification, rounds 2 and 3, V-01). So it looks in every schema the PARENT'S FAMILY lives in: the parent's,
+-- each of its partitions', and each relation its own rows record. A moved parent leaves its partitions behind in the
+-- schema the old tick used, so that schema is still one of them; and another parent's table in a schema of its own
+-- (a tenant's, whose row its operator deleted to keep the table and its block, round 4 V-02) is never reached. The
+-- three exclusions keep it to pgpm's leftovers inside those schemas: a partition keeps its block whatever it is a
+-- partition of, and so does every relation pgpm still records, a table detached by hand included (#705). Defined
+-- here, ahead of _disown_retirement, which uses it and which the install pass below runs at install time; the
+-- trigger function is looked up by to_regprocedure for the same reason (a fresh install has no block to find).
+create or replace function pgpm._stale_write_blocks(p_parent regclass, p_child name, p_anchor oid)
+returns setof text language sql stable as $$
+  select format('%I.%I', n.nspname, c.relname)   -- part-row-by-name: text naming a namesake judged below, resolves nothing
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where c.relname = p_child   -- part-row-by-name: every namesake in the family's schemas, each judged by oid below
+     and c.relnamespace in (select f.relnamespace from pg_class f where f.oid = p_parent
+                            union select f.relnamespace from pg_inherits i join pg_class f on f.oid = i.inhrelid
+                                   where i.inhparent = p_parent
+                            union select f.relnamespace from pgpm.part p join pg_class f on f.oid in (p.child_oid, p.retiring_oid)
+                                   where p.parent_table = p_parent)
+     and c.oid is distinct from p_anchor
+     and exists (select 1 from pg_trigger t where t.tgrelid = c.oid and t.tgname = 'pgpm_write_block'
+                    and t.tgfoid = to_regprocedure('pgpm._write_block_raise()'))
+     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
+     and not exists (select 1 from pgpm.part p
+                      where c.oid in (p.child_oid, p.retiring_oid, p.detach_dispatched_oid))
+   order by 1
+$$;
+
+-- _lift_stale_write_blocks: lift each block _stale_write_blocks finds, and return the names lifted (null when none).
+-- A reader of the table, or a caller that may not drop its trigger, leaves that block for the next tick, never a
+-- raise into the caller (retire(), the recall, the install pass), whose own work the lift must not stop; a caller
+-- that ends the row (_disown_retirement) names what is left in its remedy instead.
 create or replace function pgpm._lift_stale_write_blocks(p_parent regclass, p_child name, p_anchor oid)
 returns text language plpgsql as $$
-declare r record; v_lifted_q text; v_timeout text := current_setting('lock_timeout');
+declare v_stale text; v_lifted text; v_timeout text := current_setting('lock_timeout');
   v_timeout_ms bigint := (select setting::bigint from pg_settings where name = 'lock_timeout');   -- in ms, 0 = none
 begin
-  for r in select c.oid, n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace
-            where c.relname = p_child   -- part-row-by-name: every namesake in any schema, each judged by oid below
-              and c.oid is distinct from p_anchor
-              and exists (select 1 from pg_trigger t where t.tgrelid = c.oid and t.tgname = 'pgpm_write_block'
-                             and t.tgfoid = to_regprocedure('pgpm._write_block_raise()'))
-              and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
-              and not exists (select 1 from pgpm.part p
-                               where c.oid in (p.child_oid, p.retiring_oid, p.detach_dispatched_oid))
-  loop
-    -- a reader of the operator's table defers the lift to the next tick rather than stalling the caller (retire()
-    -- has no lock_timeout of its own): at most 200 ms here, the caller's own setting restored either way
+  for v_stale in select pgpm._stale_write_blocks(p_parent, p_child, p_anchor) loop
+    -- at most 200 ms behind a reader (retire() has no lock_timeout of its own), the caller's setting restored
     begin
       if v_timeout_ms = 0 or v_timeout_ms > 200 then
         perform set_config('lock_timeout', '200ms', true);
       end if;
-      -- by-name-ok: a namesake that took the name since loses only a trigger named pgpm_write_block (_remove_write_block)
-      execute format('drop trigger if exists pgpm_write_block on %I.%I', r.nspname, p_child);   -- part-row-by-name: the namesake judged above
+      -- by-name-ok: a namesake judged by oid in _stale_write_blocks loses only a trigger named pgpm_write_block
+      execute format('drop trigger if exists pgpm_write_block on %s', v_stale);
       perform set_config('lock_timeout', v_timeout, true);
-      v_lifted_q := concat_ws(', ', v_lifted_q, format('%I.%I', r.nspname, p_child));   -- part-row-by-name: text naming the namesake lifted above, resolves nothing
-    exception when lock_not_available then
+      v_lifted := concat_ws(', ', v_lifted, v_stale);
+    exception when lock_not_available or insufficient_privilege then
       perform set_config('lock_timeout', v_timeout, true);
     end;
   end loop;
-  return v_lifted_q;
+  return v_lifted;
 end;
 $$;
 
@@ -4027,7 +4044,10 @@ begin
             || v_remedy
             || case when v_lifted is not null
                     then format('. Lifted the write block an older pgpm put on %s, a table it never managed', v_lifted)
-                    else '' end);
+                    else '' end
+            || coalesce('. The write block an older pgpm put on a table it never managed could not be lifted now (a reader holds it, or this role may not); lift it by hand, as the step will not once this row is gone: '
+                        || (select string_agg(format('drop trigger if exists pgpm_write_block on %s;', b), ' ')
+                              from pgpm._stale_write_blocks(p_parent, p_child, v_child_oid) b), ''));
   return true;
 end;
 $$;

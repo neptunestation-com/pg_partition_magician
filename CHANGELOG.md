@@ -13,16 +13,20 @@
   step asks on every tick while such a block stands, including for a row it now skips as detached by hand, so a lift
   that times out behind a reader, or a row `retire` anchored before the step ran, does not strand the block, and the
   release of the renamed retirement (`retire`, or the recall) lifts it too, naming it in its `retain_disown`, so a
-  remedy that deletes the row before any tick strands nothing. The lift looks under the old name in every schema, so
-  moving the parent or the retirement since does not hide the block, and touches only pgpm's own trigger on a table
-  that is no partition of anything and that no `pgpm.part` row records. A row with no `child_oid` is still compared
-  by its range as well (#1365), whatever its mark. An impostor attached to the parent keeps any block it has, as
-  before. The #518 coverage discard reads the same anchor, so the renamed table's coverage is not discarded because
-  the table under its old name is unblocked. `bench/write_block_reads_mark.sh` runs `tests/364` (mutations
+  remedy that deletes the row before any tick strands nothing. The lift looks under the old name in every schema the
+  parent's family lives in (the parent's, its partitions', and those of the tables its rows record), so moving the
+  parent or the retirement since does not hide the block while another parent's table in a schema of its own is
+  never reached, and touches only pgpm's own trigger on a table that is no partition of anything and that no
+  `pgpm.part` row records. A release that cannot lift (a reader, or a role that may not) names the block in its
+  remedy as a `drop trigger` statement, and a lift never raises into its caller. A row with no `child_oid` is still
+  compared by its range as well (#1365), whatever its mark. An impostor attached to the parent keeps any block it
+  has, as before. The #518 coverage discard reads the same anchor, so the renamed table's coverage is not discarded
+  because the table under its old name is unblocked. `bench/write_block_reads_mark.sh` runs `tests/364` (mutations
   `write_block_mark_unanchored`, `write_block_stale_kept`, `write_block_lift_under_parent`,
   `write_block_mark_refuses_all`, `coverage_reset_mark_unanchored`, `write_block_stale_lift_once`,
-  `write_block_mark_shadows_stranger`, `write_block_lift_named_schemas`, `write_block_lift_tracked`,
-  `disown_release_keeps_stale_block`, `write_block_whole_fix_reverted`).
+  `write_block_mark_shadows_stranger`, `write_block_lift_named_schemas`, `write_block_lift_any_schema`,
+  `write_block_lift_tracked`, `disown_release_keeps_stale_block`, `write_block_whole_fix_reverted`,
+  `write_block_lift_raises_unprivileged`, `disown_remedy_omits_stale_block`).
 
 - **`retire` releases a detached retirement the operator renamed, and refuses it as detached by hand** (#1427).
   While retention still reached the range, `retire` met such a table, resolved the row's name, found nothing,

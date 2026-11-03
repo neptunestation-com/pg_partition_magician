@@ -9,7 +9,7 @@
 # mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_renamed_detached.sh.
 #
-# ELEVEN mutations are required to fail against it (bench/mutations/mutate.py):
+# FOURTEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   write_block_mark_unanchored     -- the pre-fix shape: the mark's oid anchors nothing. Parts A, B, D.
 #   write_block_whole_fix_reverted  -- no anchor and no lift at once: the issue's own reproduction. Part A.
 #   write_block_stale_kept          -- refused, but a block an earlier tick laid stays. Part B.
@@ -19,8 +19,11 @@
 #   write_block_stale_lift_once     -- no lift once retire() has anchored the row first. Part G.
 #   write_block_mark_shadows_stranger -- a mark's oid hides a partition over another range under the name. Part H.
 #   write_block_lift_named_schemas  -- the lift looks only in the anchor's and the parent's schemas now. Part J.
+#   write_block_lift_any_schema     -- the lift reaches a tenant's kept table in a schema of its own. Part K.
 #   write_block_lift_tracked        -- a twin parent's partition detached by hand loses its block. Part K.
+#   write_block_lift_raises_unprivileged -- a lift the caller may not make raises into it. Parts N, M.
 #   disown_release_keeps_stale_block -- the release leaves the block to a tick that may never come. Parts K, J.
+#   disown_remedy_omits_stale_block -- a release that could not lift says nothing of the block. Part N.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree
