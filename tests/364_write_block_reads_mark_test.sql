@@ -18,6 +18,10 @@
 --           under the parent is not the operator's own table, as under #429).
 --   PART E  coverage recorded for the renamed table is not discarded because the operator's table under the name
 --           carries no block (#518's rule, by the mark's oid).
+--   PART G  retire() releases the mark and anchors the row before the step runs (a direct call, or a lift that lost
+--           its lock race): the next tick still lifts the older install's block from the operator's table.
+--   PART H  a mark's oid shadows no stranger: a partition of the parent over another range holding the name is
+--           refused as under #1365, never a raise.
 --   PART C  the control: a marked row with no child_oid whose name still denotes the marked partition is
 --           write-blocked as before. Last, because its mark holds the database's one retirement slot.
 --
@@ -25,12 +29,12 @@
 -- cron.job and cron.alter_job and runs whatever the standing job holds at the top level, as tests/363 does.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2; B 5, 6, 7; C 21, 22;
--- D 31, 32, 33; E 41, 42, 43, 44), the operator's tables A 98, B 99 and E 95, and the impostor D 37, 38, so a write
--- to the wrong relation or a lost row cannot stand in for the right answer.
+-- D 31, 32, 33; E 41, 42, 43, 44; G 51, 52; H 61, 62), the operator's tables A 98, B 99, E 95 and G 93, and the
+-- impostor D 37, 38, so a write to the wrong relation or a lost row cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(37);
+select plan(49);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -213,6 +217,63 @@ select is((select array_agg(hi) from pgpm.archive_ledger
             where parent_table = 'pgpm_t364.e'::regclass and child_oid = :'e_oid'::oid and retired_at is null),
           array['5000'], 'E: the renamed table''s chunk is still recorded');
 select ok(not pgpm_t364.blocked(:'e_sq'), 'E: the operator''s table is not blocked');
+
+-- ============================================================================================================
+-- PART G: retire() anchors the row before the step sees it; the older install's block is still lifted
+-- ============================================================================================================
+create table pgpm_t364.g (id bigint primary key, payload text);
+insert into pgpm_t364.g values (51, 'orig'), (52, 'orig');
+call pgpm.transmute('pgpm_t364.g'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('pgpm_t364.g'::regclass, '60000');
+insert into pgpm_t364.g values (35005, 'frontier');
+create table public.g364_ref (id bigint primary key, p_id bigint references pgpm_t364.g(id));
+insert into public.g364_ref values (1, 35005);
+select child_name as g_doomed, child_oid as g_oid from pgpm.part where parent_table = 'pgpm_t364.g'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t364.g', :'g_doomed') and pgpm_t364.armed() <> 'select 1', 'G fixture: retire() dispatches the detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
+update cron.job set command = 'select 1';
+update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.g'::regclass and lo = '0';
+select format('alter table pgpm_t364.%I rename to g_kept', :'g_doomed') \gexec
+select format('create table pgpm_t364.%I (id bigint, payload text)', :'g_doomed') \gexec
+select format('insert into pgpm_t364.%I values (93, ''mine'')', :'g_doomed') \gexec
+select format('pgpm_t364.%I', :'g_doomed') as g_sq \gset
+select pgpm_t364.lay_block(:'g_sq');
+select ok(not pgpm.retire('pgpm_t364.g', :'g_doomed'), 'G fixture: retire() runs first, as a direct call or retain() would');
+select ok((select child_oid = :'g_oid'::oid and retiring_at is null from pgpm.part
+            where parent_table = 'pgpm_t364.g'::regclass and lo = '0'),
+  'G LIVENESS: retire() released the mark and anchored the row to the renamed table');
+select ok(pgpm_t364.blocked(:'g_sq'), 'G LIVENESS: the operator''s table still carries the older install''s block');
+call pgpm.maintain('pgpm_t364.g');
+update cron.job set command = 'select 1';
+select ok(not pgpm_t364.blocked(:'g_sq'), 'G: the next tick lifts it, though the row is now detached by hand');
+select lives_ok(format('insert into %s values (92, ''mine'')', :'g_sq'), 'G: the operator can write to their table again');
+select is(pgpm_t364.ids(:'g_sq'), array[92, 93]::bigint[], 'G: the operator''s table holds exactly its own rows');
+select is(pgpm_t364.ids('pgpm_t364.g_kept'), array[51, 52]::bigint[], 'G: the renamed table keeps ids 51, 52');
+
+-- ============================================================================================================
+-- PART H: a mark's oid shadows no stranger: a partition over another range under the name is still refused (#1365)
+-- ============================================================================================================
+create table pgpm_t364.h (id bigint primary key, payload text);
+insert into pgpm_t364.h values (61, 'orig'), (62, 'orig');
+call pgpm.transmute('pgpm_t364.h'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('pgpm_t364.h'::regclass, '60000');
+select child_name as h_doomed, child_oid as h_oid from pgpm.part where parent_table = 'pgpm_t364.h'::regclass and lo = '0' \gset
+select child_name as h_next from pgpm.part where parent_table = 'pgpm_t364.h'::regclass and lo = '10000' \gset
+-- an older install's mark on the partition, then the name moved to its neighbour over [10000, 20000)
+update pgpm.part set retiring_at = now(), retiring_oid = child_oid, child_oid = null
+ where parent_table = 'pgpm_t364.h'::regclass and lo = '0';
+select format('alter table pgpm_t364.%I rename to h_aside', :'h_doomed') \gexec
+select format('alter table pgpm_t364.%I rename to %I', :'h_next', :'h_doomed') \gexec
+select format('pgpm_t364.%I', :'h_doomed') as h_str \gset
+select ok(exists (select 1 from pg_inherits where inhparent = 'pgpm_t364.h'::regclass and inhrelid = to_regclass(:'h_str')::oid)
+          and to_regclass(:'h_str')::oid <> :'h_oid'::oid,
+  'H LIVENESS: the row''s name denotes another partition of the parent');
+select lives_ok(format('select pgpm._install_write_block(%L::regclass, %L)', 'pgpm_t364.h', :'h_doomed'),
+  'H: the step does not raise');
+select ok(exists (select 1 from pgpm.log where parent_table = 'pgpm_t364.h'::regclass and lo = '0'
+                   and action = 'fail_write_block_identity' and method like '%over another range%'),
+  'H: it refuses the stranger as a partition over another range');
+select ok(not pgpm_t364.blocked(:'h_str'), 'H: and blocks nothing');
 
 -- ============================================================================================================
 -- PART C: control, a marked row with no child_oid whose name still denotes the marked partition is blocked

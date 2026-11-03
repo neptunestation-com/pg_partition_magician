@@ -9,12 +9,14 @@
 # mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_renamed_detached.sh.
 #
-# FIVE mutations are required to fail against it (bench/mutations/mutate.py):
+# SEVEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   write_block_mark_unanchored     -- the pre-fix shape: the mark's oid anchors nothing. Parts A, B, D.
 #   write_block_stale_kept          -- refused, but a block an earlier tick laid stays. Part B.
 #   write_block_lift_under_parent   -- a block on an impostor attached to the parent is lifted too. Part D.
 #   write_block_mark_refuses_all    -- every marked row with no child_oid refused, the partition never blocked. Part C.
 #   coverage_reset_mark_unanchored  -- the renamed table's coverage discarded as unguarded. Part E.
+#   write_block_stale_lift_once     -- no lift once retire() has anchored the row first. Part G.
+#   write_block_mark_shadows_stranger -- a mark's oid hides a partition over another range under the name. Part H.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree

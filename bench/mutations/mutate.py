@@ -151,18 +151,10 @@ HT_CAPTURE_ARM_COMMENT = """       and not exists (select 1 from pg_class d
 # deliberately NOT anchored. Both live here as constants for the same reason the retire block does.
 WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid, p.retiring_oid into r
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
-  if found and r.child_oid is not null then
+  v_anchor := coalesce(r.child_oid, r.retiring_oid);   -- #1435: an older install's row is anchored by its mark
+  if found and v_anchor is not null then
     v_now := pgpm._part_rel(p_parent, p_child);
-    if v_now is not null and v_now::oid <> r.child_oid then
-      insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
-                format('%I.%I is oid %s now, not the oid %s recorded for this partition when it was created; refusing to write-block it',
-                       v_nsp, p_child, v_now::oid::text, r.child_oid));
-      return;
-    end if;
-  elsif found and r.retiring_oid is not null then   -- #1435: an older install's row, anchored by its mark
-    v_now := pgpm._part_rel(p_parent, p_child);
-    if v_now is not null and v_now::oid <> r.retiring_oid then
+    if v_now is not null and v_now::oid <> v_anchor then
       v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a where a.relid = p_parent::oid)
               and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block');
       if v_lifted then
@@ -170,13 +162,17 @@ WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid, p.retiring_oid
       end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
-                format('%I.%I is oid %s now, not the oid %s pgpm''s retirement recorded for this partition; refusing to write-block it%s',
-                       v_nsp, p_child, v_now::oid::text, r.retiring_oid,
+                format('%I.%I is oid %s now, not the oid %s %s; refusing to write-block it%s',
+                       v_nsp, p_child, v_now::oid::text, v_anchor,
+                       case when r.child_oid is not null then 'recorded for this partition when it was created'
+                            else 'pgpm''s retirement recorded for this partition' end,
                        case when v_lifted then ', and lifting the write block an earlier tick put on it' else '' end));
       return;
     end if;
-  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
-    insert into pgpm.log (parent_table, action, lo, hi, method)   -- #1365: a row with no anchor, by its range
+  end if;
+  if found and r.child_oid is null   -- #1365: a row with no oid of its own, by its range (a mark's oid shadows nothing)
+     and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
+    insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
               format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
                      v_nsp, p_child, p_parent, r.lo, r.hi));
@@ -1524,11 +1520,14 @@ MUTATIONS = {
         "a partition that was simply dropped, AND stops tests/94's poison raising at all, which "
         "quietly retires the loop-isolation coverage that whole file exists for. Part C of "
         "tests/104 is what catches it.",
-        [("    if v_now is not null and v_now::oid <> r.child_oid then\n",
-          "    if v_now::oid is distinct from r.child_oid then\n", 1),
-         ("                       v_nsp, p_child, v_now::oid::text, r.child_oid));\n",
-          "                       v_nsp, p_child, coalesce(v_now::oid::text, 'nothing'), "
-          "r.child_oid));\n", 1)],
+        [("    if v_now is not null and v_now::oid <> v_anchor then\n",
+          "    if v_now::oid is distinct from v_anchor then\n", 1),
+         ("    v_now := pgpm._part_rel(p_parent, p_child);\n    if v_now::oid is distinct from v_anchor then\n"
+          "      v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a",
+          "    v_now := pgpm._part_rel(p_parent, p_child);\n    if v_now::oid is distinct from v_anchor then\n"
+          "      v_lifted := v_now is not null and not exists (select 1 from pg_partition_ancestors(v_now) a", 1),
+         ("                       v_nsp, p_child, v_now::oid::text, v_anchor,\n",
+          "                       v_nsp, p_child, coalesce(v_now::oid::text, 'nothing'), v_anchor,\n", 1)],
     ),
     "write_block_remove_anchored": (
         "bench/write_block_identity.sh",
@@ -8260,7 +8259,8 @@ select ok(
         "Pre-#705 _enforce_write_blocks: every pgpm.part row marked attached is walked, so a table the operator "
         "detached by hand gets pgpm_write_block once retention reaches its range and refuses every write. One "
         "site, the loop's query. tests/307 part A catches it.",
-        [("                  and not pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)\n", "", 1)],
+        [("      if pgpm._part_detached_by_hand(p_parent, r.child_oid, r.retiring_at) then\n",
+          "      if false then\n", 1)],
     ),
     "archive_trusts_part_attached": (
         "bench/write_block_skips_hand_detached.sh",
@@ -16462,8 +16462,7 @@ MUTATIONS["write_block_unanchored_stranger_unchecked"] = (
     "PR #1392 round 3: _install_write_block does not compare an unanchored row's relation by its range, so the write "
     "block goes on an operator's table under the row's name, attached over another range, and its writes are "
     "refused. One clause. tests/355 part G catches it.",
-    [("  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger\n",
-      "  elsif false and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger\n", 1)],
+    [("  if found and r.child_oid is null   -- #1365:", "  if false   -- #1365:", 1)],
 )
 
 # PR #1392 round 4: an unanchored row's mark judged by the relation it marks, over the marks themselves. One clause each.
@@ -17085,13 +17084,13 @@ MUTATIONS["retire_release_attached_elsewhere"] = (
 # old name blocked, and the block was never lifted once retire() anchored the row. The mark's oid is now the anchor,
 # and a refusal by it lifts a block found on a relation that is no partition of the parent.
 # bench/write_block_reads_mark.sh runs tests/364 against the mutant.
-WRITE_BLOCK_MARK_ARM = "  elsif found and r.retiring_oid is not null then   -- #1435: an older install's row, anchored by its mark\n"
+WRITE_BLOCK_MARK_ARM = "  v_anchor := coalesce(r.child_oid, r.retiring_oid);   -- #1435: an older install's row is anchored by its mark\n"
 MUTATIONS["write_block_mark_unanchored"] = (
     "bench/write_block_reads_mark.sh",
     "Issue #1435, the pre-fix shape: _install_write_block reads no anchor from a retirement mark, so an older "
     "install's row is judged by its range alone and the operator's plain table under the old name is blocked. One "
     "site. tests/364 parts A, B and D catch it.",
-    [(WRITE_BLOCK_MARK_ARM, WRITE_BLOCK_MARK_ARM.replace("r.retiring_oid is not null", "false"), 1)],
+    [(WRITE_BLOCK_MARK_ARM, WRITE_BLOCK_MARK_ARM.replace("coalesce(r.child_oid, r.retiring_oid)", "r.child_oid"), 1)],
 )
 MUTATIONS["write_block_stale_kept"] = (
     "bench/write_block_reads_mark.sh",
@@ -17113,8 +17112,8 @@ MUTATIONS["write_block_mark_refuses_all"] = (
     "Issue #1435, the anchor read as a refusal: every marked row with no child_oid is refused, so a partition whose "
     "name still denotes the marked relation is never blocked and its retirement never archives. One clause. "
     "tests/364 part C catches it.",
-    [("    if v_now is not null and v_now::oid <> r.retiring_oid then\n",
-      "    if v_now is not null then\n", 1)],
+    [("    if v_now is not null and v_now::oid <> v_anchor then\n",
+      "    if v_now is not null and (v_now::oid <> v_anchor or r.child_oid is null) then\n", 1)],
 )
 MUTATIONS["coverage_reset_mark_unanchored"] = (
     "bench/write_block_reads_mark.sh",
@@ -17124,6 +17123,23 @@ MUTATIONS["coverage_reset_mark_unanchored"] = (
     [("      v_substituted := coalesce(r.child_oid, r.retiring_oid) is not null and v_now is not null   -- #1435: the mark's oid anchors\n"
       "                       and v_now::oid <> coalesce(r.child_oid, r.retiring_oid);\n",
       "      v_substituted := r.child_oid is not null and v_now is not null and v_now::oid <> r.child_oid;\n", 1)],
+)
+MUTATIONS["write_block_stale_lift_once"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 verification V-01 and P1-03: the step visits no row detached by hand, so a block an older pgpm put on "
+    "the operator's table is lifted only if the step reaches the row before retire()'s release anchors it, and never "
+    "after a lift that lost its lock race. One site. tests/364 part G catches it.",
+    [("        if v_now is not null and v_now::oid <> r.child_oid\n"
+      "           and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block') then\n",
+      "        if false then\n", 1)],
+)
+MUTATIONS["write_block_mark_shadows_stranger"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 verification P1-02: a marked row with no child_oid is compared by its mark alone, so a partition of the "
+    "parent over another range holding its name (which _part_rel withholds) is never refused, and the step raises "
+    "42P01 about a relation that exists. One clause. tests/364 part H catches it.",
+    [("  if found and r.child_oid is null   -- #1365:",
+      "  if found and r.child_oid is null and r.retiring_oid is null   -- #1365:", 1)],
 )
 
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the

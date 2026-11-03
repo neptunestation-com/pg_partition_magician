@@ -5150,9 +5150,12 @@ $$;
 -- the name against coalesce(child_oid, retiring_oid). Without it, an operator who renamed the detached retirement
 -- and created a plain table under the old name had that table blocked by the step, which maintain() runs before
 -- retain(); retire()'s release then anchored the row, the step skipped it as detached by hand from then on, and the
--- block was never lifted. So a refusal by the mark's oid also LIFTS a block found on a relation that is no
--- partition of the parent: no current pgpm puts one there, so it is an earlier tick's, and the refusal is the last
--- time this step will see that relation. A relation under the parent keeps any block it has, as under #429.
+-- block was never lifted. So any identity refusal also LIFTS a block found on a relation that is no partition of
+-- the parent: no current pgpm puts one there, so it is an older pgpm's, and _enforce_write_blocks asks for the
+-- refusal on every tick while such a block stands, a row detached by hand included, so a lift that loses its lock
+-- race is retried (PR #1436 verification V-01). A relation under the parent keeps any block it has, as under #429.
+-- The mark's oid anchors only what it records: a row with no child_oid is still compared by its range as well
+-- (#1365), whatever its mark (PR #1436 verification P1-02).
 --
 -- `v_now is not null and ... <> ...`, NOT the `is distinct from` used by the identity checks in
 -- retire() and _archive_step, and the difference is deliberate. Those two fire on a name that
@@ -5173,24 +5176,16 @@ $$;
 -- once per re-enable, naming the state it found.
 create or replace function pgpm._install_write_block(p_parent regclass, p_child name)
 returns void language plpgsql as $$
-declare v_nsp name; v_child regclass; v_now regclass; v_enabled "char"; v_lifted boolean; r record;
+declare v_nsp name; v_child regclass; v_now regclass; v_anchor oid; v_enabled "char"; v_lifted boolean; r record;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
 
   select p.lo, p.hi, p.child_oid, p.retiring_oid into r
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
-  if found and r.child_oid is not null then
+  v_anchor := coalesce(r.child_oid, r.retiring_oid);   -- #1435: an older install's row is anchored by its mark
+  if found and v_anchor is not null then
     v_now := pgpm._part_rel(p_parent, p_child);
-    if v_now is not null and v_now::oid <> r.child_oid then
-      insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
-                format('%I.%I is oid %s now, not the oid %s recorded for this partition when it was created; refusing to write-block it',
-                       v_nsp, p_child, v_now::oid::text, r.child_oid));
-      return;
-    end if;
-  elsif found and r.retiring_oid is not null then   -- #1435: an older install's row, anchored by its mark
-    v_now := pgpm._part_rel(p_parent, p_child);
-    if v_now is not null and v_now::oid <> r.retiring_oid then
+    if v_now is not null and v_now::oid <> v_anchor then
       v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a where a.relid = p_parent::oid)
               and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block');
       if v_lifted then
@@ -5198,13 +5193,17 @@ begin
       end if;
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
-                format('%I.%I is oid %s now, not the oid %s pgpm''s retirement recorded for this partition; refusing to write-block it%s',
-                       v_nsp, p_child, v_now::oid::text, r.retiring_oid,
+                format('%I.%I is oid %s now, not the oid %s %s; refusing to write-block it%s',
+                       v_nsp, p_child, v_now::oid::text, v_anchor,
+                       case when r.child_oid is not null then 'recorded for this partition when it was created'
+                            else 'pgpm''s retirement recorded for this partition' end,
                        case when v_lifted then ', and lifting the write block an earlier tick put on it' else '' end));
       return;
     end if;
-  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
-    insert into pgpm.log (parent_table, action, lo, hi, method)   -- #1365: a row with no anchor, by its range
+  end if;
+  if found and r.child_oid is null   -- #1365: a row with no oid of its own, by its range (a mark's oid shadows nothing)
+     and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
+    insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
               format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
                      v_nsp, p_child, p_parent, r.lo, r.hi));
@@ -5355,13 +5354,23 @@ begin
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_boundary := pgpm._retain_boundary(cfg);
 
-  -- #705: a table the operator detached by hand is theirs, not a partition: no block goes on it and none
-  -- is lifted or its coverage judged (see _part_detached_by_hand; retire() refuses and logs it)
-  for r in select child_name, lo, hi, child_oid, retiring_oid from pgpm.part where parent_table = p_parent and attached
-                  and not pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)
+  for r in select child_name, lo, hi, child_oid, retiring_oid, retiring_at from pgpm.part where parent_table = p_parent and attached
     order by hi asc
   loop
     begin
+      -- #705: a table the operator detached by hand is theirs, not a partition: no block goes on it and none
+      -- is lifted or its coverage judged (see _part_detached_by_hand; retire() refuses and logs it). #1435: but a
+      -- block an older pgpm put on ANOTHER table under the row's name is lifted, by the identity refusal, on every
+      -- tick until it is gone, so one that lost its lock race, or one retire()'s release anchored the row before
+      -- this step saw, is not stranded.
+      if pgpm._part_detached_by_hand(p_parent, r.child_oid, r.retiring_at) then
+        v_now := pgpm._part_rel(p_parent, r.child_name);
+        if v_now is not null and v_now::oid <> r.child_oid
+           and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block') then
+          perform pgpm._install_write_block(p_parent, r.child_name);   -- refuses it, and lifts the block
+        end if;
+        continue;
+      end if;
       v_nsp := pgpm._child_nsp(p_parent, r.child_name);   -- #727: the partition's own schema, not the parent's
       v_eligible := v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);
 
