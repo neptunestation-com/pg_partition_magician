@@ -5115,6 +5115,35 @@ begin
 end;
 $$;
 
+-- _lift_stale_write_blocks: lift pgpm_write_block from every table named p_child, in the row's own schema
+-- (_child_nsp) or the parent's, that is not p_anchor and no partition of p_parent, and return their names (null when
+-- none). No current pgpm puts a block on such a table, so each is an older pgpm's: v0.5.0 and v0.6.0 blocked whatever
+-- held a partition's name, the operator's own table included (#1435). Both schemas, because the row's schema follows
+-- its oid (#727), so once a retirement the operator moved to another schema anchors the row, the table an older tick
+-- blocked under the old name is in the schema the name was resolved in then, the parent's (PR #1436 verification,
+-- round 2 V-01). p_anchor, the row's own relation, keeps any block it has: a table detached by hand keeps the block it
+-- had (#705), for the operator to drop.
+create or replace function pgpm._lift_stale_write_blocks(p_parent regclass, p_child name, p_anchor oid)
+returns text language plpgsql as $$
+declare r record; v_lifted_q text;
+begin
+  for r in select c.oid, n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+            where c.relname = p_child   -- part-row-by-name: every namesake in two schemas, each judged by oid below
+              and c.relnamespace in (select oid from pg_namespace where nspname = pgpm._child_nsp(p_parent, p_child)
+                                     union select relnamespace from pg_class where oid = p_parent)
+              and c.oid is distinct from p_anchor
+              and exists (select 1 from pg_trigger t where t.tgrelid = c.oid and t.tgname = 'pgpm_write_block')
+              and not exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = c.oid)
+              and not exists (select 1 from pg_partition_ancestors(c.oid) a where a.relid = p_parent::oid)
+  loop
+    -- by-name-ok: a namesake that took the name since loses only a trigger named pgpm_write_block (_remove_write_block)
+    execute format('drop trigger if exists pgpm_write_block on %I.%I', r.nspname, p_child);   -- part-row-by-name: the namesake judged above
+    v_lifted_q := concat_ws(', ', v_lifted_q, format('%I.%I', r.nspname, p_child));   -- part-row-by-name: text naming the namesake lifted above, resolves nothing
+  end loop;
+  return v_lifted_q;
+end;
+$$;
+
 -- idempotent: on a child that is already blocked it only checks the trigger's enable state (the #450
 -- note below), so a repeat _enforce_write_blocks tick (every maintain() call revisits every attached
 -- child) never raises a duplicate-trigger error.
@@ -5176,7 +5205,7 @@ $$;
 -- once per re-enable, naming the state it found.
 create or replace function pgpm._install_write_block(p_parent regclass, p_child name)
 returns void language plpgsql as $$
-declare v_nsp name; v_child regclass; v_now regclass; v_anchor oid; v_enabled "char"; v_lifted boolean; r record;
+declare v_nsp name; v_child regclass; v_now regclass; v_anchor oid; v_enabled "char"; v_lifted text; r record;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
 
@@ -5186,18 +5215,14 @@ begin
   if found and v_anchor is not null then
     v_now := pgpm._part_rel(p_parent, p_child);
     if v_now is not null and v_now::oid <> v_anchor then
-      v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a where a.relid = p_parent::oid)
-              and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block');
-      if v_lifted then
-        perform pgpm._remove_write_block(p_parent, p_child);
-      end if;
+      v_lifted := pgpm._lift_stale_write_blocks(p_parent, p_child, v_anchor);
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
                 format('%I.%I is oid %s now, not the oid %s %s; refusing to write-block it%s',
                        v_nsp, p_child, v_now::oid::text, v_anchor,
                        case when r.child_oid is not null then 'recorded for this partition when it was created'
                             else 'pgpm''s retirement recorded for this partition' end,
-                       case when v_lifted then ', and lifting the write block an earlier tick put on it' else '' end));
+                       case when v_lifted is not null then format(', and lifting the write block an earlier tick put on %s', v_lifted) else '' end));
       return;
     end if;
   end if;
@@ -5347,7 +5372,7 @@ create or replace function pgpm._enforce_write_blocks(p_parent regclass)
 returns void language plpgsql as $$
 declare
   cfg pgpm.config; v_boundary text; v_nsp name; r record; v_eligible boolean; v_chunks bigint;
-  v_now regclass; v_substituted boolean;
+  v_now regclass; v_substituted boolean; v_lifted text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5360,14 +5385,16 @@ begin
     begin
       -- #705: a table the operator detached by hand is theirs, not a partition: no block goes on it and none
       -- is lifted or its coverage judged (see _part_detached_by_hand; retire() refuses and logs it). #1435: but a
-      -- block an older pgpm put on ANOTHER table under the row's name is lifted, by the identity refusal, on every
+      -- block an older pgpm put on ANOTHER table under the row's name is lifted (_lift_stale_write_blocks), on every
       -- tick until it is gone, so one that lost its lock race, or one retire()'s release anchored the row before
       -- this step saw, is not stranded.
       if pgpm._part_detached_by_hand(p_parent, r.child_oid, r.retiring_at) then
-        v_now := pgpm._part_rel(p_parent, r.child_name);
-        if v_now is not null and v_now::oid <> r.child_oid
-           and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block') then
-          perform pgpm._install_write_block(p_parent, r.child_name);   -- refuses it, and lifts the block
+        v_lifted := pgpm._lift_stale_write_blocks(p_parent, r.child_name, r.child_oid);
+        if v_lifted is not null then
+          insert into pgpm.log (parent_table, action, lo, hi, method)
+            values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
+                    format('%s held the name of %s''s partition %I over [%s, %s), whose table (oid %s) was detached by hand, and is no partition of it; refusing to write-block it, and lifting the write block an earlier tick put on %s',
+                           v_lifted, p_parent, r.child_name, r.lo, r.hi, r.child_oid, v_lifted));
         end if;
         continue;
       end if;

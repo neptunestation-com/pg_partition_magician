@@ -155,18 +155,14 @@ WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid, p.retiring_oid
   if found and v_anchor is not null then
     v_now := pgpm._part_rel(p_parent, p_child);
     if v_now is not null and v_now::oid <> v_anchor then
-      v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a where a.relid = p_parent::oid)
-              and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block');
-      if v_lifted then
-        perform pgpm._remove_write_block(p_parent, p_child);
-      end if;
+      v_lifted := pgpm._lift_stale_write_blocks(p_parent, p_child, v_anchor);
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
                 format('%I.%I is oid %s now, not the oid %s %s; refusing to write-block it%s',
                        v_nsp, p_child, v_now::oid::text, v_anchor,
                        case when r.child_oid is not null then 'recorded for this partition when it was created'
                             else 'pgpm''s retirement recorded for this partition' end,
-                       case when v_lifted then ', and lifting the write block an earlier tick put on it' else '' end));
+                       case when v_lifted is not null then format(', and lifting the write block an earlier tick put on %s', v_lifted) else '' end));
       return;
     end if;
   end if;
@@ -1522,10 +1518,6 @@ MUTATIONS = {
         "tests/104 is what catches it.",
         [("    if v_now is not null and v_now::oid <> v_anchor then\n",
           "    if v_now::oid is distinct from v_anchor then\n", 1),
-         ("    v_now := pgpm._part_rel(p_parent, p_child);\n    if v_now::oid is distinct from v_anchor then\n"
-          "      v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a",
-          "    v_now := pgpm._part_rel(p_parent, p_child);\n    if v_now::oid is distinct from v_anchor then\n"
-          "      v_lifted := v_now is not null and not exists (select 1 from pg_partition_ancestors(v_now) a", 1),
          ("                       v_nsp, p_child, v_now::oid::text, v_anchor,\n",
           "                       v_nsp, p_child, coalesce(v_now::oid::text, 'nothing'), v_anchor,\n", 1)],
     ),
@@ -17096,16 +17088,16 @@ MUTATIONS["write_block_stale_kept"] = (
     "bench/write_block_reads_mark.sh",
     "Issue #1435, the refusal without the lift: a block an earlier tick put on the operator's table stays, and the "
     "step never visits the row again once retire() anchors it. One site. tests/364 part B catches it.",
-    [("      if v_lifted then\n        perform pgpm._remove_write_block(p_parent, p_child);\n",
-      "      if false then\n        perform pgpm._remove_write_block(p_parent, p_child);\n", 1)],
+    [("    execute format('drop trigger if exists pgpm_write_block on %I.%I', r.nspname, p_child);   -- part-row-by-name: the namesake judged above\n",
+      "", 1)],
 )
 MUTATIONS["write_block_lift_under_parent"] = (
     "bench/write_block_reads_mark.sh",
     "Issue #1435, the lift without its 'no partition of the parent' clause: a block on an impostor attached to the "
     "parent under the name is lifted as well, which #429 keeps. One clause. tests/364 part D catches it.",
-    [("      v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a where a.relid = p_parent::oid)\n"
-      "              and exists",
-      "      v_lifted := exists", 1)],
+    [("              and not exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = c.oid)\n"
+      "              and not exists (select 1 from pg_partition_ancestors(c.oid) a where a.relid = p_parent::oid)\n  loop\n",
+      "  loop\n", 1)],
 )
 MUTATIONS["write_block_mark_refuses_all"] = (
     "bench/write_block_reads_mark.sh",
@@ -17129,9 +17121,16 @@ MUTATIONS["write_block_stale_lift_once"] = (
     "PR #1436 verification V-01 and P1-03: the step visits no row detached by hand, so a block an older pgpm put on "
     "the operator's table is lifted only if the step reaches the row before retire()'s release anchors it, and never "
     "after a lift that lost its lock race. One site. tests/364 part G catches it.",
-    [("        if v_now is not null and v_now::oid <> r.child_oid\n"
-      "           and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block') then\n",
-      "        if false then\n", 1)],
+    [("        v_lifted := pgpm._lift_stale_write_blocks(p_parent, r.child_name, r.child_oid);\n",
+      "        v_lifted := null;\n", 1)],
+)
+MUTATIONS["write_block_lift_own_schema_only"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 2 V-01: the lift looks for the operator's table in the row's own schema only, which follows the "
+    "anchor, so once a retirement the operator moved to another schema anchors the row, the block an older tick put "
+    "under the old name in the parent's schema is never lifted. One clause. tests/364 part I catches it.",
+    [("\n                                     union select relnamespace from pg_class where oid = p_parent)\n",
+      ")\n", 1)],
 )
 MUTATIONS["write_block_mark_shadows_stranger"] = (
     "bench/write_block_reads_mark.sh",

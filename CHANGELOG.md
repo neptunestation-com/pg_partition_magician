@@ -12,12 +12,14 @@
   relation under the name is no partition of the parent and carries `pgpm_write_block`, lifts it, saying so in
   the refusal. The step asks on every tick while such a block stands, including for a row it now skips as detached
   by hand, so a lift that times out behind a reader, or a row `retire` anchored before the step ran, does not
-  strand the block. A row with no `child_oid` is still compared by its range as well (#1365), whatever its mark.
-  An impostor attached to the parent keeps any block it has, as before. The #518 coverage discard
+  strand the block. It looks for the block both in the schema the row's anchor now lives in and in the parent's,
+  so a retirement moved to another schema does not hide the block left under the old name. A row with no
+  `child_oid` is still compared by its range as well (#1365), whatever its mark. An impostor attached to the parent keeps any block it has, as before. The #518 coverage discard
   reads the same anchor, so the renamed table's coverage is not discarded because the table under its old name
   is unblocked. `bench/write_block_reads_mark.sh` runs `tests/364` (mutations `write_block_mark_unanchored`,
   `write_block_stale_kept`, `write_block_lift_under_parent`, `write_block_mark_refuses_all`,
-  `coverage_reset_mark_unanchored`, `write_block_stale_lift_once`, `write_block_mark_shadows_stranger`).
+  `coverage_reset_mark_unanchored`, `write_block_stale_lift_once`, `write_block_mark_shadows_stranger`,
+  `write_block_lift_own_schema_only`).
 
 - **`retire` releases a detached retirement the operator renamed, and refuses it as detached by hand** (#1427).
   While retention still reached the range, `retire` met such a table, resolved the row's name, found nothing,
