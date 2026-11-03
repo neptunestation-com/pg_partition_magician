@@ -103,7 +103,7 @@ insert into pgpm_t364.a values (35005, 'frontier');
 create table public.a364_ref (id bigint primary key, p_id bigint references pgpm_t364.a(id));
 insert into public.a364_ref values (1, 35005);
 select child_name as a_doomed, child_oid as a_oid from pgpm.part where parent_table = 'pgpm_t364.a'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('pgpm_t364.a', :'a_doomed') and pgpm_t364.armed() <> 'select 1', 'A fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.a', :'a_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: A: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 -- the row an older install left: the mark's oid alone
@@ -112,20 +112,20 @@ select format('alter table pgpm_t364.%I rename to a_kept', :'a_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'a_doomed') \gexec
 select format('insert into pgpm_t364.%I values (98, ''mine'')', :'a_doomed') \gexec
 select format('pgpm_t364.%I', :'a_doomed') as a_sq \gset
-select is(pgpm._disown_unvouched_retirements(), 0, 'A GUARD: the upgrade''s pass leaves the row''s mark');
+select is(pgpm._disown_unvouched_retirements(), 0, 'GUARD: A: the upgrade''s pass leaves the row''s mark');
 select ok((select child_oid is null and retiring_oid = :'a_oid'::oid and attached from pgpm.part
             where parent_table = 'pgpm_t364.a'::regclass and lo = '0'),
-  'A LIVENESS: the row is attached and records the retirement by its mark alone');
+  'LIVENESS: A: the row is attached and records the retirement by its mark alone');
 select ok(not exists (select 1 from pg_inherits where inhrelid = to_regclass(:'a_sq')::oid),
-  'A LIVENESS: a plain table of the operator''s, no partition, holds the old name');
-select ok(pgpm_t364.reaches('pgpm_t364.a'), 'A LIVENESS: retention reaches the range, so the step would block it');
+  'LIVENESS: A: a plain table of the operator''s, no partition, holds the old name');
+select ok(pgpm_t364.reaches('pgpm_t364.a'), 'LIVENESS: A: retention reaches the range, so the step would block it');
 call pgpm.maintain('pgpm_t364.a');
 call pgpm.maintain('pgpm_t364.a');
 call pgpm.maintain('pgpm_t364.a');
 -- the ticks dispatched the next partition's detach into the database's one detach slot; free it for the parts below
 update cron.job set command = 'select 1';
 select ok(exists (select 1 from pgpm.log where parent_table = 'pgpm_t364.a'::regclass and lo = '0' and action = 'retain_disown'),
-  'A LIVENESS: retain() reached the row and released it');
+  'LIVENESS: A: retain() reached the row and released it');
 select ok(not pgpm_t364.blocked(:'a_sq'), 'A: the operator''s table carries no write block');
 select lives_ok(format('insert into %s values (97, ''mine'')', :'a_sq'), 'A: the operator can write to their table');
 select is(pgpm_t364.ids(:'a_sq'), array[97, 98]::bigint[], 'A: the operator''s table holds exactly its own rows');
@@ -149,7 +149,7 @@ insert into pgpm_t364.b values (35005, 'frontier');
 create table public.b364_ref (id bigint primary key, p_id bigint references pgpm_t364.b(id));
 insert into public.b364_ref values (1, 35005);
 select child_name as b_doomed, child_oid as b_oid from pgpm.part where parent_table = 'pgpm_t364.b'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('pgpm_t364.b', :'b_doomed') and pgpm_t364.armed() <> 'select 1', 'B fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.b', :'b_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: B: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.b'::regclass and lo = '0';
@@ -159,8 +159,8 @@ select format('insert into pgpm_t364.%I values (99, ''mine'')', :'b_doomed') \ge
 select format('pgpm_t364.%I', :'b_doomed') as b_sq \gset
 select pgpm_t364.lay_block(:'b_sq');
 select throws_like(format('insert into %s values (96, ''mine'')', :'b_sq'), '%past its retention boundary%',
-  'B LIVENESS: the operator''s table is blocked before the tick');
-select ok(pgpm_t364.reaches('pgpm_t364.b'), 'B LIVENESS: retention reaches the range');
+  'LIVENESS: B: the operator''s table is blocked before the tick');
+select ok(pgpm_t364.reaches('pgpm_t364.b'), 'LIVENESS: B: retention reaches the range');
 call pgpm.maintain('pgpm_t364.b');
 update cron.job set command = 'select 1';
 select ok(pgpm_t364.blocked(:'b_sq'), 'B: the tick keeps the block, which it cannot prove it laid');
@@ -186,7 +186,7 @@ insert into pgpm_t364.d values (35005, 'frontier');
 create table public.d364_ref (id bigint primary key, p_id bigint references pgpm_t364.d(id));
 insert into public.d364_ref values (1, 35005);
 select child_name as d_doomed, child_oid as d_oid from pgpm.part where parent_table = 'pgpm_t364.d'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('pgpm_t364.d', :'d_doomed') and pgpm_t364.armed() <> 'select 1', 'D fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.d', :'d_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: D: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.d'::regclass and lo = '0';
@@ -197,8 +197,8 @@ select format('alter table pgpm_t364.d attach partition pgpm_t364.%I for values 
 select format('pgpm_t364.%I', :'d_doomed') as d_imp \gset
 select pgpm_t364.lay_block(:'d_imp');
 select ok(exists (select 1 from pg_inherits where inhparent = 'pgpm_t364.d'::regclass and inhrelid = to_regclass(:'d_imp')::oid),
-  'D LIVENESS: the impostor is a partition of the parent, by oid');
-select ok(pgpm_t364.blocked(:'d_imp'), 'D LIVENESS: the impostor carries a block');
+  'LIVENESS: D: the impostor is a partition of the parent, by oid');
+select ok(pgpm_t364.blocked(:'d_imp'), 'LIVENESS: D: the impostor carries a block');
 select pgpm._install_write_block('pgpm_t364.d'::regclass, :'d_doomed');
 select ok(exists (select 1 from pgpm.log where parent_table = 'pgpm_t364.d'::regclass and lo = '0' and action = 'fail_write_block_identity'),
   'D: the impostor is refused');
@@ -219,7 +219,7 @@ insert into pgpm_t364.e values (35005, 'frontier');
 create table public.e364_ref (id bigint primary key, p_id bigint references pgpm_t364.e(id));
 insert into public.e364_ref values (1, 35005);
 select child_name as e_doomed, child_oid as e_oid from pgpm.part where parent_table = 'pgpm_t364.e'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('pgpm_t364.e', :'e_doomed') and pgpm_t364.armed() <> 'select 1', 'E fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.e', :'e_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: E: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.e'::regclass and lo = '0';
@@ -229,8 +229,8 @@ select format('alter table pgpm_t364.%I rename to e_kept', :'e_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'e_doomed') \gexec
 select format('insert into pgpm_t364.%I values (95, ''mine'')', :'e_doomed') \gexec
 select format('pgpm_t364.%I', :'e_doomed') as e_sq \gset
-select ok(not pgpm_t364.blocked(:'e_sq'), 'E LIVENESS: the table under the name carries no block, so coverage looks unguarded');
-select ok(pgpm_t364.reaches('pgpm_t364.e'), 'E LIVENESS: retention reaches the range');
+select ok(not pgpm_t364.blocked(:'e_sq'), 'LIVENESS: E: the table under the name carries no block, so coverage looks unguarded');
+select ok(pgpm_t364.reaches('pgpm_t364.e'), 'LIVENESS: E: retention reaches the range');
 select pgpm._enforce_write_blocks('pgpm_t364.e'::regclass);
 select ok(not exists (select 1 from pgpm.log where parent_table = 'pgpm_t364.e'::regclass and action = 'archive_coverage_reset'),
   'E: no coverage is discarded');
@@ -250,7 +250,7 @@ insert into pgpm_t364.g values (35005, 'frontier');
 create table public.g364_ref (id bigint primary key, p_id bigint references pgpm_t364.g(id));
 insert into public.g364_ref values (1, 35005);
 select child_name as g_doomed, child_oid as g_oid from pgpm.part where parent_table = 'pgpm_t364.g'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('pgpm_t364.g', :'g_doomed') and pgpm_t364.armed() <> 'select 1', 'G fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.g', :'g_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: G: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.g'::regclass and lo = '0';
@@ -259,11 +259,11 @@ select format('create table pgpm_t364.%I (id bigint, payload text)', :'g_doomed'
 select format('insert into pgpm_t364.%I values (93, ''mine'')', :'g_doomed') \gexec
 select format('pgpm_t364.%I', :'g_doomed') as g_sq \gset
 select pgpm_t364.lay_block(:'g_sq');   -- the block the older tick laid
-select ok(pgpm_t364.blocked(:'g_sq'), 'G LIVENESS: the operator''s table carries the older install''s block');
-select ok(not pgpm.retire('pgpm_t364.g', :'g_doomed'), 'G fixture: retire() runs before any tick');
+select ok(pgpm_t364.blocked(:'g_sq'), 'LIVENESS: G: the operator''s table carries the older install''s block');
+select ok(not pgpm.retire('pgpm_t364.g', :'g_doomed'), 'fixture: G: retire() runs before any tick');
 select ok((select child_oid = :'g_oid'::oid and retiring_at is null from pgpm.part
             where parent_table = 'pgpm_t364.g'::regclass and lo = '0'),
-  'G LIVENESS: retire() released the mark and anchored the row to the renamed table');
+  'LIVENESS: G: retire() released the mark and anchored the row to the renamed table');
 select is((select array_agg(d) from pgpm.log, pgpm_t364.logged_drops(method) d
             where parent_table = 'pgpm_t364.g'::regclass and lo = '0' and action = 'retain_disown'),
           array[format('drop trigger if exists pgpm_write_block on %s;', :'g_sq')],
@@ -291,7 +291,7 @@ insert into pgpm_t364.i values (35005, 'frontier');
 create table public.i364_ref (id bigint primary key, p_id bigint references pgpm_t364.i(id));
 insert into public.i364_ref values (1, 35005);
 select child_name as i_doomed, child_oid as i_oid from pgpm.part where parent_table = 'pgpm_t364.i'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('pgpm_t364.i', :'i_doomed') and pgpm_t364.armed() <> 'select 1', 'I fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.i', :'i_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: I: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.i'::regclass and lo = '0';
@@ -301,10 +301,10 @@ select format('create table pgpm_t364.%I (id bigint, payload text)', :'i_doomed'
 select format('insert into pgpm_t364.%I values (91, ''mine'')', :'i_doomed') \gexec
 select format('pgpm_t364.%I', :'i_doomed') as i_sq \gset
 select pgpm_t364.lay_block(:'i_sq');
-select ok(not pgpm.retire('pgpm_t364.i', :'i_doomed'), 'I fixture: retire() runs before any tick');
+select ok(not pgpm.retire('pgpm_t364.i', :'i_doomed'), 'fixture: I: retire() runs before any tick');
 select ok((select child_oid = :'i_oid'::oid from pgpm.part where parent_table = 'pgpm_t364.i'::regclass and lo = '0')
           and to_regclass('pgpm_t364_keep.i_kept')::oid = :'i_oid'::oid,
-  'I LIVENESS: the row is anchored to the renamed table, now in another schema');
+  'LIVENESS: I: the row is anchored to the renamed table, now in another schema');
 select ok(pgpm_t364.blocked(:'i_sq'), 'I: the block in the parent''s schema stays');
 select is((select array_agg(d) from pgpm.log, pgpm_t364.logged_drops(method) d
             where parent_table = 'pgpm_t364.i'::regclass and lo = '0' and action = 'retain_disown'),
@@ -327,7 +327,7 @@ insert into "pgpm T364 Q".q values (35005, 'frontier');
 create table public.q364_ref (id bigint primary key, p_id bigint references "pgpm T364 Q".q(id));
 insert into public.q364_ref values (1, 35005);
 select child_name as q_doomed, child_oid as q_oid from pgpm.part where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('"pgpm T364 Q".q', :'q_doomed') and pgpm_t364.armed() <> 'select 1', 'Q fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('"pgpm T364 Q".q', :'q_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: Q: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0';
@@ -337,9 +337,9 @@ select format('create table "pgpm T364 Q".%I (id bigint, payload text)', :'q_doo
 select format('insert into "pgpm T364 Q".%I values (74, ''mine'')', :'q_doomed') \gexec
 select format('%I.%I', 'pgpm T364 Q', :'q_doomed') as q_sq \gset
 select pgpm_t364.lay_block(:'q_sq');
-select ok(not pgpm.retire('"pgpm T364 Q".q', :'q_doomed'), 'Q fixture: retire() runs before any tick');
+select ok(not pgpm.retire('"pgpm T364 Q".q', :'q_doomed'), 'fixture: Q: retire() runs before any tick');
 select ok(pgpm_t364.blocked(:'q_sq') and to_regclass('pgpm_t364_keep.q_kept')::oid = :'q_oid'::oid,
-  'Q LIVENESS: the block stands in the parent''s quoted schema, the renamed retirement in another');
+  'LIVENESS: Q: the block stands in the parent''s quoted schema, the renamed retirement in another');
 select is((select array_agg(d) from pgpm.log, pgpm_t364.logged_drops(method) d
             where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0' and action = 'retain_disown'),
           array[format('drop trigger if exists pgpm_write_block on %s;', :'q_sq')],
@@ -359,7 +359,7 @@ insert into pgpm_t364.r values (35005, 'frontier');
 create table public.r364_ref (id bigint primary key, p_id bigint references pgpm_t364.r(id));
 insert into public.r364_ref values (1, 35005);
 select child_name as r_doomed, child_oid as r_oid from pgpm.part where parent_table = 'pgpm_t364.r'::regclass and lo = '0' \gset
-select ok(not pgpm.retire('pgpm_t364.r', :'r_doomed') and pgpm_t364.armed() <> 'select 1', 'R fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.r', :'r_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: R: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.r'::regclass and lo = '0';
@@ -371,7 +371,7 @@ select format('pgpm_t364.%I', :'r_doomed') as r_sq \gset
 select pgpm_t364.lay_block(:'r_sq');
 select ok(pgpm_t364.blocked(:'r_sq') and exists (select 1 from pg_inherits where inhrelid = to_regclass(:'r_sq')::oid
                                                    and inhparent = 'pgpm_t364.r_mine'::regclass),
-  'R LIVENESS: the table under the old name is a blocked partition of the operator''s own partitioned table');
+  'LIVENESS: R: the table under the old name is a blocked partition of the operator''s own partitioned table');
 select pgpm._install_write_block('pgpm_t364.r'::regclass, :'r_doomed');
 select is((select array_agg(d) from pgpm.log, pgpm_t364.logged_drops(method) d
             where parent_table = 'pgpm_t364.r'::regclass and lo = '0' and action = 'fail_write_block_identity'),
@@ -401,7 +401,7 @@ select child_oid as twin_oid from pgpm.part where parent_table = 'pgpm_t364_twin
 select format('alter table pgpm_t364_twin.k detach partition pgpm_t364_twin.%I', :'k_doomed') \gexec
 select format('pgpm_t364_twin.%I', :'k_doomed') as twin_rel \gset
 select pgpm_t364.lay_block(:'twin_rel');   -- the block a table detached by hand keeps (#705)
-select ok(not pgpm.retire('pgpm_t364.k', :'k_doomed') and pgpm_t364.armed() <> 'select 1', 'K fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t364.k', :'k_doomed') and pgpm_t364.armed() <> 'select 1', 'fixture: K: retire() dispatches the detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.k'::regclass and lo = '0';
@@ -415,16 +415,16 @@ select format('create table pgpm_t364.%I (id bigint, payload text)', :'k_doomed'
 select format('insert into pgpm_t364.%I values (88, ''mine'')', :'k_doomed') \gexec
 select format('pgpm_t364.%I', :'k_doomed') as k_sq \gset
 select pgpm_t364.lay_block(:'k_sq');
-select ok(pgpm_t364.blocked(:'k_sq'), 'K LIVENESS: the operator''s table carries the older install''s block');
+select ok(pgpm_t364.blocked(:'k_sq'), 'LIVENESS: K: the operator''s table carries the older install''s block');
 select ok(pgpm_t364.blocked(:'twin_rel') and to_regclass(:'twin_rel')::oid = :'twin_oid'::oid
           and not exists (select 1 from pg_inherits where inhrelid = :'twin_oid'::oid),
-  'K LIVENESS: the twin parent''s partition of the same name, detached and recorded by its row, carries a block too');
+  'LIVENESS: K: the twin parent''s partition of the same name, detached and recorded by its row, carries a block too');
 select ok(pgpm_t364.blocked(:'tenant_rel') and to_regclass('pgpm_t364_twin.k_kept')::oid = :'k_oid'::oid,
-  'K LIVENESS: a tenant''s table of the same name carries a block, and the renamed retirement stands in the twin''s schema');
-select ok(not pgpm.retire('pgpm_t364.k', :'k_doomed'), 'K fixture: retire() runs before any tick');
+  'LIVENESS: K: a tenant''s table of the same name carries a block, and the renamed retirement stands in the twin''s schema');
+select ok(not pgpm.retire('pgpm_t364.k', :'k_doomed'), 'fixture: K: retire() runs before any tick');
 select ok((select child_oid = :'k_oid'::oid and retiring_at is null from pgpm.part
             where parent_table = 'pgpm_t364.k'::regclass and lo = '0'),
-  'K LIVENESS: retire() released the mark and anchored the row to the renamed table');
+  'LIVENESS: K: retire() released the mark and anchored the row to the renamed table');
 select is((select array_agg(d) from pgpm.log, pgpm_t364.logged_drops(method) d
             where parent_table = 'pgpm_t364.k'::regclass and lo = '0' and action = 'retain_disown'),
           array[format('drop trigger if exists pgpm_write_block on %s;', :'k_sq')],
@@ -449,8 +449,8 @@ update pgpm.part set retiring_at = now(), retiring_oid = null, child_oid = null,
 select format('alter table pgpm_t364.p detach partition pgpm_t364.%I', :'p_doomed') \gexec
 select ok(pgpm_t364.blocked(:'p_sq') and to_regclass(:'p_sq')::oid = :'p_oid'::oid
           and not exists (select 1 from pg_inherits where inhrelid = :'p_oid'::oid),
-  'P LIVENESS: pgpm''s own block stands on its retirement, detached under the row''s name');
-select ok(pgpm._disown_retirement('pgpm_t364.p', :'p_doomed', 'P: released'), 'P LIVENESS: the release ran');
+  'LIVENESS: P: pgpm''s own block stands on its retirement, detached under the row''s name');
+select ok(pgpm._disown_retirement('pgpm_t364.p', :'p_doomed', 'P: released'), 'LIVENESS: P: the release ran');
 select ok(pgpm_t364.blocked(:'p_sq'), 'P: the retirement keeps its block (#705)');
 select ok((select method not like '%drop trigger%' from pgpm.log
             where parent_table = 'pgpm_t364.p'::regclass and lo = '0' and action = 'retain_disown'),
@@ -474,7 +474,7 @@ select format('alter table pgpm_t364.%I rename to %I', :'h_next', :'h_doomed') \
 select format('pgpm_t364.%I', :'h_doomed') as h_str \gset
 select ok(exists (select 1 from pg_inherits where inhparent = 'pgpm_t364.h'::regclass and inhrelid = to_regclass(:'h_str')::oid)
           and to_regclass(:'h_str')::oid <> :'h_oid'::oid,
-  'H LIVENESS: the row''s name denotes another partition of the parent');
+  'LIVENESS: H: the row''s name denotes another partition of the parent');
 select lives_ok(format('select pgpm._install_write_block(%L::regclass, %L)', 'pgpm_t364.h', :'h_doomed'),
   'H: the step does not raise');
 select ok(exists (select 1 from pgpm.log where parent_table = 'pgpm_t364.h'::regclass and lo = '0'
@@ -495,8 +495,8 @@ update pgpm.part set retiring_at = now(), retiring_oid = child_oid, child_oid = 
  where parent_table = 'pgpm_t364.c'::regclass and lo = '0';
 select ok((select child_oid is null and retiring_oid = :'c_oid'::oid from pgpm.part
             where parent_table = 'pgpm_t364.c'::regclass and lo = '0'),
-  'C LIVENESS: the row records the partition by its mark alone');
-select ok(not pgpm_t364.blocked(format('pgpm_t364.%I', :'c_doomed')), 'C LIVENESS: the partition is not blocked yet');
+  'LIVENESS: C: the row records the partition by its mark alone');
+select ok(not pgpm_t364.blocked(format('pgpm_t364.%I', :'c_doomed')), 'LIVENESS: C: the partition is not blocked yet');
 select pgpm._install_write_block('pgpm_t364.c'::regclass, :'c_doomed');
 select ok(exists (select 1 from pg_trigger where tgrelid = :'c_oid'::oid and tgname = 'pgpm_write_block' and tgenabled = 'A'),
   'C: the marked partition, by its oid, is write-blocked');
