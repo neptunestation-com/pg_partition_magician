@@ -17153,7 +17153,7 @@ MUTATIONS["disown_remedy_row_schema_only"] = (
     "PR #1436 round 2 V-01: the release looks under the name only in the row's schema, which follows the anchor, so "
     "once the renamed retirement moved to another schema the block in the parent's is never named. One clause. "
     "tests/364 part I catches it.",
-    [("to_regclass(format('%I.%I', (select relnamespace::regnamespace::name from pg_class where oid = p_parent), p_child))]) c(oid)",
+    [("to_regclass(format('%I.%I', (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent), p_child))]) c(oid)",
       "null::regclass]) c(oid)", 1)],
 )
 MUTATIONS["disown_remedy_parent_schema_rendered"] = (
