@@ -140,7 +140,7 @@ VARIABLES
     lostDrop,  \* rows a pgpm DROP removed that retention did not reach or the operator owned
     wrongTgt,  \* a pgpm destructive action reached a relation other than the recorded one
     collided,  \* a ledger insert hit an existing (parent, lo): the step raises every tick
-    falseRef,  \* an identity refusal while the recorded relation was where its record says
+    falseRef,  \* an identity refusal while the recorded relation was where its record says (or, #1427, renamed out of the parent)
     wasted,    \* archive_batch's only turn went to a partition that cannot be archived
     raised,    \* the archive step raised outside its per-child handling
     silent,    \* the archive step found an aged candidate and archived nothing, logging nothing
@@ -203,6 +203,19 @@ IdentityOK(s) ==
 Spurious(s) ==
     /\ part[s].oid # 0 /\ rel[part[s].oid].ex /\ Attached(part[s].oid, 1)
     /\ rel[part[s].oid].name = part[s].name /\ rel[part[s].oid].slot = s
+
+\* #1424 (Q1, decided): the relation the anchors record, when they agree, stands
+\* under another name and is no partition of anything. pgpm's detach took it out
+\* and the operator renamed it since, which makes it the operator's table. The
+\* contract says renamed or moved; no hand SET SCHEMA of a partition is modelled
+\* (K2), so here the name is what changed.
+RecOid(s) == IF part[s].rOid # 0 THEN part[s].rOid ELSE part[s].oid
+RecallRelease(s, o) == (part[s].rOid = 0 \/ part[s].oid = 0 \/ part[s].rOid = part[s].oid) /\ RecOid(s) # 0 /\ RecOid(s) # o /\ rel[RecOid(s)].ex /\ rel[RecOid(s)].par = 0 /\ rel[RecOid(s)].name # part[s].name  \* @guard G1424
+\* #1427: retire() applies the same test while retention still reaches the range
+\* (_renamed_retirement, one function for both).
+RetireRelease(s, o) == RecallRelease(s, o)  \* @guard G1427
+\* The same test, untagged, for the ghost: what a mutation of either guard cannot change.
+Renamed(s, o) == (part[s].rOid = 0 \/ part[s].oid = 0 \/ part[s].rOid = part[s].oid) /\ RecOid(s) # 0 /\ RecOid(s) # o /\ rel[RecOid(s)].ex /\ rel[RecOid(s)].par = 0 /\ rel[RecOid(s)].name # part[s].name
 
 \* A retiring_at mark vouches for a detach only with the record of pgpm's own
 \* dispatch, detach_dispatched_oid (#1259).
@@ -552,13 +565,24 @@ ArchFinish ==
 \* anchors, resolve the partition by name; then wait for its lock.
 RetireBegin(s, z) ==
     /\ upgraded /\ parentEx /\ rt = NoRt /\ part[s].pr /\ Eligible(s, z)
-    /\ IF ~IdentityOK(s)
-       THEN /\ falseRef' = (falseRef \/ Spurious(s))        \* fail_retain_identity
+    /\ IF ~IdentityOK(s) /\ RetireRelease(s, PartRel(s))
+       \* #1427: the recorded relation stands renamed out of the parent, the operator's table: a
+       \* mark on it is released (retain_disown), and the row is refused as one detached by hand
+       \* (fail_retain_drop) on this call and every later one, never dropped
+       THEN /\ IF part[s].ret
+               THEN /\ part' = [part EXCEPT ![s].ret = FALSE, ![s].rOid = 0, ![s].disp = 0]
+                    /\ opOwned' = opOwned \cup {RecOid(s)}
+               ELSE UNCHANGED <<part, opOwned>>
             /\ IdleIfHolds(OwnNsp(s), part[s].name)
-            /\ UNCHANGED rt
+            /\ UNCHANGED <<rt, falseRef>>
+       ELSE IF ~IdentityOK(s)
+       THEN /\ falseRef' = (falseRef \/ Spurious(s) \/ Renamed(s, PartRel(s)))   \* fail_retain_identity
+            /\ IdleIfHolds(OwnNsp(s), part[s].name)
+            /\ UNCHANGED <<rt, part, opOwned>>
        ELSE /\ rt' = [s |-> s, o |-> PartRel(s), z |-> z]
-            /\ UNCHANGED <<falseRef, job>>
-    /\ UNCHANGED <<baseVars, part, led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy,
+            /\ UNCHANGED <<falseRef, job, part, opOwned>>
+    /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft,
+                   led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy,
                    otherMark, upgraded, arc>>
     /\ UNCHANGED <<badDrop, copied, lostDrop, wrongTgt, collided, wasted, raised, silent, stuckSlot, heldOwn>>
 
@@ -737,14 +761,6 @@ DetachReap(x) ==
 (* The recall of a retirement retention no longer reaches (_retain_recall, *)
 (* by set_retain or the next tick's retain(); reference.md `retire`, "A    *)
 (* retirement belongs to the retention policy that started it").           *)
-
-\* #1424 (Q1, decided): the relation the anchors record, when they agree, stands
-\* under another name and is no partition of anything. pgpm's detach took it out
-\* and the operator renamed it since, which makes it the operator's table. The
-\* contract says renamed or moved; no hand SET SCHEMA of a partition is modelled
-\* (K2), so here the name is what changed.
-RecOid(s) == IF part[s].rOid # 0 THEN part[s].rOid ELSE part[s].oid
-RecallRelease(s, o) == (part[s].rOid = 0 \/ part[s].oid = 0 \/ part[s].rOid = part[s].oid) /\ RecOid(s) # 0 /\ RecOid(s) # o /\ rel[RecOid(s)].ex /\ rel[RecOid(s)].par = 0 /\ rel[RecOid(s)].name # part[s].name  \* @guard G1424
 
 Recall(s, z) ==
     /\ upgraded /\ parentEx /\ part[s].pr /\ part[s].ret /\ ~Eligible(s, z)
@@ -1116,7 +1132,8 @@ NoLostRowLive == \A r \in Rows : [](Stranded(r) /\ parentEx => <>(~Stranded(r) \
 \* state from which a documented contract says maintenance makes progress,
 \* reached instead as a permanent stop that no contract documents).
 \*  - no ledger insert collides (the step then raises every tick: #511, #454)
-\*  - no identity refusal while the recorded relation is where its record says (#727, #1365)
+\*  - no identity refusal while the recorded relation is where its record says (#727, #1365), nor by
+\*    retire() while it stands renamed out of the parent, found by its oid (#1427)
 \*  - archive_batch's turn never goes to a partition the step cannot archive (#1335 b3)
 \*  - the step never raises outside its per-child handling (#1054 b2)
 \*  - an aged candidate never yields no chunk silently (#788)

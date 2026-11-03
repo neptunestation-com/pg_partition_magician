@@ -168,6 +168,20 @@ of this parent, so one the operator attached to a partitioned table of their own
 has no third partitioned table, so its `par = 0` is that condition within its world. The only other parent
 it knows is the namesake (epoch 2), and nothing attaches a recorded retirement there.
 
+`retire` asks the same question while retention still reaches the range (#1427). Before it, `RetireBegin`
+refused such a row as an identity failure on every tick, though the record still found the table by its oid.
+Now it releases a mark on the table the way the recall does (`RetireRelease`, guard `G1427`, defined as
+`RecallRelease` because the code shares one function, `_renamed_retirement`) and refuses the row as one
+detached by hand, which changes no state. `NoWedge`'s `falseRef` ghost now also reads an identity refusal by
+`retire` of a row whose recorded relation stands renamed out of the parent (`Renamed`, the same test untagged),
+so mutation `M1427` (`RetireRelease` never true) is caught by `NoWedge` under `RN`, `T` and the FK path.
+The model's `par = 0` is "no partition of anything" here too, which is what `retire` requires. One thing the
+model cannot check: every row it starts from has a `child_oid` (`FreshPart`, and the upgrade adopts one), so a
+v0.5.0 row recording the mark's oid alone is outside it. That shape is where clearing a mark cleared the row's
+only anchor and a table attached under the old name was then retired (this PR's per-PR verification, V-01); the
+fix records the marked table as `child_oid` wherever a mark is cleared, guarded by `bench/` mutation
+`disown_unanchored`, not by the model.
+
 ## Independent fidelity read
 
 A second agent read the spec against the contracts, never the code, and did not see the triage. It reported

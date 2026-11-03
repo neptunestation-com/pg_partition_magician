@@ -421,10 +421,15 @@ select is(
 select ok(not pgpm.retire('public.sb77', :'sb_doomed'),
   'retire() refuses to carry the retirement on against a name that no longer resolves to its object');
 
+-- #1427: the relation pgpm meant stands detached under another name (sb77_kept), which makes it the
+-- operator's table, as the recall has judged it since #1424: retire() releases the mark once (retain_disown)
+-- and refuses the row as one detached by hand (fail_retain_drop). Found by its oid, not re-guessed by name.
 select is(
-  (select count(*)::int from pgpm.log
-    where parent_table = 'public.sb77'::regclass and action = 'fail_retain_identity'),
-  1, 'refused as exactly fail_retain_identity, distinct from a crossing or a drop failure');
+  (select array_agg(action order by id) from pgpm.log
+    where parent_table = 'public.sb77'::regclass
+      and action in ('retain_disown', 'fail_retain_drop', 'fail_retain_identity', 'retain_drop')),
+  array['retain_disown', 'fail_retain_drop'],
+  'refused as exactly retain_disown then fail_retain_drop: the original, renamed aside, is the operator''s');
 
 select is(
   (select count(*)::int from pgpm.log where parent_table = 'public.sb77'::regclass
@@ -457,9 +462,11 @@ select is(
   1, 'the pgpm.part row stays, so the retirement is visibly wedged rather than quietly finished');
 
 select is(
-  (select count(*)::int from pgpm.log
-    where parent_table = 'public.sb77'::regclass and action = 'fail_retain_identity'),
-  2, 'both refusals are logged: this is a standing wedge, not a one-off deferral');
+  (select array_agg(action order by id) from pgpm.log
+    where parent_table = 'public.sb77'::regclass
+      and action in ('retain_disown', 'fail_retain_drop', 'fail_retain_identity', 'retain_drop')),
+  array['retain_disown', 'fail_retain_drop', 'fail_retain_drop'],
+  'both refusals are logged, the release once: this is a standing wedge, not a one-off deferral');
 
 -- status() must class it with the other things that stall retention (fail_retain_drop,
 -- fail_retain_crossing, fail_retain_detach), not leave it invisible. Exactly 3, not ">= 1": this
