@@ -13,13 +13,13 @@
   partition you detached by hand and kept, which stays. Instead the refusal names it, as does the remedy of the
   `retain_disown` that releases the renamed retirement (whose `delete` would leave no row to refuse), each with the
   `drop trigger if exists pgpm_write_block on ...;` statement that lifts it, for a table that carries pgpm's own
-  trigger, is no partition of anything, and is recorded by no `pgpm.part` row. A row with no oid at all names
+  trigger, is no partition of a parent pgpm manages, and is recorded by no `pgpm.part` row. A row with no oid at all names
   nothing. A row with no `child_oid` is still compared by its range as well (#1365), whatever its mark. The #518
   coverage discard reads the same anchor, so the renamed table's coverage is not discarded because the table under
   its old name is unblocked. `bench/write_block_reads_mark.sh` runs `tests/364` (mutations
   `write_block_mark_unanchored`, `write_block_refusal_names_no_block`, `write_block_refusal_lifts`,
-  `write_block_note_silent`, `write_block_note_names_partition`, `write_block_note_names_tracked`, `disown_remedy_names_no_block`,
-  `disown_release_lifts`, `disown_remedy_row_schema_only`, `disown_remedy_names_own_retirement`,
+  `write_block_note_silent`, `write_block_note_names_partition`, `write_block_note_skips_any_partition`, `write_block_note_names_tracked`, `disown_remedy_names_no_block`,
+  `disown_release_lifts`, `disown_remedy_row_schema_only`, `disown_remedy_parent_schema_rendered`, `disown_remedy_names_own_retirement`,
   `write_block_mark_refuses_all`, `coverage_reset_mark_unanchored`, `write_block_mark_shadows_stranger`).
 
 - **`retire` releases a detached retirement the operator renamed, and refuses it as detached by hand** (#1427).

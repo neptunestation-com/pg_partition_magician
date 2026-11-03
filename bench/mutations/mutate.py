@@ -17109,11 +17109,19 @@ MUTATIONS["write_block_note_silent"] = (
 )
 MUTATIONS["write_block_note_names_partition"] = (
     "bench/write_block_reads_mark.sh",
-    "Issue #1435, the note without its 'no partition of anything' clause: an impostor attached to the parent under "
-    "the name is named as a block to lift, which #429 keeps. One clause. tests/364 part D catches it.",
-    [("                    and t.tgfoid = to_regprocedure('pgpm._write_block_raise()'))\n"
-      "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n",
-      "                    and t.tgfoid = to_regprocedure('pgpm._write_block_raise()'))\n", 1)],
+    "Issue #1435, the note without its 'no partition of a parent pgpm manages' clause: an impostor attached to the "
+    "parent under the name is named as a block to lift, which #429 keeps. One clause. tests/364 part D catches it.",
+    [("     and not exists (select 1 from pg_inherits i join pgpm.config f on f.parent_table = i.inhparent\n"
+      "                      where i.inhrelid = c.oid)\n", "", 1)],
+)
+MUTATIONS["write_block_note_skips_any_partition"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 6 V-02: the note skips a partition of anything, so a block an older tick put on a partition of "
+    "the operator's own partitioned table, under the old name, is never named. One clause. tests/364 part R catches "
+    "it.",
+    [("     and not exists (select 1 from pg_inherits i join pgpm.config f on f.parent_table = i.inhparent\n"
+      "                      where i.inhrelid = c.oid)\n",
+      "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n", 1)],
 )
 MUTATIONS["write_block_note_names_tracked"] = (
     "bench/write_block_reads_mark.sh",
@@ -17147,6 +17155,14 @@ MUTATIONS["disown_remedy_row_schema_only"] = (
     "tests/364 part I catches it.",
     [("to_regclass(format('%I.%I', (select relnamespace::regnamespace::name from pg_class where oid = p_parent), p_child))]) c(oid)",
       "null::regclass]) c(oid)", 1)],
+)
+MUTATIONS["disown_remedy_parent_schema_rendered"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 6 P1-02: the release reads the parent's schema through regnamespace's output, which is already "
+    "quoted where the name needs it, and %I quotes it again, so for a parent in such a schema the lookup finds "
+    "nothing and the remedy names no block (the #512 class). One site. tests/364 part Q catches it.",
+    [("to_regclass(format('%I.%I', (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent), p_child))",
+      "to_regclass(format('%I.%I', (select relnamespace::regnamespace::name from pg_class where oid = p_parent), p_child))", 1)],
 )
 MUTATIONS["disown_remedy_names_own_retirement"] = (
     "bench/write_block_reads_mark.sh",

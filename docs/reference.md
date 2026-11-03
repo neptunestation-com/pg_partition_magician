@@ -2494,7 +2494,7 @@ under the old name of a detached retirement you renamed is refused, never blocke
 block it, pgpm does not lift that block, since it cannot tell it from a block it put on a partition you
 detached by hand and kept. It names it instead, with the statement that lifts it (`drop trigger if exists
 pgpm_write_block on ...;`), in the refusal's `method` and in the remedy of the `retain_disown` that releases
-the renamed retirement. It names only its own trigger on a table that is no partition of anything and that no
+the renamed retirement. It names only its own trigger on a table that is no partition of a parent pgpm manages and that no
 `pgpm.part` row records, under the old name in the retirement's schema or the parent's. Run the statement
 only if the table is yours. Removal is deliberately *not* anchored: an older pgpm could have left that trigger on a
 substituted relation, rejecting every write to it, and removing by name is what lets an upgraded pgpm lift

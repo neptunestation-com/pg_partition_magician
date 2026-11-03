@@ -9,16 +9,18 @@
 # acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run against the
 # mutant, in the shape of bench/retire_renamed_detached.sh.
 #
-# THIRTEEN mutations are required to fail against it (bench/mutations/mutate.py):
+# FIFTEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   write_block_mark_unanchored        -- the pre-fix shape: the mark's oid anchors nothing. Parts A, B, D.
 #   write_block_refusal_names_no_block -- the refusal is silent about a block an earlier tick laid. Part B.
 #   write_block_refusal_lifts          -- the refusal lifts what holds the name. Parts B, D.
 #   write_block_note_silent            -- no site names the block, the refusal nor the release. Parts B, G, I, K.
 #   write_block_note_names_partition   -- an impostor attached to the parent is named as a block to lift. Part D.
+#   write_block_note_skips_any_partition -- a partition of the operator's own partitioned table is not named. Part R.
 #   write_block_note_names_tracked     -- a twin parent's partition detached by hand is named. Part K.
 #   disown_remedy_names_no_block       -- the release's remedy does not name the block. Parts G, I, K.
 #   disown_release_lifts               -- the release lifts the block it names. Part G.
 #   disown_remedy_row_schema_only      -- the release looks only in the row's schema. Part I.
+#   disown_remedy_parent_schema_rendered -- the parent's schema quoted twice, so nothing is named. Part Q.
 #   disown_remedy_names_own_retirement -- a row with no oid names its own retirement's block. Part P.
 #   write_block_mark_refuses_all       -- every marked row with no child_oid refused, the partition never blocked. Part C.
 #   coverage_reset_mark_unanchored     -- the renamed table's coverage discarded as unguarded. Part E.

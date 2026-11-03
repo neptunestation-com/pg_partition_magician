@@ -27,6 +27,8 @@
 --           remedy's DROP deletes the row whose refusal would name it), later ticks leave it, and the named
 --           statement lifts it.
 --   PART I  as G, the renamed retirement moved to another schema: the release names the block in the parent's.
+--   PART Q  as I, the parent in a schema whose name needs quoting: named, the schema quoted once.
+--   PART R  the table under the old name is a partition of the operator's own partitioned table: named.
 --   PART K  as G, the renamed retirement moved into a twin parent's schema, where the twin's partition of the same
 --           name, detached by hand and recorded by its row, carries a block, and a tenant's blocked table of the
 --           same name stands in a schema of its own: only the operator's table is named, and every block stays.
@@ -41,13 +43,13 @@
 -- cron.job and cron.alter_job and runs whatever the standing job holds at the top level, as tests/363 does.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2; B 5, 6, 7; C 21, 22;
--- D 31, 32, 33; E 41, 42, 43, 44; G 51, 52; H 61, 62; I 71, 72, 73; K 15, 16; the twin 17; P 11, 12), the operator's
--- tables A 98, B 99, E 95, G 93, I 91 and K 88, and the impostor D 37, 38, so a write to the wrong relation or a lost
+-- D 31, 32, 33; E 41, 42, 43, 44; G 51, 52; H 61, 62; I 71, 72, 73; Q 75, 76; R 77, 78; K 15, 16; the twin 17; P 11, 12), the operator's
+-- tables A 98, B 99, E 95, G 93, I 91, Q 74, R 72 and K 88, and the impostor D 37, 38, so a write to the wrong relation or a lost
 -- row cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(74);
+select plan(84);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -312,6 +314,73 @@ select pgpm_t364.logged_drops(method) from pgpm.log
  where parent_table = 'pgpm_t364.i'::regclass and lo = '0' and action = 'retain_disown' \gexec
 select lives_ok(format('insert into %s values (90, ''mine'')', :'i_sq'), 'I: run as logged, the operator can write to their table again');
 select is(pgpm_t364.ids('pgpm_t364_keep.i_kept'), array[71, 72, 73]::bigint[], 'I: the moved table keeps ids 71, 72, 73');
+
+-- ============================================================================================================
+-- PART Q: as I, the parent in a schema whose name needs quoting; the release still names the block there
+-- ============================================================================================================
+create schema "pgpm T364 Q";
+create table "pgpm T364 Q".q (id bigint primary key, payload text);
+insert into "pgpm T364 Q".q values (75, 'orig'), (76, 'orig');
+call pgpm.transmute('"pgpm T364 Q".q'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('"pgpm T364 Q".q'::regclass, '60000');
+insert into "pgpm T364 Q".q values (35005, 'frontier');
+create table public.q364_ref (id bigint primary key, p_id bigint references "pgpm T364 Q".q(id));
+insert into public.q364_ref values (1, 35005);
+select child_name as q_doomed, child_oid as q_oid from pgpm.part where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('"pgpm T364 Q".q', :'q_doomed') and pgpm_t364.armed() <> 'select 1', 'Q fixture: retire() dispatches the detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
+update cron.job set command = 'select 1';
+update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0';
+select format('alter table "pgpm T364 Q".%I rename to q_kept', :'q_doomed') \gexec
+alter table "pgpm T364 Q".q_kept set schema pgpm_t364_keep;
+select format('create table "pgpm T364 Q".%I (id bigint, payload text)', :'q_doomed') \gexec
+select format('insert into "pgpm T364 Q".%I values (74, ''mine'')', :'q_doomed') \gexec
+select format('%I.%I', 'pgpm T364 Q', :'q_doomed') as q_sq \gset
+select pgpm_t364.lay_block(:'q_sq');
+select ok(not pgpm.retire('"pgpm T364 Q".q', :'q_doomed'), 'Q fixture: retire() runs before any tick');
+select ok(pgpm_t364.blocked(:'q_sq') and to_regclass('pgpm_t364_keep.q_kept')::oid = :'q_oid'::oid,
+  'Q LIVENESS: the block stands in the parent''s quoted schema, the renamed retirement in another');
+select is((select array_agg(d) from pgpm.log, pgpm_t364.logged_drops(method) d
+            where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0' and action = 'retain_disown'),
+          array[format('drop trigger if exists pgpm_write_block on %s;', :'q_sq')],
+  'Q: the release''s remedy names it, the schema quoted once');
+select pgpm_t364.logged_drops(method) from pgpm.log
+ where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0' and action = 'retain_disown' \gexec
+select lives_ok(format('insert into %s values (73, ''mine'')', :'q_sq'), 'Q: run as logged, the operator can write to their table again');
+
+-- ============================================================================================================
+-- PART R: the table under the old name is a partition of the operator's own partitioned table; the refusal names it
+-- ============================================================================================================
+create table pgpm_t364.r (id bigint primary key, payload text);
+insert into pgpm_t364.r values (77, 'orig'), (78, 'orig');
+call pgpm.transmute('pgpm_t364.r'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('pgpm_t364.r'::regclass, '60000');
+insert into pgpm_t364.r values (35005, 'frontier');
+create table public.r364_ref (id bigint primary key, p_id bigint references pgpm_t364.r(id));
+insert into public.r364_ref values (1, 35005);
+select child_name as r_doomed, child_oid as r_oid from pgpm.part where parent_table = 'pgpm_t364.r'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t364.r', :'r_doomed') and pgpm_t364.armed() <> 'select 1', 'R fixture: retire() dispatches the detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
+update cron.job set command = 'select 1';
+update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.r'::regclass and lo = '0';
+select format('alter table pgpm_t364.%I rename to r_kept', :'r_doomed') \gexec
+create table pgpm_t364.r_mine (id bigint, payload text) partition by range (id);
+select format('create table pgpm_t364.%I partition of pgpm_t364.r_mine for values from (0) to (1000)', :'r_doomed') \gexec
+insert into pgpm_t364.r_mine values (72, 'mine');
+select format('pgpm_t364.%I', :'r_doomed') as r_sq \gset
+select pgpm_t364.lay_block(:'r_sq');
+select ok(pgpm_t364.blocked(:'r_sq') and exists (select 1 from pg_inherits where inhrelid = to_regclass(:'r_sq')::oid
+                                                   and inhparent = 'pgpm_t364.r_mine'::regclass),
+  'R LIVENESS: the table under the old name is a blocked partition of the operator''s own partitioned table');
+select pgpm._install_write_block('pgpm_t364.r'::regclass, :'r_doomed');
+select is((select array_agg(d) from pgpm.log, pgpm_t364.logged_drops(method) d
+            where parent_table = 'pgpm_t364.r'::regclass and lo = '0' and action = 'fail_write_block_identity'),
+          array[format('drop trigger if exists pgpm_write_block on %s;', :'r_sq')],
+  'R: the refusal names the block on the operator''s partition');
+select ok(pgpm_t364.blocked(:'r_sq'), 'R: and keeps it');
+select pgpm_t364.logged_drops(method) from pgpm.log
+ where parent_table = 'pgpm_t364.r'::regclass and lo = '0' and action = 'fail_write_block_identity' \gexec
+select lives_ok('insert into pgpm_t364.r_mine values (71, ''mine'')', 'R: run as logged, the operator can write through their own parent again');
 
 -- ============================================================================================================
 -- PART K: the release names only the operator's table; a twin's partition and a tenant's table are not named

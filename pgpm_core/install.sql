@@ -3877,7 +3877,8 @@ $$;
 -- catalog cannot tell it from a block pgpm put on a partition the operator then detached by hand and kept, row
 -- deleted, which the docs promise stays (PR #1436 verification, rounds 3 to 5, each time a lift reached one). So it
 -- only names one, and only pgpm's own trigger (pgpm_write_block calling pgpm._write_block_raise) on a table that is no
--- partition of anything and no relation any pgpm.part row records. Defined here, ahead of _disown_retirement, which
+-- partition of a parent pgpm manages (whose blocks are pgpm's to keep, #429) and no relation any pgpm.part row
+-- records. A partition of the operator's own partitioned table is named (PR #1436 round 6, V-02). Defined here, ahead of _disown_retirement, which
 -- the install pass below runs at install time; the trigger function is looked up by to_regprocedure for the same
 -- reason.
 create or replace function pgpm._stale_write_block_note(p_rel oid)
@@ -3888,7 +3889,8 @@ returns text language sql stable as $$
    where c.oid = p_rel
      and exists (select 1 from pg_trigger t where t.tgrelid = c.oid and t.tgname = 'pgpm_write_block'
                     and t.tgfoid = to_regprocedure('pgpm._write_block_raise()'))
-     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
+     and not exists (select 1 from pg_inherits i join pgpm.config f on f.parent_table = i.inhparent
+                      where i.inhrelid = c.oid)
      and not exists (select 1 from pgpm.part p
                       where c.oid in (p.child_oid, p.retiring_oid, p.detach_dispatched_oid))
 $$;
@@ -3956,7 +3958,7 @@ begin
     select string_agg(n, ' ') into v_stale
       from (select distinct pgpm._stale_write_block_note(c.oid) n
               from unnest(array[to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child)),   -- part-row-by-name: judged by oid in the note
-                                to_regclass(format('%I.%I', (select relnamespace::regnamespace::name from pg_class where oid = p_parent), p_child))]) c(oid)   -- part-row-by-name: judged by oid in the note
+                                to_regclass(format('%I.%I', (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent), p_child))]) c(oid)   -- part-row-by-name: judged by oid in the note
              where c.oid is distinct from v_child_oid) s;
   end if;
   select format('%I.%I', n.nspname, c.relname), c.relname into v_rel_q, v_cur
