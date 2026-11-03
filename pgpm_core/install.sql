@@ -4018,6 +4018,55 @@ begin
 end;
 $$;
 
+-- _refuse_unrecorded_mark: refuse a retirement mark that records no oid at all (a pgpm older than v0.5.0 wrote
+-- retiring_at alone) when the name its row records denotes nothing, or a table that is no partition of the parent:
+-- the job is disarmed if it still holds the detach, and one fail_retain_identity row is logged with the repair. The
+-- mark is kept. retire() and _retain_recall both call it, so the repair is written once.
+--
+-- WHY A REFUSAL (#1432, #1434). With no oid there is nothing to tell the table the retirement detached from one created
+-- under its name since: the operator may have renamed the detached table to keep it, and made another. Judged by the
+-- name, such a table was disowned as the retirement, and the remedy spelled an ATTACH of it (#1432); with nothing under
+-- the name, retire() raised out of the write block on every tick, an uncounted skip_retain (#1434). Only the operator
+-- knows which table holds the range, so the repair says how to find out and both ways out: attach the right table on
+-- the row's bounds under the row's name, or clear the mark to keep the table as their own (retire() then refuses it as
+-- one detached by hand, fail_retain_drop). The maintainer chose this over a disown with a hedged remedy (2026-11-03): a
+-- genuine v0.4.0 retirement not renamed costs the operator one statement, and pgpm never acts on a guess.
+create or replace function pgpm._refuse_unrecorded_mark(p_parent regclass, p_child name, p_lo text, p_hi text, p_now oid,
+                                                        p_who text)
+returns void language plpgsql as $$
+declare cfg pgpm.config; v_nsp name; v_parent_q text; v_rel_q text; v_attach text; v_clear text; v_now_q text;
+begin
+  v_nsp := pgpm._child_nsp(p_parent, p_child);
+  v_rel_q := format('%I.%I', v_nsp, p_child);   -- part-row-by-name: text of the remedy message, resolves nothing
+  select format('%I.%I', n.nspname, c.relname) into v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));   -- only if it still holds this detach
+  begin
+    select * into strict cfg from pgpm.config where parent_table = p_parent;
+    cfg := pgpm._control_followed(cfg);
+    -- by-name-ok: a remedy text a log row carries; nothing runs it
+    v_attach := format('alter table %s attach partition %s for values from (%L) to (%L);', v_parent_q, v_rel_q,
+      pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+      pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+  exception when others then
+    v_attach := format('(its bounds [%s, %s) could not be encoded: %s)', p_lo, p_hi, sqlerrm);
+  end;
+  v_clear := format('update pgpm.part set retiring_at = null where parent_table = %L::regclass and child_name = %L;',
+                    v_parent_q, p_child);
+  select format('%I.%I', n.nspname, c.relname) into v_now_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_now;
+  insert into pgpm.log (parent_table, action, lo, hi, method)
+    values (p_parent, 'fail_retain_identity', p_lo, p_hi,
+            case when v_now_q is null then
+              format('%s found %I.%I, which resolves to nothing, under a retirement mark that records no oid to find the relation by (a pgpm older than v0.5.0 wrote it); the mark is kept. If its detached table was renamed, it holds the rows of [%s, %s): rename it back to %I in %I, then attach it: %s Or, if that table is gone or you mean to keep it as your own, clear the mark: %s',
+                     p_who, v_nsp, p_child, p_lo, p_hi, p_child, v_nsp, v_attach, v_clear)
+            else
+              format('%s found %s (oid %s), no partition of %s, under a retirement mark that records no oid to tell the table the retirement detached from one created under its name since (a pgpm older than v0.5.0 wrote it); the mark is kept and nothing is attached, disowned or dropped. Find which table holds the rows of [%s, %s). If it is %s, attach it: %s If it is another, renamed since, move %s aside, rename that table back to %I in %I, and attach it the same way. Or, to keep the table as your own, clear the mark and drop the write block an older pgpm may have left on it: %s drop trigger if exists pgpm_write_block on %s;',
+                     p_who, v_now_q, p_now, v_parent_q, p_lo, p_hi, v_now_q, v_attach, v_now_q, p_child, v_nsp, v_clear, v_now_q)
+            end);
+end;
+$$;
+
 -- _renamed_retirement: the oid of the relation a pgpm.part row's anchors record, when it stands under another name
 -- than the row's and is no partition of the parent, or null. The anchors have to agree (either alone, or both the
 -- same oid), and p_now (the relation under the row's name, if any) must be another one. That is a partition pgpm's
@@ -4156,9 +4205,14 @@ begin
               -- disowning that would log an ATTACH of it. Which of those it is the catalog cannot say (a moved
               -- retirement and a namesake look alike), so the row drops out, as an anchored rename does, and the
               -- paths that judge the mark by its oid take it: the recall releases a renamed retirement (#1424) and
-              -- refuses the rest as fail_retain_identity, as retire() does. A v0.4.0 mark has no oid to tell a
-              -- squatter under the name from the retirement, and is still judged by the name here (#1432).
-              and (p.child_oid is not null or p.retiring_oid is null or p.retiring_oid = c.oid)
+              -- refuses the rest as fail_retain_identity, as retire() does. A v0.4.0 mark (no oid at all) has nothing
+              -- to tell a squatter under the name from the retirement once the relation is out of the parent, so it
+              -- is judged here only while the name denotes a partition of the parent (attached or pending); out of
+              -- it, retire() and the recall refuse it and keep the mark (#1432, _refuse_unrecorded_mark).
+              and (p.child_oid is not null or p.retiring_oid = c.oid
+                   or (p.retiring_oid is null
+                       and (p.detach_dispatched_oid is not null
+                            or exists (select 1 from pg_inherits i where i.inhparent = p.parent_table and i.inhrelid = c.oid))))
   loop
     if r.pending is false then
       -- attached: a retirement under way, retire()'s to finish. One an older install dispatched (the job armed with
@@ -4437,7 +4491,7 @@ begin
   end if;
 
   -- the claim: one owner per partition at a time
-  select p.lo, p.hi, p.attached, p.retiring_at, p.retiring_oid, p.child_oid into r
+  select p.lo, p.hi, p.attached, p.retiring_at, p.retiring_oid, p.child_oid, p.detach_dispatched_oid into r
     from pgpm.part p
    where p.parent_table = p_parent and p.child_name = p_child
      for update skip locked;
@@ -4545,6 +4599,12 @@ begin
       values (p_parent, 'fail_retain_identity', r.lo, r.hi,
               format('%I.%I is oid %s, a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to detach or drop it',
                      v_nsp, p_child, v_now::oid, p_parent, r.lo, r.hi));
+    return false;
+  end if;
+  -- #1432, #1434: a mark that records no oid at all, on a name that denotes nothing or a table out of the parent
+  if r.retiring_at is not null and r.retiring_oid is null and r.child_oid is null and r.detach_dispatched_oid is null
+     and (v_now is null or not exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v_now)) then
+    perform pgpm._refuse_unrecorded_mark(p_parent, p_child, r.lo, r.hi, v_now, 'retire()');
     return false;
   end if;
 
@@ -4932,7 +4992,7 @@ begin
   end if;
   v_boundary := pgpm._retain_boundary(cfg);
 
-  for r in select child_name, lo, hi, retiring_oid, child_oid from pgpm.part
+  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid from pgpm.part
             where parent_table = p_parent and attached and retiring_at is not null
   loop
     -- still reached: the retirement stands, and retire() finishes it
@@ -5013,17 +5073,13 @@ begin
     continue when p_reattach is not true;
     -- #1430: nothing under the name, and no oid to find the relation by (the identity check above has taken every
     -- row that records one): a v0.4.0 mark whose detached table was renamed or dropped since. It cannot be released
-    -- to a table it cannot name, nor re-attached, but it is not skipped silently either: refused, and counted. The
-    -- job is disarmed if it still holds the detach, or it would take the table out again once the remedy put it back.
-    if v_now is null then
-      perform pgpm._idle_detach_job(v_cmd_q);
-      insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (p_parent, 'fail_retain_identity', r.lo, r.hi,
-                -- by-name-ok: a remedy text a log row carries; nothing runs it
-                format('retention no longer reaches %I.%I, which resolves to nothing, and its retirement mark records no oid to find the relation by (a pgpm older than v0.5.0 wrote it); if its detached table was renamed, it holds the rows: rename it back to %I in %I, then alter table %s attach partition %I.%I for values from (%L) to (%L); and the next tick clears the mark',
-                       v_nsp, r.child_name, r.child_name, v_nsp, p_parent::text, v_nsp, r.child_name,
-                       pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
-                       pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz)));
+    -- to a table it cannot name, nor re-attached, but it is not skipped silently either: refused, and counted. #1432:
+    -- a table under the name, out of the parent, under such a mark is refused the same way, never disowned as the
+    -- retirement it may not be (_refuse_unrecorded_mark).
+    if v_now is null
+       or (r.retiring_oid is null and r.child_oid is null and r.detach_dispatched_oid is null) then
+      perform pgpm._refuse_unrecorded_mark(p_parent, r.child_name, r.lo, r.hi, v_now,
+                                           'the recall, as retention no longer reaches its range,');
       continue;
     end if;
     if not pgpm._detach_dispatched(p_parent, r.child_name, v_now::oid) then
@@ -5193,6 +5249,13 @@ $$;
 -- The mark's oid anchors only what it records: a row with no child_oid is still compared by its range as well
 -- (#1365), whatever its mark (PR #1436 verification P1-02).
 --
+-- AND A ROW THAT RECORDS NO OID AT ALL IS NEVER BLOCKED OUT OF THE PARENT (#1432). With no child_oid and no mark's oid
+-- (a pgpm older than v0.5.0 wrote the mark as retiring_at alone, or the row's partition was detached and the #421
+-- backfill had nothing to adopt), a name that denotes a table which is no partition of the parent denotes the
+-- operator's table: one they detached, or one created under the name since, and nothing tells the two apart. No
+-- block goes on it, and nothing is logged here: retire() and the recall refuse such a mark (_refuse_unrecorded_mark)
+-- and a row without one as detached by hand, and their remedy says to drop a block an older tick left.
+--
 -- `v_now is not null and ... <> ...`, NOT the `is distinct from` used by the identity checks in
 -- retire() and _archive_step, and the difference is deliberate. Those two fire on a name that
 -- resolves to NOTHING as well, because there the next thing they would do is act on the relation --
@@ -5231,6 +5294,13 @@ begin
                        coalesce('. ' || pgpm._stale_write_block_note(v_now::oid), '')));
       return;
     end if;
+  end if;
+  if found and v_anchor is null and (pgpm._part_rel(p_parent, p_child)) is not null
+     and not exists (select 1 from pg_inherits i
+                      where i.inhparent = p_parent and i.inhrelid = pgpm._part_rel(p_parent, p_child))
+     and not exists (select 1 from pg_partition_ancestors(pgpm._part_rel(p_parent, p_child)) a
+                      where a.relid = p_parent::oid) then
+    return;   -- #1432: no oid at all, and the name denotes a table out of the parent: the operator's, never blocked
   end if;
   if found and r.child_oid is null   -- #1365: a row with no oid of its own, by its range (a mark's oid shadows nothing)
      and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger

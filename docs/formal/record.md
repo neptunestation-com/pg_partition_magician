@@ -185,6 +185,8 @@ The write-block step's reading of that same row (#1435: the mark's oid anchors i
 the old name is refused, and a block an earlier tick put on it is named with the statement that lifts it) is
 outside the model for the same reason, and is guarded by `bench/write_block_reads_mark.sh` and its fifteen
 mutations.
+A mark that records no oid at all (v0.4.0) is outside the model for the same reason; its refusal by `retire`, the
+recall and the install pass (#1432, #1434) is guarded by `bench/unrecorded_mark_refused.sh` and its six mutations.
 
 ## Independent fidelity read
 
