@@ -1782,11 +1782,14 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   `fail_retain_identity` on every call (counted in `status().retain_drop_failures`), keep the mark, return the
   job to idle, and attach, disown and drop nothing. The `method` says which case it found and spells both
   ways out. With nothing under the name: rename the detached table back and `ATTACH` it. With a table under
-  the name: find which table holds the rows of the range; attach that one under the row's name on the row's
-  bounds (moving the other aside first, after dropping any write block an older pgpm left on it); or, to keep the table as your own, clear the mark and drop any write
-  block an older pgpm left on it, after which `retire` refuses the row as a table detached by hand. This holds
-  for a retirement that was not renamed too, since pgpm cannot tell it apart: it costs one statement. Nothing
-  write-blocks a table under such a row's name that is no partition of the parent.
+  the name: find which table holds the rows of the range, and attach that one under the row's name on the
+  row's bounds (moving the other aside first, after dropping any write block an older pgpm left on it). Or, in
+  either case, keep the table as your own and give up the range: delete the row from `pgpm.part` (clearing
+  the mark alone would leave a row that `retire` refuses on every call) and drop any write block an older pgpm
+  left on the table you keep; the `method` spells it under the name pgpm can see, and asks you to supply a
+  renamed table's new name, which pgpm cannot know. This holds for a retirement that was not renamed too,
+  since pgpm cannot tell it apart: it costs one statement. Nothing write-blocks a table under such a row's
+  name that is no partition of the parent.
 
 ##### What `retire` checks a partition's identity against
 

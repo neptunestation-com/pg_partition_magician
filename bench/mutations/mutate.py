@@ -17266,8 +17266,24 @@ MUTATIONS["unrecorded_mark_aside_block_unnamed"] = (
     [("If it is another, renamed since, lift the write block an older pgpm may have left on %s (drop trigger if exists "
       "pgpm_write_block on %s;), move it aside,",
       "If it is another, renamed since, move %s aside,", 1),
-     ("v_now_q, v_attach, v_now_q, v_now_q, p_child, v_nsp, v_clear, v_now_q)",
-      "v_now_q, v_attach, v_now_q, p_child, v_nsp, v_clear, v_now_q)", 1)],
+     ("v_now_q, v_attach, v_now_q, v_now_q, p_child, v_nsp, v_now_q, v_forget, v_now_q)",
+      "v_now_q, v_attach, v_now_q, p_child, v_nsp, v_now_q, v_forget, v_now_q)", 1)],
+)
+MUTATIONS["unrecorded_mark_keep_clears"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "PR #1437 verification round 2 V-02: the keep-it way out clears the mark instead of forgetting the row, half a "
+    "repair. The row then names a table out of the parent, or nothing, and retire() refuses it on every call. One "
+    "site. tests/365 parts E and G catch it.",
+    [("  v_forget := format('delete from pgpm.part where parent_table = %L::regclass and child_name = %L;', v_parent_q, p_child);",
+      "  v_forget := format('update pgpm.part set retiring_at = null where parent_table = %L::regclass and child_name = %L;', v_parent_q, p_child);", 1)],
+)
+MUTATIONS["unrecorded_mark_kept_block_unnamed"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "PR #1437 verification round 2 V-01: with nothing under the name, the keep-it way out names no block on the renamed "
+    "retirement the operator keeps, which still carries the one v0.4.0's retire() laid. Followed as written, the table "
+    "refuses every write and nothing names why. One site. tests/365 part G catches it.",
+    [(" If you keep it, lift the write block an older pgpm may have left on it too, under the name you gave it: drop "
+      "trigger if exists pgpm_write_block on <its new name>;',", "',", 1)],
 )
 
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the

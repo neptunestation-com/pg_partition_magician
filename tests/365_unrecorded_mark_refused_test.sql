@@ -9,7 +9,7 @@
 --          table for the retirement, disowned the mark as its own and logged a remedy ATTACHing it, and the
 --          write-block step blocked it.
 -- With no oid nothing tells the retirement from a table created under its name, so every path now refuses such a
--- mark (fail_retain_identity, counted), keeps it, and spells both ways out (attach the right table; or clear the mark
+-- mark (fail_retain_identity, counted), keeps it, and spells both ways out (attach the right table; or forget the row
 -- and drop any block), and the write-block step leaves a table out of the parent alone. The maintainer chose this
 -- over a disown with a hedged remedy: a genuine v0.4.0 retirement that was not renamed costs the operator one
 -- statement, and pgpm never acts on a guess.
@@ -24,8 +24,11 @@
 --           retain_disown; the table under the name is neither attached nor blocked, and keeps its rows.
 --   PART C  (#1432, the recall) the same once retention no longer reaches the range.
 --   PART E  a genuine v0.4.0 retirement, not renamed, carrying the block an older tick put on it: refused the same
---           way, the remedy naming it; its clear-the-mark repair, run as written, leaves it a table detached by hand
---           (fail_retain_drop, never dropped) and writable, and no later tick blocks it again.
+--           way, the remedy naming it; its forget-the-row repair, run as written, leaves it the operator's table:
+--           writable, never dropped, and no later tick refuses or blocks it again.
+--   PART G  (#1434's keep branch) nothing under the name, the operator keeping the renamed retirement, which still
+--           carries the block v0.4.0's retire() laid: the remedy names that block under the name the operator gave it
+--           and spells forgetting the row; run as written, no later tick refuses anything and the table is writable.
 --   PART F  the control: a row with no oid whose name denotes a partition of the parent over its own range is
 --           write-blocked as before.
 --
@@ -35,12 +38,12 @@
 -- detach in the database's one slot.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2; B 5, 6, 7; C 11, 12, 13,
--- 14; D 21; E 31, 32, 33; F 41, 42), and the tables created under the old names B 99, C 98, D 97, so a disown,
+-- 14; D 21; E 31, 32, 33; F 41, 42; G 51, 52, 53, 54, 55), and the tables created under the old names B 99, C 98, D 97, so a disown,
 -- attach or drop of the wrong relation, or a lost row, cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(54);
+select plan(65);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -261,14 +264,16 @@ select is(pgpm._disown_unvouched_retirements(), 0, 'E: the install pass disowns 
 call pgpm.maintain('pgpm_t365.e');
 select is(pgpm_t365.actions('pgpm_t365.e'), array['retain_detach', 'fail_retain_identity'],
   'E: retire() refuses it, logged as exactly fail_retain_identity');
-select ok(pgpm_t365.method('pgpm_t365.e') like '%clear the mark%' and pgpm_t365.unrecorded('pgpm_t365.e'),
-  'E: the mark is kept, and the refusal spells clearing it');
+select ok(pgpm_t365.method('pgpm_t365.e') like '%forget the row%' and pgpm_t365.unrecorded('pgpm_t365.e'),
+  'E: the mark is kept, and the refusal spells forgetting the row');
 -- the repair the method spells for a table kept as the operator's own, run as written
-select substring(pgpm_t365.method('pgpm_t365.e') from '(update pgpm\.part set retiring_at = null [^;]*;)') \gexec
-select substring(pgpm_t365.method('pgpm_t365.e') from '(drop trigger if exists pgpm_write_block on [^;]*;)') \gexec
+select substring(pgpm_t365.method('pgpm_t365.e') from 'keep [^;]*(delete from pgpm\.part where [^;]*;)') \gexec
+select substring(pgpm_t365.method('pgpm_t365.e') from 'keep [^;]*delete from pgpm\.part where [^;]*; (drop trigger if exists pgpm_write_block on [^;]*;)') \gexec
 call pgpm.maintain('pgpm_t365.e');
-select is(pgpm_t365.actions('pgpm_t365.e'), array['retain_detach', 'fail_retain_identity', 'fail_retain_drop'],
-  'E: once the mark is cleared, it is refused as a table detached by hand');
+select is(pgpm_t365.actions('pgpm_t365.e'), array['retain_detach', 'fail_retain_identity'],
+  'E: once the row is forgotten, no tick refuses anything for the range');
+select ok(not exists (select 1 from pgpm.part where parent_table = 'pgpm_t365.e'::regclass and lo = '0'),
+  'E: and pgpm records no partition for it');
 select ok(not pgpm_t365.blocked(:'e_rel'), 'E: and no tick blocks it again');
 select lives_ok(format('insert into %s values (34, ''mine'')', :'e_rel'), 'E: it is writable');
 select is(pgpm_t365.ids(:'e_rel'), array[31, 32, 33, 34]::bigint[], 'E: and holds its rows');
@@ -289,5 +294,42 @@ select ok(not pgpm_t365.blocked(format('pgpm_t365.%I', :'f_doomed')), 'LIVENESS:
 select pgpm._install_write_block('pgpm_t365.f'::regclass, :'f_doomed');
 select ok(exists (select 1 from pg_trigger where tgrelid = :'f_oid'::oid and tgname = 'pgpm_write_block' and tgenabled = 'A'),
   'F: the partition, by its oid, is write-blocked');
+
+-- ============================================================================================================
+-- PART G (#1434's keep branch): nothing under the name, the renamed retirement kept as the operator's own
+-- ============================================================================================================
+create table pgpm_t365.g (id bigint primary key, payload text);
+insert into pgpm_t365.g values (51, 'orig'), (52, 'orig'), (53, 'orig'), (54, 'orig'), (55, 'orig');
+call pgpm.transmute('pgpm_t365.g'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('pgpm_t365.g'::regclass, '60000');
+insert into pgpm_t365.g values (35005, 'frontier');
+create table public.g365_ref (id bigint primary key, p_id bigint references pgpm_t365.g(id));
+insert into public.g365_ref values (1, 35005);
+select child_name as g_doomed from pgpm.part where parent_table = 'pgpm_t365.g'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t365.g', :'g_doomed') and pgpm_t365.armed() <> 'select 1', 'fixture: G: retire() dispatches the detach');
+select pgpm_t365.armed() \gexec
+update cron.job set command = 'select 1';
+update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
+ where parent_table = 'pgpm_t365.g'::regclass and lo = '0';
+select format('alter table pgpm_t365.%I rename to g_kept', :'g_doomed') \gexec
+select ok(pgpm_t365.unrecorded('pgpm_t365.g') and to_regclass(format('pgpm_t365.%I', :'g_doomed')) is null,
+  'LIVENESS: G: the mark records no oid, and its name denotes nothing');
+select ok(pgpm_t365.blocked('pgpm_t365.g_kept'), 'LIVENESS: G: the renamed table carries the block retire() put on it');
+select ok(not pgpm.retire('pgpm_t365.g', :'g_doomed'), 'G: retire() refuses it');
+select is(pgpm_t365.actions('pgpm_t365.g'), array['retain_detach', 'fail_retain_identity'],
+  'G: logged as exactly fail_retain_identity');
+select ok(pgpm_t365.method('pgpm_t365.g') like '%forget the row: delete from pgpm.part where %'
+          and pgpm_t365.method('pgpm_t365.g') like '%If you keep it, %drop trigger if exists pgpm_write_block on <its new name>;%',
+  'G: the keep branch spells forgetting the row, and names the kept table''s block');
+-- the keep branch, run as written, with the name the operator gave the table
+select substring(pgpm_t365.method('pgpm_t365.g') from 'forget the row: (delete from pgpm\.part where [^;]*;)') \gexec
+select replace(substring(pgpm_t365.method('pgpm_t365.g') from 'If you keep it, [^;]*(drop trigger if exists pgpm_write_block on <its new name>;)'),
+               '<its new name>', 'pgpm_t365.g_kept') \gexec
+call pgpm.maintain('pgpm_t365.g');
+select is(pgpm_t365.actions('pgpm_t365.g'), array['retain_detach', 'fail_retain_identity'],
+  'G: once the row is forgotten, no tick refuses anything for the range');
+select ok(not pgpm_t365.blocked('pgpm_t365.g_kept'), 'G: the kept table carries no block');
+select lives_ok('insert into pgpm_t365.g_kept values (56, ''mine'')', 'G: it is writable');
+select is(pgpm_t365.ids('pgpm_t365.g_kept'), array[51, 52, 53, 54, 55, 56]::bigint[], 'G: and holds its rows');
 
 select * from finish();

@@ -4028,13 +4028,17 @@ $$;
 -- name, such a table was disowned as the retirement, and the remedy spelled an ATTACH of it (#1432); with nothing under
 -- the name, retire() raised out of the write block on every tick, an uncounted skip_retain (#1434). Only the operator
 -- knows which table holds the range, so the repair says how to find out and both ways out: attach the right table on
--- the row's bounds under the row's name, or clear the mark to keep the table as their own (retire() then refuses it as
--- one detached by hand, fail_retain_drop). The maintainer chose this over a disown with a hedged remedy (2026-11-03): a
--- genuine v0.4.0 retirement not renamed costs the operator one statement, and pgpm never acts on a guess.
+-- the row's bounds under the row's name, or forget the row to keep the table as their own. Forget, not clear the mark:
+-- a cleared mark leaves the row naming a table out of the parent, or nothing, which retire() then refuses on every
+-- call (#1272: a remedy is the whole repair). Either table may carry the block a v0.4.0 tick laid by name, and pgpm
+-- lifts no block it cannot prove it laid (#1436), so each way out that keeps a table names its block: the one under
+-- the name by its name, a renamed one by the name the operator gave it, which pgpm cannot know. The maintainer chose
+-- this over a disown with a hedged remedy (2026-11-03): a genuine v0.4.0 retirement not renamed costs the operator one
+-- statement, and pgpm never acts on a guess.
 create or replace function pgpm._refuse_unrecorded_mark(p_parent regclass, p_child name, p_lo text, p_hi text, p_now oid,
                                                         p_who text)
 returns void language plpgsql as $$
-declare cfg pgpm.config; v_nsp name; v_parent_q text; v_rel_q text; v_attach text; v_clear text; v_now_q text;
+declare cfg pgpm.config; v_nsp name; v_parent_q text; v_rel_q text; v_attach text; v_forget text; v_now_q text;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);
   v_rel_q := format('%I.%I', v_nsp, p_child);   -- part-row-by-name: text of the remedy message, resolves nothing
@@ -4051,18 +4055,17 @@ begin
   exception when others then
     v_attach := format('(its bounds [%s, %s) could not be encoded: %s)', p_lo, p_hi, sqlerrm);
   end;
-  v_clear := format('update pgpm.part set retiring_at = null where parent_table = %L::regclass and child_name = %L;',
-                    v_parent_q, p_child);
+  v_forget := format('delete from pgpm.part where parent_table = %L::regclass and child_name = %L;', v_parent_q, p_child);
   select format('%I.%I', n.nspname, c.relname) into v_now_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_now;
   insert into pgpm.log (parent_table, action, lo, hi, method)
     values (p_parent, 'fail_retain_identity', p_lo, p_hi,
             case when v_now_q is null then
-              format('%s found %I.%I, which resolves to nothing, under a retirement mark that records no oid to find the relation by (a pgpm older than v0.5.0 wrote it); the mark is kept. If its detached table was renamed, it holds the rows of [%s, %s): rename it back to %I in %I, then attach it: %s Or, if that table is gone or you mean to keep it as your own, clear the mark: %s',
-                     p_who, v_nsp, p_child, p_lo, p_hi, p_child, v_nsp, v_attach, v_clear)
+              format('%s found %I.%I, which resolves to nothing, under a retirement mark that records no oid to find the relation by (a pgpm older than v0.5.0 wrote it); the mark is kept. If its detached table was renamed, it holds the rows of [%s, %s): rename it back to %I in %I, then attach it: %s Or, if that table is gone, or you mean to keep it as your own and give up the range, forget the row: %s If you keep it, lift the write block an older pgpm may have left on it too, under the name you gave it: drop trigger if exists pgpm_write_block on <its new name>;',
+                     p_who, v_nsp, p_child, p_lo, p_hi, p_child, v_nsp, v_attach, v_forget)
             else
-              format('%s found %s (oid %s), no partition of %s, under a retirement mark that records no oid to tell the table the retirement detached from one created under its name since (a pgpm older than v0.5.0 wrote it); the mark is kept and nothing is attached, disowned or dropped. Find which table holds the rows of [%s, %s). If it is %s, attach it: %s If it is another, renamed since, lift the write block an older pgpm may have left on %s (drop trigger if exists pgpm_write_block on %s;), move it aside, rename that table back to %I in %I, and attach it the same way. Or, to keep the table as your own, clear the mark and drop the write block an older pgpm may have left on it: %s drop trigger if exists pgpm_write_block on %s;',
-                     p_who, v_now_q, p_now, v_parent_q, p_lo, p_hi, v_now_q, v_attach, v_now_q, v_now_q, p_child, v_nsp, v_clear, v_now_q)
+              format('%s found %s (oid %s), no partition of %s, under a retirement mark that records no oid to tell the table the retirement detached from one created under its name since (a pgpm older than v0.5.0 wrote it); the mark is kept and nothing is attached, disowned or dropped. Find which table holds the rows of [%s, %s). If it is %s, attach it: %s If it is another, renamed since, lift the write block an older pgpm may have left on %s (drop trigger if exists pgpm_write_block on %s;), move it aside, rename that table back to %I in %I, and attach it the same way. Or, to keep %s as your own and give up the range, forget the row and lift the write block an older pgpm may have left on it: %s drop trigger if exists pgpm_write_block on %s; If the retirement was renamed and you keep it too, lift its block the same way, under the name you gave it: drop trigger if exists pgpm_write_block on <its new name>;',
+                     p_who, v_now_q, p_now, v_parent_q, p_lo, p_hi, v_now_q, v_attach, v_now_q, v_now_q, p_child, v_nsp, v_now_q, v_forget, v_now_q)
             end);
 end;
 $$;
