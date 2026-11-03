@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- **The write-block step anchors an older install's row by its retirement mark, and names a block it put on the
+  operator's table** (#1435). The step compared a partition's name against `child_oid` alone, and a v0.5.0 row
+  records a retirement's oid in `retiring_oid` only. So when the operator renamed such a detached retirement and
+  created a plain table under the old name, `maintain` (whose write-block step runs before `retain`) blocked that
+  table; `retire` then anchored the row (#1427), the step skipped it as detached by hand from then on, and nothing
+  said why every write to a table pgpm never managed was refused. The step now compares against the mark's oid when
+  the row has no `child_oid` and refuses a mismatch as `fail_write_block_identity`, so it never blocks such a table.
+  A block an older pgpm already put there is not lifted: the catalog cannot tell it from a block pgpm put on a
+  partition you detached by hand and kept, which stays. Instead the refusal names it, as does the remedy of the
+  `retain_disown` that releases the renamed retirement (whose `delete` would leave no row to refuse), each with the
+  `drop trigger if exists pgpm_write_block on ...;` statement that lifts it, for a table that carries pgpm's own
+  trigger, is no partition of a parent pgpm manages, and is recorded by no `pgpm.part` row. A row with no oid at all names
+  nothing. A row with no `child_oid` is still compared by its range as well (#1365), whatever its mark. The #518
+  coverage discard reads the same anchor, so the renamed table's coverage is not discarded because the table under
+  its old name is unblocked. `bench/write_block_reads_mark.sh` runs `tests/364` (mutations
+  `write_block_mark_unanchored`, `write_block_refusal_names_no_block`, `write_block_refusal_lifts`,
+  `write_block_note_silent`, `write_block_note_names_partition`, `write_block_note_skips_any_partition`, `write_block_note_names_tracked`, `disown_remedy_names_no_block`,
+  `disown_release_lifts`, `disown_remedy_row_schema_only`, `disown_remedy_parent_schema_rendered`, `disown_remedy_names_own_retirement`,
+  `write_block_mark_refuses_all`, `coverage_reset_mark_unanchored`, `write_block_mark_shadows_stranger`).
+
 - **`retire` releases a detached retirement the operator renamed, and refuses it as detached by hand** (#1427).
   While retention still reached the range, `retire` met such a table, resolved the row's name, found nothing,
   and logged `fail_retain_identity` on every call with the mark kept, saying "oid nothing" about a table that

@@ -149,19 +149,25 @@ HT_CAPTURE_ARM_COMMENT = """       and not exists (select 1 from pg_class d
 
 # _install_write_block's identity check (#429), and the whole of _remove_write_block, which is
 # deliberately NOT anchored. Both live here as constants for the same reason the retire block does.
-WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid into r
+WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid, p.retiring_oid into r
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
-  if found and r.child_oid is not null then
+  v_anchor := coalesce(r.child_oid, r.retiring_oid);   -- #1435: an older install's row is anchored by its mark
+  if found and v_anchor is not null then
     v_now := pgpm._part_rel(p_parent, p_child);
-    if v_now is not null and v_now::oid <> r.child_oid then
+    if v_now is not null and v_now::oid <> v_anchor then
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
-                format('%I.%I is oid %s now, not the oid %s recorded for this partition when it was created; refusing to write-block it',
-                       v_nsp, p_child, v_now::oid::text, r.child_oid));
+                format('%I.%I is oid %s now, not the oid %s %s; refusing to write-block it%s',
+                       v_nsp, p_child, v_now::oid::text, v_anchor,
+                       case when r.child_oid is not null then 'recorded for this partition when it was created'
+                            else 'pgpm''s retirement recorded for this partition' end,
+                       coalesce('. ' || pgpm._stale_write_block_note(v_now::oid), '')));
       return;
     end if;
-  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
-    insert into pgpm.log (parent_table, action, lo, hi, method)   -- #1365: a row with no anchor, by its range
+  end if;
+  if found and r.child_oid is null   -- #1365: a row with no oid of its own, by its range (a mark's oid shadows nothing)
+     and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
+    insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
               format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
                      v_nsp, p_child, p_parent, r.lo, r.hi));
@@ -1509,11 +1515,10 @@ MUTATIONS = {
         "a partition that was simply dropped, AND stops tests/94's poison raising at all, which "
         "quietly retires the loop-isolation coverage that whole file exists for. Part C of "
         "tests/104 is what catches it.",
-        [("    if v_now is not null and v_now::oid <> r.child_oid then\n",
-          "    if v_now::oid is distinct from r.child_oid then\n", 1),
-         ("                       v_nsp, p_child, v_now::oid::text, r.child_oid));\n",
-          "                       v_nsp, p_child, coalesce(v_now::oid::text, 'nothing'), "
-          "r.child_oid));\n", 1)],
+        [("    if v_now is not null and v_now::oid <> v_anchor then\n",
+          "    if v_now::oid is distinct from v_anchor then\n", 1),
+         ("                       v_nsp, p_child, v_now::oid::text, v_anchor,\n",
+          "                       v_nsp, p_child, coalesce(v_now::oid::text, 'nothing'), v_anchor,\n", 1)],
     ),
     "write_block_remove_anchored": (
         "bench/write_block_identity.sh",
@@ -1564,8 +1569,9 @@ MUTATIONS = {
         "created before the upgrade keeps coverage found without its block -- coverage nothing vouches "
         "for, the exact #452 defect, for exactly the partitions an upgrade has nothing to compare against. "
         "Part C of tests/129 is the only thing that catches it, which is why that part exists.",
-        [("      v_substituted := r.child_oid is not null and v_now is not null and v_now::oid <> r.child_oid;\n",
-          "      v_substituted := v_now::oid is distinct from r.child_oid;\n", 1)],
+        [("      v_substituted := coalesce(r.child_oid, r.retiring_oid) is not null and v_now is not null   -- #1435: the mark's oid anchors\n"
+          "                       and v_now::oid <> coalesce(r.child_oid, r.retiring_oid);\n",
+          "      v_substituted := v_now::oid is distinct from coalesce(r.child_oid, r.retiring_oid);\n", 1)],
     ),
     "retire_trusts_unguarded_coverage": (
         "bench/retire_unguarded_coverage.sh",
@@ -16446,8 +16452,7 @@ MUTATIONS["write_block_unanchored_stranger_unchecked"] = (
     "PR #1392 round 3: _install_write_block does not compare an unanchored row's relation by its range, so the write "
     "block goes on an operator's table under the row's name, attached over another range, and its writes are "
     "refused. One clause. tests/355 part G catches it.",
-    [("  elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger\n",
-      "  elsif false and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger\n", 1)],
+    [("  if found and r.child_oid is null   -- #1365:", "  if false   -- #1365:", 1)],
 )
 
 # PR #1392 round 4: an unanchored row's mark judged by the relation it marks, over the marks themselves. One clause each.
@@ -17062,6 +17067,135 @@ MUTATIONS["retire_release_attached_elsewhere"] = (
     "retention reaches, which tells them to drop it, a live partition, rows and all. One clause. tests/363 part H "
     "catches it.",
     [(RETIRE_RELEASE_COND, RETIRE_RELEASE_COND.replace(" and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec)", ""), 1)],
+)
+
+# Issue #1435: the write-block step compared a name against child_oid alone, so an older install's row (v0.5.0
+# recorded retiring_oid only) whose detached retirement the operator renamed had the operator's own table under the
+# old name blocked, and the block was never lifted once retire() anchored the row. The mark's oid is now the anchor,
+# and a block an older tick may have put on such a table is NAMED, with the statement that lifts it, in the identity
+# refusal and in the release's remedy; pgpm never lifts it itself (PR #1436 rounds 3 to 5: every automatic lift
+# reached a block the docs promise stays). bench/write_block_reads_mark.sh runs tests/364 against the mutant.
+WRITE_BLOCK_MARK_ARM = "  v_anchor := coalesce(r.child_oid, r.retiring_oid);   -- #1435: an older install's row is anchored by its mark\n"
+MUTATIONS["write_block_mark_unanchored"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, the pre-fix shape: _install_write_block reads no anchor from a retirement mark, so an older "
+    "install's row is judged by its range alone and the operator's plain table under the old name is blocked. One "
+    "site. tests/364 parts A, B and D catch it.",
+    [(WRITE_BLOCK_MARK_ARM, WRITE_BLOCK_MARK_ARM.replace("coalesce(r.child_oid, r.retiring_oid)", "r.child_oid"), 1)],
+)
+WRITE_BLOCK_REFUSAL_NOTE = "                       coalesce('. ' || pgpm._stale_write_block_note(v_now::oid), '')));\n"
+MUTATIONS["write_block_refusal_names_no_block"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, the refusal silent about the block: an earlier tick's block on the operator's table stays (pgpm "
+    "never lifts it) and the refusal does not name it, so nothing says how to make the table writable. One site. "
+    "tests/364 part B catches it.",
+    [(WRITE_BLOCK_REFUSAL_NOTE, "                       ''));\n", 1)],
+)
+MUTATIONS["write_block_refusal_lifts"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, the refusal lifting what it names: the block is dropped from whatever holds the name, which the "
+    "catalog cannot tell from a block kept on a table detached by hand (PR #1436 rounds 3 to 5). One site. tests/364 "
+    "part B catches it.",
+    [(WRITE_BLOCK_REFUSAL_NOTE,
+      WRITE_BLOCK_REFUSAL_NOTE + "      execute format('drop trigger if exists pgpm_write_block on %s', v_now);\n", 1)],
+)
+MUTATIONS["write_block_note_silent"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, every site silent at once: the note names no block, so neither the refusal nor the release's "
+    "remedy says how to lift a block an older tick laid. A tick refuses and releases in one pass, so a single site's "
+    "silence leaves the other naming it; this is the mutation that restores the issue's acceptance claims. One "
+    "clause. tests/364 parts B, G, I and K catch it.",
+    [("   where c.oid = p_rel\n", "   where c.oid = p_rel and false\n", 1)],
+)
+MUTATIONS["write_block_note_names_partition"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, the note without its 'no partition of a parent pgpm manages' clause: an impostor attached to the "
+    "parent under the name is named as a block to lift, which #429 keeps. One clause. tests/364 part D catches it.",
+    [("     and not exists (select 1 from pg_inherits i join pgpm.config f on f.parent_table = i.inhparent\n"
+      "                      where i.inhrelid = c.oid)\n", "", 1)],
+)
+MUTATIONS["write_block_note_skips_any_partition"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 6 V-02: the note skips a partition of anything, so a block an older tick put on a partition of "
+    "the operator's own partitioned table, under the old name, is never named. One clause. tests/364 part R catches "
+    "it.",
+    [("     and not exists (select 1 from pg_inherits i join pgpm.config f on f.parent_table = i.inhparent\n"
+      "                      where i.inhrelid = c.oid)\n",
+      "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n", 1)],
+)
+MUTATIONS["write_block_note_names_tracked"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 4: the note without its 'no relation pgpm records' clause: in a schema the row shares with a "
+    "twin parent of the same name, the release names the block the twin's partition keeps once detached by hand "
+    "(#705) as one to lift. One clause. tests/364 part K catches it.",
+    [("     and not exists (select 1 from pgpm.part p\n"
+      "                      where c.oid in (p.child_oid, p.retiring_oid, p.detach_dispatched_oid))\n", "", 1)],
+)
+MUTATIONS["disown_remedy_names_no_block"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 3 V-02: the release's remedy does not name the block an older tick put on the operator's table, "
+    "and its DROP deletes the row whose refusal would have named it, so nothing ever says how to lift it. One site. "
+    "tests/364 parts G, I and K catch it.",
+    [("            || coalesce('. ' || v_stale, ''));\n", "            );\n", 1)],
+)
+MUTATIONS["disown_release_lifts"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, the release lifting what it names (rounds 3 to 5 each found a block it reached that the docs "
+    "promise stays). One site. tests/364 part G catches it.",
+    [("             where c.oid is distinct from v_child_oid) s;\n",
+      "             where c.oid is distinct from v_child_oid) s;\n"
+      "    if v_stale is not null then\n"
+      "      execute format('drop trigger if exists pgpm_write_block on %s', to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child)));\n"
+      "    end if;\n", 1)],
+)
+MUTATIONS["disown_remedy_row_schema_only"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 2 V-01: the release looks under the name only in the row's schema, which follows the anchor, so "
+    "once the renamed retirement moved to another schema the block in the parent's is never named. One clause. "
+    "tests/364 part I catches it.",
+    [("to_regclass(format('%I.%I', (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent), p_child))]) c(oid)",
+      "null::regclass]) c(oid)", 1)],
+)
+MUTATIONS["disown_remedy_parent_schema_rendered"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 6 P1-02: the release reads the parent's schema through regnamespace's output, which is already "
+    "quoted where the name needs it, and %I quotes it again, so for a parent in such a schema the lookup finds "
+    "nothing and the remedy names no block (the #512 class). One site. tests/364 part Q catches it.",
+    [("to_regclass(format('%I.%I', (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent), p_child))",
+      "to_regclass(format('%I.%I', (select relnamespace::regnamespace::name from pg_class where oid = p_parent), p_child))", 1)],
+)
+MUTATIONS["disown_remedy_names_own_retirement"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 5 P1-02: the release names a block for a row that records no oid at all (a v0.4.0 mark), where "
+    "the table under the name may be the row's own retirement, so its remedy invites lifting pgpm's own block from a "
+    "table detached by hand (#705). One clause. tests/364 part P catches it.",
+    [("  if v_child_oid is not null then\n    select string_agg(n, ' ') into v_stale\n",
+      "  if true then\n    select string_agg(n, ' ') into v_stale\n", 1)],
+)
+MUTATIONS["write_block_mark_refuses_all"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, the anchor read as a refusal: every marked row with no child_oid is refused, so a partition whose "
+    "name still denotes the marked relation is never blocked and its retirement never archives. One clause. "
+    "tests/364 part C catches it.",
+    [("    if v_now is not null and v_now::oid <> v_anchor then\n",
+      "    if v_now is not null and (v_now::oid <> v_anchor or r.child_oid is null) then\n", 1)],
+)
+MUTATIONS["coverage_reset_mark_unanchored"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435 in _enforce_write_blocks: the #518 discard reads no anchor from a retirement mark, so coverage "
+    "recorded for the renamed retirement is discarded because the operator's table under its old name carries no "
+    "block. One site. tests/364 part E catches it.",
+    [("      v_substituted := coalesce(r.child_oid, r.retiring_oid) is not null and v_now is not null   -- #1435: the mark's oid anchors\n"
+      "                       and v_now::oid <> coalesce(r.child_oid, r.retiring_oid);\n",
+      "      v_substituted := r.child_oid is not null and v_now is not null and v_now::oid <> r.child_oid;\n", 1)],
+)
+MUTATIONS["write_block_mark_shadows_stranger"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 verification P1-02: a marked row with no child_oid is compared by its mark alone, so a partition of the "
+    "parent over another range holding its name (which _part_rel withholds) is never refused, and the step raises "
+    "42P01 about a relation that exists. One clause. tests/364 part H catches it.",
+    [("  if found and r.child_oid is null   -- #1365:",
+      "  if found and r.child_oid is null and r.retiring_oid is null   -- #1365:", 1)],
 )
 
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the
