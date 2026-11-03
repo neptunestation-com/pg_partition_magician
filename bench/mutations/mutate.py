@@ -17084,20 +17084,29 @@ MUTATIONS["write_block_mark_unanchored"] = (
     "site. tests/364 parts A, B and D catch it.",
     [(WRITE_BLOCK_MARK_ARM, WRITE_BLOCK_MARK_ARM.replace("coalesce(r.child_oid, r.retiring_oid)", "r.child_oid"), 1)],
 )
+WRITE_BLOCK_LIFT_DROP = (
+    "      execute format('drop trigger if exists pgpm_write_block on %I.%I', r.nspname, p_child);   -- part-row-by-name: the namesake judged above\n"
+)
+MUTATIONS["write_block_whole_fix_reverted"] = (
+    "bench/write_block_reads_mark.sh",
+    "Issue #1435, the whole fix put back at once: no anchor from the mark AND no lift. Each half alone heals the "
+    "issue's own end state (a block the step lays in one tick, the lift in retain()'s pass of the same tick takes off "
+    "again), so neither single mutation restores the issue's reproduction; this one does. Two sites. tests/364 part "
+    "A catches it.",
+    [(WRITE_BLOCK_MARK_ARM, WRITE_BLOCK_MARK_ARM.replace("coalesce(r.child_oid, r.retiring_oid)", "r.child_oid"), 1),
+     (WRITE_BLOCK_LIFT_DROP, "", 1)],
+)
 MUTATIONS["write_block_stale_kept"] = (
     "bench/write_block_reads_mark.sh",
     "Issue #1435, the refusal without the lift: a block an earlier tick put on the operator's table stays, and the "
-    "step never visits the row again once retire() anchors it. One site. tests/364 part B catches it.",
-    [("    execute format('drop trigger if exists pgpm_write_block on %I.%I', r.nspname, p_child);   -- part-row-by-name: the namesake judged above\n",
-      "", 1)],
+    "step never visits the row again once retire() anchors it. One site. tests/364 parts B and K catch it.",
+    [(WRITE_BLOCK_LIFT_DROP, "", 1)],
 )
 MUTATIONS["write_block_lift_under_parent"] = (
     "bench/write_block_reads_mark.sh",
-    "Issue #1435, the lift without its 'no partition of the parent' clause: a block on an impostor attached to the "
+    "Issue #1435, the lift without its 'no partition of anything' clause: a block on an impostor attached to the "
     "parent under the name is lifted as well, which #429 keeps. One clause. tests/364 part D catches it.",
-    [("              and not exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = c.oid)\n"
-      "              and not exists (select 1 from pg_partition_ancestors(c.oid) a where a.relid = p_parent::oid)\n  loop\n",
-      "  loop\n", 1)],
+    [("              and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n", "", 1)],
 )
 MUTATIONS["write_block_mark_refuses_all"] = (
     "bench/write_block_reads_mark.sh",
@@ -17124,13 +17133,31 @@ MUTATIONS["write_block_stale_lift_once"] = (
     [("        v_lifted := pgpm._lift_stale_write_blocks(p_parent, r.child_name, r.child_oid);\n",
       "        v_lifted := null;\n", 1)],
 )
-MUTATIONS["write_block_lift_own_schema_only"] = (
+MUTATIONS["write_block_lift_named_schemas"] = (
     "bench/write_block_reads_mark.sh",
-    "PR #1436 round 2 V-01: the lift looks for the operator's table in the row's own schema only, which follows the "
-    "anchor, so once a retirement the operator moved to another schema anchors the row, the block an older tick put "
-    "under the old name in the parent's schema is never lifted. One clause. tests/364 part I catches it.",
-    [("\n                                     union select relnamespace from pg_class where oid = p_parent)\n",
-      ")\n", 1)],
+    "PR #1436 rounds 2 and 3 V-01: the lift looks for the operator's table only in the schemas it can name now, the "
+    "row's (which follows the anchor) and the parent's, so once the operator moved the parent as well, the block an "
+    "older tick put under the old name in the schema the parent left is never lifted. One clause. tests/364 part J "
+    "catches it.",
+    [("              and c.oid is distinct from p_anchor\n",
+      "              and c.relnamespace in (select oid from pg_namespace where nspname = pgpm._child_nsp(p_parent, p_child)\n"
+      "                                     union select relnamespace from pg_class where oid = p_parent)\n"
+      "              and c.oid is distinct from p_anchor\n", 1)],
+)
+MUTATIONS["write_block_lift_tracked"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 4: the lift without its 'no relation pgpm records' clause: searching every schema, it lifts the "
+    "block a twin parent's partition of the same name keeps once detached by hand (#705). One clause. tests/364 part "
+    "K catches it.",
+    [("              and not exists (select 1 from pgpm.part p\n"
+      "                               where c.oid in (p.child_oid, p.retiring_oid, p.detach_dispatched_oid))\n", "", 1)],
+)
+MUTATIONS["disown_release_keeps_stale_block"] = (
+    "bench/write_block_reads_mark.sh",
+    "PR #1436 round 3 V-02: the release does not lift the block an older tick put on the operator's table, and leaves "
+    "it to a tick the release's own remedy (DROP the table, DELETE the row) may never let come. One site. tests/364 "
+    "parts K and J catch it.",
+    [("  v_lifted := pgpm._lift_stale_write_blocks(p_parent, p_child, v_child_oid);\n", "", 1)],
 )
 MUTATIONS["write_block_mark_shadows_stranger"] = (
     "bench/write_block_reads_mark.sh",

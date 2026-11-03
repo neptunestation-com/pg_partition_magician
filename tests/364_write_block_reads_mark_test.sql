@@ -18,10 +18,16 @@
 --           under the parent is not the operator's own table, as under #429).
 --   PART E  coverage recorded for the renamed table is not discarded because the operator's table under the name
 --           carries no block (#518's rule, by the mark's oid).
---   PART G  retire() releases the mark and anchors the row before the step runs (a direct call, or a lift that lost
---           its lock race): the next tick still lifts the older install's block from the operator's table.
+--   PART G  retire() has released the mark and anchored the row, and the block still stands (the release's own
+--           lift lost its lock race): the next tick lifts it from the operator's table.
 --   PART I  as G, the renamed retirement also moved to another schema: the block on the operator's table in the
 --           parent's schema is still lifted.
+--   PART K  retire() releases the row with the block in place: the release lifts it itself, and says so in its
+--           retain_disown, so a remedy that deletes the row before any tick strands nothing. A twin parent of the
+--           same name in another schema keeps the block on its own partition detached by hand (#705): a relation
+--           pgpm records is never lifted, whatever its name.
+--   PART J  the parent itself moved to another schema since the older tick blocked the operator's table, and the
+--           retirement renamed and moved to a third: the release still finds and lifts the block.
 --   PART H  a mark's oid shadows no stranger: a partition of the parent over another range holding the name is
 --           refused as under #1365, never a raise.
 --   PART C  the control: a marked row with no child_oid whose name still denotes the marked partition is
@@ -31,12 +37,12 @@
 -- cron.job and cron.alter_job and runs whatever the standing job holds at the top level, as tests/363 does.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds a different set of ids (A 1, 2; B 5, 6, 7; C 21, 22;
--- D 31, 32, 33; E 41, 42, 43, 44; G 51, 52; H 61, 62; I 71, 72, 73), the operator's tables A 98, B 99, E 95, G 93 and I 91, and the
--- impostor D 37, 38, so a write to the wrong relation or a lost row cannot stand in for the right answer.
+-- D 31, 32, 33; E 41, 42, 43, 44; G 51, 52; H 61, 62; I 71, 72, 73; J 81, 82; K 15, 16; the twin 17), the operator's tables
+-- A 98, B 99, E 95, G 93, I 91, J 89 and K 88, and the impostor D 37, 38, so a write to the wrong relation or a lost row cannot stand in for the right answer.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(56);
+select plan(73);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -239,8 +245,8 @@ select format('alter table pgpm_t364.%I rename to g_kept', :'g_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'g_doomed') \gexec
 select format('insert into pgpm_t364.%I values (93, ''mine'')', :'g_doomed') \gexec
 select format('pgpm_t364.%I', :'g_doomed') as g_sq \gset
-select pgpm_t364.lay_block(:'g_sq');
 select ok(not pgpm.retire('pgpm_t364.g', :'g_doomed'), 'G fixture: retire() runs first, as a direct call or retain() would');
+select pgpm_t364.lay_block(:'g_sq');   -- the block the older tick laid, standing still: the release's lift lost its lock race
 select ok((select child_oid = :'g_oid'::oid and retiring_at is null from pgpm.part
             where parent_table = 'pgpm_t364.g'::regclass and lo = '0'),
   'G LIVENESS: retire() released the mark and anchored the row to the renamed table');
@@ -273,8 +279,8 @@ alter table pgpm_t364.i_kept set schema pgpm_t364_keep;
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'i_doomed') \gexec
 select format('insert into pgpm_t364.%I values (91, ''mine'')', :'i_doomed') \gexec
 select format('pgpm_t364.%I', :'i_doomed') as i_sq \gset
-select pgpm_t364.lay_block(:'i_sq');
 select ok(not pgpm.retire('pgpm_t364.i', :'i_doomed'), 'I fixture: retire() runs first');
+select pgpm_t364.lay_block(:'i_sq');   -- as in G, the release's lift lost its lock race
 select ok((select child_oid = :'i_oid'::oid from pgpm.part where parent_table = 'pgpm_t364.i'::regclass and lo = '0')
           and to_regclass('pgpm_t364_keep.i_kept')::oid = :'i_oid'::oid,
   'I LIVENESS: the row is anchored to the renamed table, now in another schema');
@@ -284,6 +290,84 @@ update cron.job set command = 'select 1';
 select ok(not pgpm_t364.blocked(:'i_sq'), 'I: the next tick lifts it from the parent''s schema');
 select lives_ok(format('insert into %s values (90, ''mine'')', :'i_sq'), 'I: the operator can write to their table again');
 select is(pgpm_t364.ids('pgpm_t364_keep.i_kept'), array[71, 72, 73]::bigint[], 'I: the moved table keeps ids 71, 72, 73');
+
+-- ============================================================================================================
+-- PART K: the release lifts the block itself; a twin parent's partition detached by hand keeps its own
+-- ============================================================================================================
+create schema pgpm_t364_twin;
+create table pgpm_t364.k (id bigint primary key, payload text);
+insert into pgpm_t364.k values (15, 'orig'), (16, 'orig');
+call pgpm.transmute('pgpm_t364.k'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('pgpm_t364.k'::regclass, '60000');
+insert into pgpm_t364.k values (35005, 'frontier');
+create table public.k364_ref (id bigint primary key, p_id bigint references pgpm_t364.k(id));
+insert into public.k364_ref values (1, 35005);
+create table pgpm_t364_twin.k (id bigint primary key, payload text);
+insert into pgpm_t364_twin.k values (17, 'twin');
+call pgpm.transmute('pgpm_t364_twin.k'::regclass, 'id', 10000::bigint, p_paused => true);
+select child_name as k_doomed, child_oid as k_oid from pgpm.part where parent_table = 'pgpm_t364.k'::regclass and lo = '0' \gset
+select child_oid as twin_oid from pgpm.part where parent_table = 'pgpm_t364_twin.k'::regclass and lo = '0' \gset
+select format('alter table pgpm_t364_twin.k detach partition pgpm_t364_twin.%I', :'k_doomed') \gexec
+select format('pgpm_t364_twin.%I', :'k_doomed') as twin_rel \gset
+select pgpm_t364.lay_block(:'twin_rel');   -- the block a table detached by hand keeps (#705)
+select ok(not pgpm.retire('pgpm_t364.k', :'k_doomed') and pgpm_t364.armed() <> 'select 1', 'K fixture: retire() dispatches the detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
+update cron.job set command = 'select 1';
+update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.k'::regclass and lo = '0';
+select format('alter table pgpm_t364.%I rename to k_kept', :'k_doomed') \gexec
+select format('create table pgpm_t364.%I (id bigint, payload text)', :'k_doomed') \gexec
+select format('insert into pgpm_t364.%I values (88, ''mine'')', :'k_doomed') \gexec
+select format('pgpm_t364.%I', :'k_doomed') as k_sq \gset
+select pgpm_t364.lay_block(:'k_sq');
+select ok(pgpm_t364.blocked(:'k_sq'), 'K LIVENESS: the operator''s table carries the older install''s block');
+select ok(pgpm_t364.blocked(:'twin_rel') and to_regclass(:'twin_rel')::oid = :'twin_oid'::oid
+          and not exists (select 1 from pg_inherits where inhrelid = :'twin_oid'::oid),
+  'K LIVENESS: the twin parent''s partition of the same name, detached and recorded by its row, carries a block too');
+select ok(not pgpm.retire('pgpm_t364.k', :'k_doomed'), 'K fixture: retire() runs before any tick');
+select ok((select child_oid = :'k_oid'::oid and retiring_at is null from pgpm.part
+            where parent_table = 'pgpm_t364.k'::regclass and lo = '0'),
+  'K LIVENESS: retire() released the mark and anchored the row to the renamed table');
+select ok(not pgpm_t364.blocked(:'k_sq'), 'K: the release lifted the block itself');
+select ok((select method from pgpm.log where parent_table = 'pgpm_t364.k'::regclass and lo = '0' and action = 'retain_disown')
+          like format('%%Lifted the write block an older pgpm put on pgpm_t364.%s, a table it never managed%%', :'k_doomed'),
+  'K: and its retain_disown says so');
+select lives_ok(format('insert into %s values (87, ''mine'')', :'k_sq'), 'K: the operator can write to their table at once');
+select ok(pgpm_t364.blocked(:'twin_rel'), 'K: the twin parent''s partition detached by hand keeps its block');
+select is(pgpm_t364.ids('pgpm_t364.k_kept'), array[15, 16]::bigint[], 'K: the renamed table keeps ids 15, 16');
+
+-- ============================================================================================================
+-- PART J: the parent moved to another schema since the older tick; the release still lifts the block
+-- ============================================================================================================
+create schema pgpm_t364_s2;
+create table pgpm_t364.j (id bigint primary key, payload text);
+insert into pgpm_t364.j values (81, 'orig'), (82, 'orig');
+call pgpm.transmute('pgpm_t364.j'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('pgpm_t364.j'::regclass, '60000');
+insert into pgpm_t364.j values (35005, 'frontier');
+create table public.j364_ref (id bigint primary key, p_id bigint references pgpm_t364.j(id));
+insert into public.j364_ref values (1, 35005);
+select child_name as j_doomed, child_oid as j_oid from pgpm.part where parent_table = 'pgpm_t364.j'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('pgpm_t364.j', :'j_doomed') and pgpm_t364.armed() <> 'select 1', 'J fixture: retire() dispatches the detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
+update cron.job set command = 'select 1';
+update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.j'::regclass and lo = '0';
+select format('alter table pgpm_t364.%I rename to j_kept', :'j_doomed') \gexec
+alter table pgpm_t364.j_kept set schema pgpm_t364_keep;
+select format('create table pgpm_t364.%I (id bigint, payload text)', :'j_doomed') \gexec
+select format('insert into pgpm_t364.%I values (89, ''mine'')', :'j_doomed') \gexec
+select format('pgpm_t364.%I', :'j_doomed') as j_sq \gset
+select pgpm_t364.lay_block(:'j_sq');
+alter table pgpm_t364.j set schema pgpm_t364_s2;
+select ok(pgpm_t364.blocked(:'j_sq') and to_regclass('pgpm_t364_s2.j') is not null and to_regclass('pgpm_t364.j') is null,
+  'J LIVENESS: the block stands in the schema the parent has left, and the parent is in another');
+select ok(not pgpm.retire('pgpm_t364_s2.j', :'j_doomed'), 'J fixture: retire() runs before any tick');
+select ok((select child_oid = :'j_oid'::oid and retiring_at is null from pgpm.part
+            where parent_table = 'pgpm_t364_s2.j'::regclass and lo = '0')
+          and to_regclass('pgpm_t364_keep.j_kept')::oid = :'j_oid'::oid,
+  'J LIVENESS: retire() released the mark and anchored the row to the renamed table, in a third schema');
+select ok(not pgpm_t364.blocked(:'j_sq'), 'J: the release lifted the block in the schema the parent left');
+select lives_ok(format('insert into %s values (86, ''mine'')', :'j_sq'), 'J: the operator can write to their table');
+select is(pgpm_t364.ids('pgpm_t364_keep.j_kept'), array[81, 82]::bigint[], 'J: the moved table keeps ids 81, 82');
 
 -- ============================================================================================================
 -- PART H: a mark's oid shadows no stranger: a partition over another range under the name is still refused (#1365)
