@@ -4061,8 +4061,8 @@ begin
               format('%s found %I.%I, which resolves to nothing, under a retirement mark that records no oid to find the relation by (a pgpm older than v0.5.0 wrote it); the mark is kept. If its detached table was renamed, it holds the rows of [%s, %s): rename it back to %I in %I, then attach it: %s Or, if that table is gone or you mean to keep it as your own, clear the mark: %s',
                      p_who, v_nsp, p_child, p_lo, p_hi, p_child, v_nsp, v_attach, v_clear)
             else
-              format('%s found %s (oid %s), no partition of %s, under a retirement mark that records no oid to tell the table the retirement detached from one created under its name since (a pgpm older than v0.5.0 wrote it); the mark is kept and nothing is attached, disowned or dropped. Find which table holds the rows of [%s, %s). If it is %s, attach it: %s If it is another, renamed since, move %s aside, rename that table back to %I in %I, and attach it the same way. Or, to keep the table as your own, clear the mark and drop the write block an older pgpm may have left on it: %s drop trigger if exists pgpm_write_block on %s;',
-                     p_who, v_now_q, p_now, v_parent_q, p_lo, p_hi, v_now_q, v_attach, v_now_q, p_child, v_nsp, v_clear, v_now_q)
+              format('%s found %s (oid %s), no partition of %s, under a retirement mark that records no oid to tell the table the retirement detached from one created under its name since (a pgpm older than v0.5.0 wrote it); the mark is kept and nothing is attached, disowned or dropped. Find which table holds the rows of [%s, %s). If it is %s, attach it: %s If it is another, renamed since, lift the write block an older pgpm may have left on %s (drop trigger if exists pgpm_write_block on %s;), move it aside, rename that table back to %I in %I, and attach it the same way. Or, to keep the table as your own, clear the mark and drop the write block an older pgpm may have left on it: %s drop trigger if exists pgpm_write_block on %s;',
+                     p_who, v_now_q, p_now, v_parent_q, p_lo, p_hi, v_now_q, v_attach, v_now_q, v_now_q, p_child, v_nsp, v_clear, v_now_q)
             end);
 end;
 $$;

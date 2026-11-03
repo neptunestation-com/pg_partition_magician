@@ -17258,6 +17258,18 @@ MUTATIONS["unrecorded_mark_job_armed"] = (
       "  begin\n    select * into strict cfg", 1)],
 )
 
+MUTATIONS["unrecorded_mark_aside_block_unnamed"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "PR #1437 verification V-01: the refusal's move-aside branch without the block's drop. An operator following it "
+    "moves the table under the name aside still carrying the block an older tick left on it, and no log row names it "
+    "under its new name. One site. tests/365 part C catches it.",
+    [("If it is another, renamed since, lift the write block an older pgpm may have left on %s (drop trigger if exists "
+      "pgpm_write_block on %s;), move it aside,",
+      "If it is another, renamed since, move %s aside,", 1),
+     ("v_now_q, v_attach, v_now_q, v_now_q, p_child, v_nsp, v_clear, v_now_q)",
+      "v_now_q, v_attach, v_now_q, p_child, v_nsp, v_clear, v_now_q)", 1)],
+)
+
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the
 # name only where the name agrees with its mark, and the recall reports a v0.4.0 row with no oid and nothing under
 # its name instead of skipping it. bench/retain_unanchored_marks.sh runs tests/362 against the mutant; one mutation

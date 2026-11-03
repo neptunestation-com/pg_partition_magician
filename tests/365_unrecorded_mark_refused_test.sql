@@ -40,7 +40,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(51);
+select plan(54);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -214,6 +214,8 @@ select format('alter table pgpm_t365.%I rename to c_kept', :'c_doomed') \gexec
 select format('create table pgpm_t365.%I (id bigint, payload text)', :'c_doomed') \gexec
 select format('insert into pgpm_t365.%I values (98, ''mine'')', :'c_doomed') \gexec
 select format('pgpm_t365.%I', :'c_doomed') as c_sq \gset
+-- the block a v0.4.0 tick put on the table under the name before the upgrade (#1437 verification V-01)
+select format('create trigger pgpm_write_block before insert or update or delete on %s for each row execute function pgpm._write_block_raise()', :'c_sq') \gexec
 select pgpm.set_retain('pgpm_t365.c', '45000');
 select ok(pgpm_t365.unrecorded('pgpm_t365.c') and not pgpm_t365.reaches('pgpm_t365.c'),
   'LIVENESS: C: the mark records no oid, and retention no longer reaches the range');
@@ -225,6 +227,14 @@ select ok(not exists (select 1 from pg_inherits where inhrelid = to_regclass(:'c
   'C: the table under the name is attached to nothing');
 select is(pgpm_t365.ids(:'c_sq'), array[98]::bigint[], 'C: and keeps its row');
 select is(pgpm_t365.ids('pgpm_t365.c_kept'), array[11, 12, 13, 14]::bigint[], 'C: the renamed table keeps its rows');
+-- the repair the method spells for the other case, the renamed table holding the range: the table under the name
+-- is moved aside, and the block an older tick left on it is named in that branch, not only in the keep-it branch
+select ok(pgpm_t365.blocked(:'c_sq'), 'LIVENESS: C: the table under the name carries an older tick''s block');
+select is(substring(pgpm_t365.method('pgpm_t365.c') from 'If it is another, [^;]*drop trigger if exists pgpm_write_block on ([^;]*);'), :'c_sq',
+  'C: the move-aside branch names that table''s block');
+select substring(pgpm_t365.method('pgpm_t365.c') from 'If it is another, [^;]*(drop trigger if exists pgpm_write_block on [^;]*;)') \gexec
+select format('alter table %s rename to c_aside', :'c_sq') \gexec
+select lives_ok('insert into pgpm_t365.c_aside values (97, ''mine'')', 'C: run as written, the moved-aside table is writable');
 
 -- ============================================================================================================
 -- PART E: a genuine v0.4.0 retirement, not renamed, still carrying an older tick's block

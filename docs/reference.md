@@ -1783,7 +1783,7 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   job to idle, and attach, disown and drop nothing. The `method` says which case it found and spells both
   ways out. With nothing under the name: rename the detached table back and `ATTACH` it. With a table under
   the name: find which table holds the rows of the range; attach that one under the row's name on the row's
-  bounds (moving the other aside first); or, to keep the table as your own, clear the mark and drop any write
+  bounds (moving the other aside first, after dropping any write block an older pgpm left on it); or, to keep the table as your own, clear the mark and drop any write
   block an older pgpm left on it, after which `retire` refuses the row as a table detached by hand. This holds
   for a retirement that was not renamed too, since pgpm cannot tell it apart: it costs one statement. Nothing
   write-blocks a table under such a row's name that is no partition of the parent.

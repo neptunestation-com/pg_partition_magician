@@ -9,13 +9,14 @@
 # file is the acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run
 # against the mutant, in the shape of bench/write_block_reads_mark.sh.
 #
-# SIX mutations are required to fail against it (bench/mutations/mutate.py):
+# SEVEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   unrecorded_mark_pass_by_name      -- the install pass judges such a mark by its name out of the parent. Parts D, E.
 #   retire_unrecorded_mark_unrefused  -- retire() takes it on by name: a raise, or a disown. Parts A, B, E.
 #   recall_unrecorded_mark_disowned   -- the recall disowns it as the table under the name. Part C.
 #   write_block_unrecorded_blocks     -- the write-block step blocks the table out of the parent. Parts B, E.
 #   write_block_unrecorded_any_rel    -- no block for a row with no oid, even on its partition. Part F.
 #   unrecorded_mark_job_armed         -- the refusal leaves the job armed with the detach. Part A.
+#   unrecorded_mark_aside_block_unnamed -- the move-aside branch names no block on the table it moves. Part C.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree

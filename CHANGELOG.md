@@ -16,7 +16,7 @@
   renamed is refused the same way, which costs the operator one statement. `bench/unrecorded_mark_refused.sh`
   runs `tests/365` (mutations `unrecorded_mark_pass_by_name`, `retire_unrecorded_mark_unrefused`,
   `recall_unrecorded_mark_disowned`, `write_block_unrecorded_blocks`, `write_block_unrecorded_any_rel`,
-  `unrecorded_mark_job_armed`); `tests/362` part E now expects the install pass to leave such a mark.
+  `unrecorded_mark_job_armed`, `unrecorded_mark_aside_block_unnamed`); `tests/362` part E now expects the install pass to leave such a mark.
 
 - **The write-block step anchors an older install's row by its retirement mark, and names a block it put on the
   operator's table** (#1435). The step compared a partition's name against `child_oid` alone, and a v0.5.0 row
