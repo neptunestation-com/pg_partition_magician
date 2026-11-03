@@ -182,8 +182,9 @@ only anchor and a table attached under the old name was then retired (this PR's 
 fix records the marked table as `child_oid` wherever a mark is cleared, guarded by `bench/` mutation
 `disown_unanchored`, not by the model.
 The write-block step's reading of that same row (#1435: the mark's oid anchors it, so an operator's table under
-the old name is refused and a block an earlier tick put on it is lifted) is outside the model for the same reason,
-and is guarded by `bench/write_block_reads_mark.sh` and its fourteen mutations.
+the old name is refused, and a block an earlier tick put on it is named with the statement that lifts it) is
+outside the model for the same reason, and is guarded by `bench/write_block_reads_mark.sh` and its thirteen
+mutations.
 
 ## Independent fidelity read
 

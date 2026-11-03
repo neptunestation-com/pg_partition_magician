@@ -5,25 +5,24 @@
 # bench/discriminate.sh can show the file catches the defects its mutations put back (issue #1435): the write-block
 # step compared a name against child_oid alone, so an older install's row (v0.5.0 recorded retiring_oid only) whose
 # detached retirement the operator renamed had the operator's own table under the old name blocked, and once
-# retire() anchored the row the block was never lifted. The file is the acceptance test; this wrapper exists so the
-# mutations have a guard the discriminate track can run against the mutant, in the shape of
-# bench/retire_renamed_detached.sh.
+# retire() anchored the row nothing ever said why. A block an older tick laid is named, never lifted. The file is the
+# acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run against the
+# mutant, in the shape of bench/retire_renamed_detached.sh.
 #
-# FOURTEEN mutations are required to fail against it (bench/mutations/mutate.py):
-#   write_block_mark_unanchored     -- the pre-fix shape: the mark's oid anchors nothing. Parts A, B, D.
-#   write_block_whole_fix_reverted  -- no anchor and no lift at once: the issue's own reproduction. Part A.
-#   write_block_stale_kept          -- refused, but a block an earlier tick laid stays. Part B.
-#   write_block_lift_under_parent   -- a block on an impostor attached to the parent is lifted too. Part D.
-#   write_block_mark_refuses_all    -- every marked row with no child_oid refused, the partition never blocked. Part C.
-#   coverage_reset_mark_unanchored  -- the renamed table's coverage discarded as unguarded. Part E.
-#   write_block_stale_lift_once     -- no lift once retire() has anchored the row first. Part G.
-#   write_block_mark_shadows_stranger -- a mark's oid hides a partition over another range under the name. Part H.
-#   write_block_lift_named_schemas  -- the lift looks only in the anchor's and the parent's schemas now. Part J.
-#   write_block_lift_any_schema     -- the lift reaches a tenant's kept table in a schema of its own. Part K.
-#   write_block_lift_tracked        -- a twin parent's partition detached by hand loses its block. Part K.
-#   write_block_lift_raises_unprivileged -- a lift the caller may not make raises into it. Parts N, M.
-#   disown_release_keeps_stale_block -- the release leaves the block to a tick that may never come. Parts K, J.
-#   disown_remedy_omits_stale_block -- a release that could not lift says nothing of the block. Part N.
+# THIRTEEN mutations are required to fail against it (bench/mutations/mutate.py):
+#   write_block_mark_unanchored        -- the pre-fix shape: the mark's oid anchors nothing. Parts A, B, D.
+#   write_block_refusal_names_no_block -- the refusal is silent about a block an earlier tick laid. Part B.
+#   write_block_refusal_lifts          -- the refusal lifts what holds the name. Parts B, D.
+#   write_block_note_silent            -- no site names the block, the refusal nor the release. Parts B, G, I, K.
+#   write_block_note_names_partition   -- an impostor attached to the parent is named as a block to lift. Part D.
+#   write_block_note_names_tracked     -- a twin parent's partition detached by hand is named. Part K.
+#   disown_remedy_names_no_block       -- the release's remedy does not name the block. Parts G, I, K.
+#   disown_release_lifts               -- the release lifts the block it names. Part G.
+#   disown_remedy_row_schema_only      -- the release looks only in the row's schema. Part I.
+#   disown_remedy_names_own_retirement -- a row with no oid names its own retirement's block. Part P.
+#   write_block_mark_refuses_all       -- every marked row with no child_oid refused, the partition never blocked. Part C.
+#   coverage_reset_mark_unanchored     -- the renamed table's coverage discarded as unguarded. Part E.
+#   write_block_mark_shadows_stranger  -- a mark's oid hides a partition over another range under the name. Part H.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree
