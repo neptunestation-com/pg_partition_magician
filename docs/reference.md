@@ -1784,7 +1784,7 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   ways out. With nothing under the name: rename the detached table back and `ATTACH` it. With a table under
   the name: find which table holds the rows of the range, and attach that one under the row's name on the
   row's bounds (moving the other aside first, after dropping any write block an older pgpm left on it). Or, in
-  either case, keep the table as your own and give up the range: delete the row from `pgpm.part` (clearing
+  either case, keep the detached table as your own and give up the range: delete the row from `pgpm.part` (clearing
   the mark alone would leave a row that `retire` refuses on every call) and drop any write block an older pgpm
   left on the table you keep; the `method` spells it under the name pgpm can see, and asks you to supply a
   renamed table's new name, which pgpm cannot know. This holds for a retirement that was not renamed too,
