@@ -5145,6 +5145,15 @@ $$;
 -- A null child_oid is unanchored and skips the check, same as everywhere else, so an upgrade never
 -- wedges a partition it has nothing to compare against.
 --
+-- EXCEPT WHERE A RETIREMENT MARK RECORDS THE OID (#1435). An older install's row (v0.5.0 recorded retiring_oid
+-- alone) has no child_oid, but the mark's oid is the partition's, so it is the anchor: the identity check compares
+-- the name against coalesce(child_oid, retiring_oid). Without it, an operator who renamed the detached retirement
+-- and created a plain table under the old name had that table blocked by the step, which maintain() runs before
+-- retain(); retire()'s release then anchored the row, the step skipped it as detached by hand from then on, and the
+-- block was never lifted. So a refusal by the mark's oid also LIFTS a block found on a relation that is no
+-- partition of the parent: no current pgpm puts one there, so it is an earlier tick's, and the refusal is the last
+-- time this step will see that relation. A relation under the parent keeps any block it has, as under #429.
+--
 -- `v_now is not null and ... <> ...`, NOT the `is distinct from` used by the identity checks in
 -- retire() and _archive_step, and the difference is deliberate. Those two fire on a name that
 -- resolves to NOTHING as well, because there the next thing they would do is act on the relation --
@@ -5164,11 +5173,11 @@ $$;
 -- once per re-enable, naming the state it found.
 create or replace function pgpm._install_write_block(p_parent regclass, p_child name)
 returns void language plpgsql as $$
-declare v_nsp name; v_child regclass; v_now regclass; v_enabled "char"; r record;
+declare v_nsp name; v_child regclass; v_now regclass; v_enabled "char"; v_lifted boolean; r record;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
 
-  select p.lo, p.hi, p.child_oid into r
+  select p.lo, p.hi, p.child_oid, p.retiring_oid into r
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
   if found and r.child_oid is not null then
     v_now := pgpm._part_rel(p_parent, p_child);
@@ -5177,6 +5186,21 @@ begin
         values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
                 format('%I.%I is oid %s now, not the oid %s recorded for this partition when it was created; refusing to write-block it',
                        v_nsp, p_child, v_now::oid::text, r.child_oid));
+      return;
+    end if;
+  elsif found and r.retiring_oid is not null then   -- #1435: an older install's row, anchored by its mark
+    v_now := pgpm._part_rel(p_parent, p_child);
+    if v_now is not null and v_now::oid <> r.retiring_oid then
+      v_lifted := not exists (select 1 from pg_partition_ancestors(v_now) a where a.relid = p_parent::oid)
+              and exists (select 1 from pg_trigger t where t.tgrelid = v_now and t.tgname = 'pgpm_write_block');
+      if v_lifted then
+        perform pgpm._remove_write_block(p_parent, p_child);
+      end if;
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
+                format('%I.%I is oid %s now, not the oid %s pgpm''s retirement recorded for this partition; refusing to write-block it%s',
+                       v_nsp, p_child, v_now::oid::text, r.retiring_oid,
+                       case when v_lifted then ', and lifting the write block an earlier tick put on it' else '' end));
       return;
     end if;
   elsif found and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
@@ -5311,7 +5335,8 @@ $$;
 -- refused to write-block the squatter as fail_write_block_identity. The rows described a relation
 -- that was still attached, still blocked and unchanged; only the name had moved. So each child's
 -- name is resolved against pgpm.part.child_oid before anything the loop decides by that name, with
--- exactly _install_write_block's predicate (a null anchor compares as nothing; a name resolving to
+-- exactly _install_write_block's predicate (the anchor is child_oid, or an older install's mark's oid, #1435; a null
+-- anchor compares as nothing; a name resolving to
 -- nothing stays on the skip_write_block path, for the reasons given above that function), and a
 -- substituted name suppresses the discard: the identity refusal, logged by _install_write_block when
 -- the child is eligible, is then the whole of what the tick does for that child. The predicate is
@@ -5332,7 +5357,7 @@ begin
 
   -- #705: a table the operator detached by hand is theirs, not a partition: no block goes on it and none
   -- is lifted or its coverage judged (see _part_detached_by_hand; retire() refuses and logs it)
-  for r in select child_name, lo, hi, child_oid from pgpm.part where parent_table = p_parent and attached
+  for r in select child_name, lo, hi, child_oid, retiring_oid from pgpm.part where parent_table = p_parent and attached
                   and not pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)
     order by hi asc
   loop
@@ -5342,7 +5367,8 @@ begin
 
       -- identity first (#518): does the name still mean the relation pgpm recorded?
       v_now := pgpm._part_rel(p_parent, r.child_name);
-      v_substituted := r.child_oid is not null and v_now is not null and v_now::oid <> r.child_oid;
+      v_substituted := coalesce(r.child_oid, r.retiring_oid) is not null and v_now is not null   -- #1435: the mark's oid anchors
+                       and v_now::oid <> coalesce(r.child_oid, r.retiring_oid);
 
       -- retired chunks are not this partition's coverage and are never discarded (#1141; see retire()), and a
       -- chunk of a relation of this name that was dropped is marked retired first (pgpm._mark_gone_chunks)

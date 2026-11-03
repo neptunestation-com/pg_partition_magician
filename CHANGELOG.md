@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **The write-block step anchors an older install's row by its retirement mark, and lifts a block it put on the
+  operator's table** (#1435). The step compared a partition's name against `child_oid` alone, and a v0.5.0 row
+  records a retirement's oid in `retiring_oid` only. So when the operator renamed such a detached retirement and
+  created a plain table under the old name, `maintain` (whose write-block step runs before `retain`) blocked that
+  table; `retire` then anchored the row (#1427), the step skipped it as detached by hand from then on, and the
+  block was never lifted, refusing every write to a table pgpm never managed. The step now compares against the
+  mark's oid when the row has no `child_oid`, refuses a mismatch as `fail_write_block_identity`, and when the
+  relation under the name is no partition of the parent and carries `pgpm_write_block`, lifts it, saying so in
+  the refusal. An impostor attached to the parent keeps any block it has, as before. The #518 coverage discard
+  reads the same anchor, so the renamed table's coverage is not discarded because the table under its old name
+  is unblocked. `bench/write_block_reads_mark.sh` runs `tests/364` (mutations `write_block_mark_unanchored`,
+  `write_block_stale_kept`, `write_block_lift_under_parent`, `write_block_mark_refuses_all`,
+  `coverage_reset_mark_unanchored`).
+
 - **`retire` releases a detached retirement the operator renamed, and refuses it as detached by hand** (#1427).
   While retention still reached the range, `retire` met such a table, resolved the row's name, found nothing,
   and logged `fail_retain_identity` on every call with the mark kept, saying "oid nothing" about a table that

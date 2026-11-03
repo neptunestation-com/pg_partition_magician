@@ -2488,9 +2488,13 @@ loses a lock race is deferred and retried next tick.
 
 The write-block step checks each child's name against `pgpm.part.child_oid` before installing anything,
 and refuses on a mismatch, logging `fail_write_block_identity` rather than putting a pgpm trigger on a
-relation it has not identified. Removal is deliberately *not* anchored: an older pgpm could have left
-that trigger on a substituted relation, rejecting every write to it, and removing by name is what lets an
-upgraded pgpm lift it off again.
+relation it has not identified. A row an older install left without `child_oid` (v0.5.0 recorded a
+retirement's oid in the mark alone) is checked against the mark's oid instead, so a table of yours created
+under the old name of a detached retirement you renamed is refused, never blocked. If an earlier tick did
+block it, and the table is no partition of the parent, that refusal also lifts the block and says so in its
+`method`. Removal is deliberately *not* anchored: an older pgpm could have left that trigger on a
+substituted relation, rejecting every write to it, and removing by name is what lets an upgraded pgpm lift
+it off again.
 
 A procedure, and each step commits before the next begins, so no step's locks outlive it. Those commits
 mean `maintain` and `maintain_all`, like `transmute`, must be called at the **top level**, never inside
