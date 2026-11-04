@@ -29,7 +29,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(38);
+select plan(39);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -152,9 +152,13 @@ select is((select array_agg(conname::text order by conname) from pg_constraint w
   :'b_cons'::text[], 'B: the CHECK the concurrent detach added is gone again; its constraints are what they were');
 select is(pgpm_t204_old.actions('pgpm_t204_new.rrb', '0'), array['retain_detach', 'retain_recall', 'retain_reattach'],
   'B: logged as exactly retain_detach, retain_recall, retain_reattach');
-select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
-  null, 'B: the retiring marker is cleared with the re-attach');
+-- #1438: kept through the re-attach, cleared by the next tick that finds no detach of it running (tests/366)
+select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
+  null, 'B: the retiring marker is kept through the re-attach');
 select is(pgpm_t204_old.armed(), 'select 1', 'B: the standing job stays idle, so it does not detach the partition again');
+call pgpm.maintain('pgpm_t204_new.rrb');
+select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
+  null, 'B: the next tick, finding no detach of it running, clears the marker');
 select lives_ok($$ insert into pgpm_t204_new.rrb values (9, 'i') $$, 'B: a write into the range lands');
 select lives_ok($$ insert into public.rr204b_ref values (2, 6) $$, 'LIVENESS: (B) a referencing row can point into the re-attached range');
 select throws_ok($$ delete from pgpm_t204_new.rrb where id = 6 $$, '23503', null,

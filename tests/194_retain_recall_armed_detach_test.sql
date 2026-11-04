@@ -33,7 +33,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(51);
+select plan(52);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -151,11 +151,16 @@ select is((select array_agg(conname::text order by conname) from pg_constraint w
   :'b_cons'::text[], 'B: the CHECK the concurrent detach added is gone again; its constraints are what they were');
 select is(pgpm_test194.actions('public.rr194b', '0'), array['retain_detach', 'retain_recall', 'retain_reattach'],
   'B: logged as exactly retain_detach, retain_recall, retain_reattach');
-select is((select retiring_at from pgpm.part where parent_table = 'public.rr194b'::regclass and child_name = :'b_doomed'),
-  null, 'B: the retiring marker is cleared with the re-attach');
+-- #1438: the re-attach keeps the marker, as the attached branch does, so a run pg_cron started before the
+-- re-attach committed, landing after it, is still recognised as this retirement's (tests/366)
+select isnt((select retiring_at from pgpm.part where parent_table = 'public.rr194b'::regclass and child_name = :'b_doomed'),
+  null, 'B: the retiring marker is kept through the re-attach');
 select is(pgpm_test194.armed(), 'select 1', 'B: the standing job stays idle, so it does not detach the partition again');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 select ok(pgpm_test194.attached('public.rr194b', :'b_doomed'), 'B: and a further cron tick leaves it attached');
+call pgpm.maintain('public.rr194b');
+select is((select retiring_at from pgpm.part where parent_table = 'public.rr194b'::regclass and child_name = :'b_doomed'),
+  null, 'B: the next tick, finding no detach of it running, clears the marker');
 select lives_ok($$ insert into public.rr194b values (9, 'i') $$, 'B: a write into the range lands');
 select lives_ok($$ insert into public.rr194b_ref values (2, 6) $$, 'LIVENESS: (B) a referencing row can point into the re-attached range');
 select throws_ok($$ delete from public.rr194b where id = 6 $$, '23503', null,

@@ -1740,7 +1740,9 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   it lands.
 - already detached by that detach: the job is returned to idle and the partition is re-attached on its own
   bounds, logged `retain_reattach`, and the `CHECK` constraint the concurrent detach left on it is
-  dropped again. A re-attach that fails is logged `fail_retain_reattach`, counts in
+  dropped again. `retiring_at` is kept and cleared by a later tick, as above: a detach pg_cron started
+  before the re-attach committed still runs, and if it takes the partition out again, the next tick finds
+  it still marked as pgpm's own and re-attaches it once more. A re-attach that fails is logged `fail_retain_reattach`, counts in
   `status().retain_drop_failures`, leaves the table and its rows whole, and is retried on the next tick.
 - detached, and renamed by hand since: **a hand rename of a detached retirement makes the table the
   operator's.** The recall finds the relation by the oid pgpm recorded, sees that it stands under another

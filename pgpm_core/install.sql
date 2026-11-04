@@ -4961,7 +4961,10 @@ $$;
 --   one call longer is what lets the next branch recognise the late detach as this retirement's own.
 --
 --   DETACHED by this retirement (marker set, no longer a partition of the parent): re-attached on its own
---   bounds, logged retain_reattach. The job is disarmed first, or its next run would detach it again. The
+--   bounds, logged retain_reattach. The job is disarmed first, or its next run would detach it again. The marker
+--   is KEPT, as in the branch above, and cleared by a later call through it (#1438): a run pg_cron started before
+--   this transaction commits still holds the armed command and detaches the partition again, and the kept marker
+--   is what lets the next call take it back once more. The
 --   CHECK constraint DETACH ... CONCURRENTLY leaves on the detached table is dropped once the partition
 --   bound enforces the same thing again, as transmute does with the monolith's: identified as exactly the
 --   partition constraint, which is what the detach adds. A re-attach that fails (a lock timeout in the
@@ -5115,8 +5118,13 @@ begin
         --   for nothing of it
         execute format('alter table %s drop constraint %I', v_now, v_check);
       end loop;
-      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
-       where parent_table = p_parent and child_name = r.child_name;
+      -- #1438: the mark and the dispatch record are KEPT, as the attached branch keeps them (#652), and cleared by a
+      -- later call that finds the partition attached, the job idle and no detach of it running. The idle above is not
+      -- committed until this transaction is, and pg_cron reads a job's command from a cache only a commit refreshes,
+      -- so a run it starts before then still carries the armed DETACH ... CONCURRENTLY: queued on the parent behind
+      -- this ATTACH, it detaches the partition again once this commits. With the mark cleared here the next call
+      -- found an attached-looking row and nothing to take back, and the rows went unserved with nothing recording it.
+      -- With the mark kept, the next call finds pgpm's own retirement detached again and re-attaches it.
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'retain_reattach', r.lo, r.hi,
                 format('retention no longer reaches %I.%I (horizon %s), but its dispatched detach had already landed; re-attached',

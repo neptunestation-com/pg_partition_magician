@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **The recall's re-attach keeps the retirement mark, so a detach run already under way is taken back too**
+  (#1438). When retention stopped reaching a partition pgpm's detach had already taken out, the recall idled
+  the `pgpm_detach` job, re-attached the partition and cleared its mark in one transaction. pg_cron reads a
+  job's command from a cache that only a commit refreshes, so a run it started before that commit still
+  carried the armed `DETACH ... CONCURRENTLY`; queued on the parent behind the `ATTACH`, it took the partition
+  out again. The row then read as attached with no mark, the rows went unserved, the log ended at
+  `retain_reattach` and `status()` counted nothing. The re-attach now keeps the mark and pgpm's dispatch
+  record, as the recall of a still-attached partition already did (#652): the next tick re-attaches a partition
+  a late run took out, and a later tick that finds no detach of it running clears the mark. Found by the formal
+  model's claim C1 (formal methods Phase 2). `bench/retain_recall_late_detach.sh` runs `tests/366`, two sessions
+  ordered by the parent's lock (mutation `recall_reattach_clears_mark`); `tests/194` and `tests/204` part B now
+  expect the mark to clear one tick after the re-attach.
+
 - **A retirement mark that records no oid at all is refused, never judged by its name out of the parent**
   (#1432, #1434). A pgpm older than v0.5.0 wrote a mark as `retiring_at` alone. Once its detach landed and the
   operator renamed the detached table, `retire` met a name that denoted nothing, passed every identity gate and

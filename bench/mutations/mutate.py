@@ -17286,6 +17286,22 @@ MUTATIONS["unrecorded_mark_kept_block_unnamed"] = (
       "trigger if exists pgpm_write_block on <its new name>;',", "',", 1)],
 )
 
+# Issue #1438: _retain_recall's re-attach keeps the retirement marker and pgpm's dispatch record, so a detach run
+# pg_cron started before the re-attach committed, landing after it, is still pgpm's own retirement and the next tick
+# re-attaches it. bench/retain_recall_late_detach.sh runs tests/366 against the mutant.
+MUTATIONS["recall_reattach_clears_mark"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Pre-#1438 _retain_recall: the re-attach clears the marker in its own transaction, so the late run's detach leaves "
+    "an attached-looking row with nothing to take back: the rows go unserved and nothing records it. One site. "
+    "tests/366 catches it.",
+    [("      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+      "        values (p_parent, 'retain_reattach', r.lo, r.hi,",
+      "      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null\n"
+      "       where parent_table = p_parent and child_name = r.child_name;\n"
+      "      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+      "        values (p_parent, 'retain_reattach', r.lo, r.hi,", 1)],
+)
+
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the
 # name only where the name agrees with its mark, and the recall reports a v0.4.0 row with no oid and nothing under
 # its name instead of skipping it. bench/retain_unanchored_marks.sh runs tests/362 against the mutant; one mutation
