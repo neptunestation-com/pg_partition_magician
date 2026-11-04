@@ -86,7 +86,7 @@ language sql immutable as $$
        'paused boolean, n_partitions bigint, coarse_partitions bigint, inflight_partitions bigint, '
        'newest_bound text, fks_suspended bigint, fks_unvalidated bigint, history_unregrained boolean, '
        'retain_drop_failures bigint, retain_backlog bigint, retain_detaching bigint, parent_missing boolean, '
-       'regrain_to text)',
+       'regrain_to text, retain_recalled bigint)',
      0),
     ('pgpm.progress(regclass)',
      'p_parent regclass',
@@ -534,6 +534,19 @@ create table if not exists pgpm.part (
   -- of the parent changes). Null on every row an upgrade finds: such a mark is disowned once the partition is
   -- pending or detached (see _disown_unvouched_retirements).
   detach_dispatched_oid oid,
+  -- THAT RETENTION STOPPED REACHING THIS RETIREMENT AND ITS DETACH WAS RECALLED (#1438): when _retain_recall confirmed
+  -- the pgpm_detach job idle (or absent) for it, with the top-level transaction that did (recall_xid). The mark and
+  -- the dispatch record are KEPT past the recall: pg_cron runs a job's command from a cache only a commit refreshes,
+  -- so a run it started before the idle was seen still carries the detach, and the kept mark is what lets a later
+  -- tick know that detach as pgpm's own and take it back. Cleared with retiring_at, and by retire() when retention
+  -- reaches the partition again and re-dispatches its detach.
+  recalled_at  timestamptz,
+  recall_xid   xid8,
+  -- THE HIGHEST PG_CRON RUN ID A LATER TRANSACTION SAW WHEN IT FIRST SAW THAT RECALL COMMITTED (#1438). pg_cron's
+  -- launcher writes a run's cron.job_run_details row, with the command its cache holds, in the same step that starts
+  -- it, so a run with a higher id was started after the recall committed, from a cache that held the idle: such a run,
+  -- carrying another command, is the proof that no later run can carry this detach (_recall_bound_reached).
+  recall_seen_run bigint,
   primary key (parent_table, child_name)
 );
 -- upgrade path for installs that predate these columns
@@ -542,6 +555,9 @@ alter table pgpm.part add column if not exists retiring_at timestamptz;
 alter table pgpm.part add column if not exists retiring_oid oid;
 alter table pgpm.part add column if not exists child_oid oid;
 alter table pgpm.part add column if not exists detach_dispatched_oid oid;
+alter table pgpm.part add column if not exists recalled_at timestamptz;
+alter table pgpm.part add column if not exists recall_xid xid8;
+alter table pgpm.part add column if not exists recall_seen_run bigint;
 
 -- WHICH ANCHORS THIS UPGRADE ADOPTS (#1160). An oid adopted here is "whatever holds the name now", not the relation
 -- pgpm created, and the archive ledger's own upgrade far below (pgpm._backfill_chunk_oids) must not read it as
@@ -3946,6 +3962,7 @@ declare
   v_stale text;
 begin
   update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null,
+                       recalled_at = null, recall_xid = null, recall_seen_run = null,
                        child_oid = coalesce(child_oid, retiring_oid)
    where parent_table = p_parent and child_name = p_child and retiring_at is not null
   returning lo, hi, coalesce(p_rel, child_oid) into v_lo, v_hi, v_child_oid;
@@ -4140,7 +4157,8 @@ begin
     perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, v_rel));
   end if;
   v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;
-  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null,
+                       recalled_at = null, recall_xid = null, recall_seen_run = null
    where parent_table = p_parent and child_name = p_child;
   insert into pgpm.log (parent_table, action, lo, hi, method)
     values (p_parent, 'retain_disown', r.lo, r.hi,
@@ -4494,7 +4512,7 @@ begin
   end if;
 
   -- the claim: one owner per partition at a time
-  select p.lo, p.hi, p.attached, p.retiring_at, p.retiring_oid, p.child_oid, p.detach_dispatched_oid into r
+  select p.lo, p.hi, p.attached, p.retiring_at, p.retiring_oid, p.child_oid, p.detach_dispatched_oid, p.recalled_at into r
     from pgpm.part p
    where p.parent_table = p_parent and p.child_name = p_child
      for update skip locked;
@@ -4678,6 +4696,18 @@ begin
               'detached from the parent by something other than retirement; not dropping it');
     return false;
   end if;
+  -- DETACHED UNDER A RECALLED MARK (#1438). A recall keeps its mark until pg_cron shows that no run can still carry the
+  -- detach, and for good where pg_cron logs no runs. Until then a detach of the partition is either a late run of
+  -- pgpm's (which _retain_recall re-attaches while retention does not reach it) or the operator's own, taken to keep
+  -- the table, and nothing tells the two apart. Retention reaching it again does not make it pgpm's to drop: refused,
+  -- counted, the table and its rows left standing for the operator to drop or re-attach.
+  if r.recalled_at is not null and not v_attached and not v_pending then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+              format('%I.%I is detached under a retirement mark whose detach was recalled, by a late run of pgpm''s recalled detach or by hand; not dropping it. Drop it or re-attach it yourself',
+                     v_nsp, p_child));
+    return false;
+  end if;
 
   -- PENDING A CONCURRENT DETACH THAT NO RETIREMENT OF PGPM'S ISSUED (#705), before any side effect too. An
   -- operator's DETACH PARTITION ... CONCURRENTLY sets pg_inherits.inhdetachpending in a first transaction that
@@ -4780,9 +4810,12 @@ begin
       -- total order the oldest marker always wins, so there is always exactly one partition able to make
       -- progress and the loser simply retries. An unmarked candidate sorts last (`infinity`), so a fresh
       -- retirement always yields to one already under way.
+      -- A RECALLED MARK HOLDS NO SLOT (#1438): its detach was confirmed idle, and the mark is kept only so a late run's
+      -- detach is still known as pgpm's own. Yielding to it stalled every other table's referenced retirement for as
+      -- long as the mark stood, which is until retention reaches it again where pg_cron logs no runs.
       if exists (
         select 1 from pgpm.part p
-         where p.retiring_at is not null
+         where p.retiring_at is not null and p.recalled_at is null
            and not (p.parent_table = p_parent and p.child_name = p_child)
            and (p.retiring_at, p.parent_table::text, p.child_name)
              < (coalesce(r.retiring_at, 'infinity'::timestamptz), p_parent::text, p_child)
@@ -4857,7 +4890,9 @@ begin
       -- of the parent carrying the row's range, the #421 backfill's own rule; once its detach lands it has no bound
       -- left to say so, and _disown_foreign_mark would disown pgpm's own retirement of it. With the anchor the mark is
       -- judged by child_oid, as every anchored row's is.
+      -- #1438: retention reaches a recalled retirement again, and this dispatch puts its detach back in flight
       update pgpm.part set retiring_at = coalesce(retiring_at, clock_timestamp()),
+                           recalled_at = null, recall_xid = null, recall_seen_run = null,
                            retiring_oid = coalesce(retiring_oid, v_child::oid),
                            child_oid = coalesce(child_oid, v_child::oid)
        where parent_table = p_parent and child_name = p_child;
@@ -4940,6 +4975,132 @@ begin
 end;
 $$;
 
+-- _recall_idle(): idle the pgpm_detach job if it holds p_cmd, and CONFIRM it by the effect (#1438). Null when the job is
+-- confirmed idle or confirmed absent, else the reason, for _retain_recall to refuse with. The attempt's error is kept,
+-- not swallowed as _idle_detach_job swallows it, and the job is then read back: a role pg_cron does not let change the
+-- job (not its owner, not a superuser, no EXECUTE on cron.alter_job) either errors or changes nothing, and both read
+-- as still armed or unreadable here. Confirmed absent is no pg_cron in this database, a superuser that sees no
+-- pgpm_detach job (it sees every job), or a caller that sees none where the last of pgpm.schedule() and
+-- pgpm.unschedule() to run was unschedule() (their pgpm.log rows): pg_cron shows a job only to its owner and to
+-- superusers, so seeing none says nothing about another role's job unless pgpm knows there is none.
+create or replace function pgpm._recall_idle(p_cmd text)
+returns text language plpgsql as $$
+declare v_n int; v_armed boolean;
+begin
+  if not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where n.nspname = 'cron' and c.relname = 'job') then
+    return null;   -- no pg_cron here: nothing can be armed
+  end if;
+  begin
+    execute 'select count(*)::int from (select cron.alter_job(jobid, command => ''select 1'') from cron.job'
+         || ' where jobname = ''pgpm_detach'' and database = current_database() and command = $1) s'
+      using p_cmd;
+    execute 'select count(*)::int, coalesce(bool_or(command = $1), false) from cron.job'
+         || ' where jobname = ''pgpm_detach'' and database = current_database()'
+      into v_n, v_armed using p_cmd;
+  exception when others then
+    return format('pg_cron refused it (%s)', left(sqlerrm, 120));
+  end;
+  if v_armed then
+    return 'the job still holds the detach after the attempt to idle it';
+  end if;
+  if v_n > 0 or exists (select 1 from pg_roles where rolname = current_user and rolsuper) then
+    return null;
+  end if;
+  if (select action from pgpm.log where parent_table is null and action in ('schedule', 'unschedule')
+       order by id desc limit 1) = 'unschedule' then
+    return null;
+  end if;
+  return 'it sees no pgpm_detach job, and pgpm.unschedule() is not the last of schedule() and unschedule() to have run';
+end;
+$$;
+
+-- _cron_run_watermark(): the highest run id in cron.job_run_details this role can see (0 for none), or null where there
+-- is no pg_cron or the table cannot be read (#1438). With cron.log_run off no run above it is ever written, so the
+-- bound it sets is never reached, which is the setting's documented cost; the setting itself is not read, as pg_cron
+-- lets only a superuser read it.
+create or replace function pgpm._cron_run_watermark()
+returns bigint language plpgsql as $$
+declare v bigint;
+begin
+  execute 'select coalesce(max(runid), 0) from cron.job_run_details' into v;
+  return v;
+exception when others then
+  return null;
+end;
+$$;
+
+-- _recall_bound_reached(): whether no pg_cron run can still carry the recalled detach p_cmd (#1438), so the recall's
+-- kept mark can go. True with no pg_cron here. Otherwise, in cron.job_run_details: no run of the pgpm_detach job and no
+-- run carrying p_cmd is unfinished, and either the job is confirmed absent (as _recall_idle confirms it) or one of its
+-- runs above p_seen_run carries another command. pg_cron writes a run's row, with the command its cache holds, when it
+-- starts the run, and refreshes that cache only between such steps, so a run above the watermark a transaction read
+-- after the recall committed started from a cache that held the idle, and every later run's cache holds it too. (A
+-- run's start_time is no such witness: it is written when the command is sent, and pg_cron's default libpq mode reads
+-- the command again then, so a run started from an older cache can record one command and send another.) False
+-- whenever this cannot be read: with cron.log_run off (no run is written), rows purged, or runs this role may not see (job_run_details
+-- shows a run only to the job's owner and to superusers), the mark is kept, which is the safe side.
+create or replace function pgpm._recall_bound_reached(p_cmd text, p_seen_run bigint)
+returns boolean language plpgsql as $$
+declare v_live boolean; v_jobs bigint[]; v_after boolean;
+begin
+  if not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where n.nspname = 'cron' and c.relname = 'job') then
+    return true;
+  end if;
+  if p_seen_run is null then
+    return false;
+  end if;
+  begin
+    execute 'select array_agg(jobid) from cron.job where jobname = ''pgpm_detach'' and database = current_database()'
+      into v_jobs;
+    execute 'select exists (select 1 from cron.job_run_details where (jobid = any($1) or (database = current_database()'
+         || ' and command = $2)) and status not in (''succeeded'', ''failed''))'
+      into v_live using v_jobs, p_cmd;
+    execute 'select exists (select 1 from cron.job_run_details where jobid = any($1) and command is distinct from $2'
+         || ' and runid > $3)'
+      into v_after using v_jobs, p_cmd, p_seen_run;
+  exception when others then
+    return false;
+  end;
+  if v_live then return false; end if;
+  if v_jobs is null then
+    return pgpm._recall_idle(p_cmd) is null;   -- no job: confirmed absent, or not seen
+  end if;
+  return v_after;
+end;
+$$;
+
+-- _recall_unbounded_note(): the clause a recall's log row ends with where pg_cron logs no runs (#1438), so nothing will
+-- show when no run can still carry the detach and the mark is kept until retention reaches the partition again. Empty
+-- where the setting cannot be read (pg_cron lets only a superuser read it); status().retain_recalled shows it anyway.
+create or replace function pgpm._recall_unbounded_note()
+returns text language plpgsql stable as $$
+begin
+  if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'cron' and c.relname = 'job')
+     and current_setting('cron.log_run', true) = 'off' then
+    return '; cron.log_run is off, so nothing will show that no pg_cron run still carries the detach, and its mark is kept until retention reaches the partition again (status().retain_recalled)';
+  end if;
+  return '';
+exception when others then
+  return '';
+end;
+$$;
+
+-- _recall_refused(): _retain_recall's refusal of a recall whose idle could not be confirmed (#1438), logged
+-- fail_retain_recall with the reason and the remedy, which is to run the tick as a role that can change the job.
+create or replace function pgpm._recall_refused(p_parent regclass, p_child name, p_lo text, p_hi text, p_nsp name,
+                                                p_why text)
+returns void language plpgsql as $$
+begin
+  insert into pgpm.log (parent_table, action, lo, hi, method)
+    values (p_parent, 'fail_retain_recall', p_lo, p_hi,
+            format('retention no longer reaches %I.%I, whose detach pgpm dispatched through the pgpm_detach cron job, and role %I could not confirm that job idle: %s. Neither recalled nor re-attached. Run pgpm.maintain(%L) as the job''s owner (the role that ran pgpm.schedule(), with EXECUTE on cron.alter_job) or as a superuser',
+                   p_nsp, p_child, current_user, p_why, p_parent::text));
+end;
+$$;
+
 -- _retain_recall(): take back a retirement retention no longer reaches (issue #724).
 --
 -- retire() marks a referenced partition (retiring_at) and arms the standing pgpm_detach job with its
@@ -4954,11 +5115,7 @@ $$;
 --
 --   ARMED, still attached: the job is returned to idle, conditionally on still holding THIS partition's
 --   command (the #407 rule: never clobber another parent's dispatch), logged retain_recall. The marker is
---   KEPT by that call and cleared only by a later one that finds the job no longer armed with it and no
---   detach of it running. A detach pg_cron had already picked up when the recall landed still runs, and a
---   marker cleared in the same transaction as the recall would leave it landing on a partition that looks
---   detached by an operator, which this function and retire() both leave alone (#652). Keeping the marker
---   one call longer is what lets the next branch recognise the late detach as this retirement's own.
+--   KEPT, stamped recalled_at, until pg_cron shows that no run can still carry the detach (see THE MARK below).
 --
 --   DETACHED by this retirement (marker set, no longer a partition of the parent): re-attached on its own
 --   bounds, logged retain_reattach. The job is disarmed first, or its next run would detach it again. The
@@ -4976,6 +5133,28 @@ $$;
 -- the recorded relation still stands, detached, under another name. The operator renamed a retirement that was
 -- out of the parent, which makes it theirs: the mark is released (retain_disown), and the table is not re-attached.
 --
+-- THE IDLE IS CONFIRMED BY ITS EFFECT (#1438), never predicted from who the caller is. pg_cron lets only a job's owner
+-- or a superuser change it, shows it only to them, and 1.6 revokes EXECUTE on cron.alter_job from PUBLIC; each rule
+-- pgpm used to guess from that (visibility, BYPASSRLS, ownership, the dispatching role) was wrong for some role setup,
+-- and a guessed idle that did nothing left the detach armed under a recall that said it was not. So _recall_idle
+-- attempts the idle and reads the job back. A recall goes ahead only on a job confirmed idle or confirmed absent;
+-- anything else is refused, logged fail_retain_recall (counted in status().retain_drop_failures) with pg_cron's own
+-- reason, and the retirement is neither recalled nor re-attached: a re-attach the job then detaches again is a loop,
+-- not a recall.
+--
+-- THE MARK IS KEPT UNTIL PG_CRON SHOWS NO RUN CAN STILL CARRY THE DETACH (#1438). pg_cron reads a job's command from
+-- a cache only a commit refreshes, and in background-worker mode a run takes the command when the launcher starts it,
+-- so a run started before the idle was seen lands its detach after any recall. A mark cleared on any earlier reading
+-- left that detach on a partition that looks detached by an operator, which this function and retire() both leave
+-- alone (#652), its rows unserved and nothing recording it. Kept, the late detach is pgpm's own retirement detached
+-- again, and the next call re-attaches it. It is cleared, as the base cleared it, once _recall_bound_reached holds:
+-- no run of the job (nor any run carrying the detach) is unfinished in cron.job_run_details, and a run of the job
+-- carrying another command was started after a later transaction first saw the recall committed (its run id is
+-- above recall_seen_run, the watermark that transaction read; see the column). From then on a hand
+-- detach of the partition is the operator's again. Where pg_cron logs no runs (cron.log_run off) nothing can show
+-- that, and the mark is kept until retention reaches the partition again, counted in status().retain_recalled;
+-- retire() never drops a table detached under a recalled mark (it may be a hand detach), and refuses it instead.
+--
 -- p_reattach false is set_retain's call: recall only. set_retain is an operator's call with no
 -- lock_timeout of its own, and an ATTACH there would queue behind whatever holds the parent; the tick
 -- that follows re-attaches under maintain's 200 ms lock_timeout, and confirms the recall.
@@ -4983,8 +5162,7 @@ create or replace function pgpm._retain_recall(p_parent regclass, p_reattach boo
 returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_boundary text; v_nsp name; r record; v_now regclass; v_cmd_q text; v_rec oid;
-  v_armed boolean; v_pending boolean; v_check name; v_n int := 0;
-  v_db oid := (select oid from pg_database where datname = current_database());
+  v_armed boolean; v_pending boolean; v_check name; v_n int := 0; v_why text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -4995,11 +5173,21 @@ begin
   end if;
   v_boundary := pgpm._retain_boundary(cfg);
 
-  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid from pgpm.part
+  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, recalled_at, recall_xid,
+                  recall_seen_run from pgpm.part
             where parent_table = p_parent and attached and retiring_at is not null
   loop
     -- still reached: the retirement stands, and retire() finishes it
     continue when v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);
+
+    -- #1438: the first transaction that sees the recall committed stamps pg_cron's run watermark. Only the recall's
+    -- own transaction reads it in progress: a row another one stamped is visible only once that one committed.
+    if r.recalled_at is not null and r.recall_seen_run is null
+       and pg_xact_status(r.recall_xid) is distinct from 'in progress' then
+      r.recall_seen_run := pgpm._cron_run_watermark();
+      update pgpm.part set recall_seen_run = r.recall_seen_run
+       where parent_table = p_parent and child_name = r.child_name and r.recall_seen_run is not null;
+    end if;
 
     -- #778: the partition's own schema, not the parent's (#727). retire() armed the job with
     -- <own schema>.<child>, so the identity check, the disarm, the ATTACH and the constraint drop below
@@ -5046,28 +5234,33 @@ begin
       from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v_now;
     if found then
       continue when v_pending;
-      if v_armed then
-        perform pgpm._idle_detach_job(v_cmd_q);
-        insert into pgpm.log (parent_table, action, lo, hi, method)
-          values (p_parent, 'retain_recall', r.lo, r.hi,
-                  format('retention no longer reaches %I.%I (horizon %s); its dispatched concurrent detach was recalled and the partition stays attached',
-                         v_nsp, r.child_name, coalesce(v_boundary, 'none')));
-        v_n := v_n + 1;
+      if r.recalled_at is null then
+        -- #1438: recalled only on a job confirmed idle (or absent) by the attempt itself, and the mark KEPT
+        v_why := pgpm._recall_idle(v_cmd_q);
+        if v_why is not null then
+          perform pgpm._recall_refused(p_parent, r.child_name, r.lo, r.hi, v_nsp, v_why);
+          continue;
+        end if;
+        update pgpm.part set recalled_at = clock_timestamp(), recall_xid = pg_current_xact_id(), recall_seen_run = null
+         where parent_table = p_parent and child_name = r.child_name;
+        if v_armed then
+          insert into pgpm.log (parent_table, action, lo, hi, method)
+            values (p_parent, 'retain_recall', r.lo, r.hi,
+                    format('retention no longer reaches %I.%I (horizon %s); its dispatched concurrent detach was recalled and the partition stays attached%s',
+                           v_nsp, r.child_name, coalesce(v_boundary, 'none'), pgpm._recall_unbounded_note()));
+          v_n := v_n + 1;
+        end if;
         continue;
       end if;
-      -- not armed: clear the marker unless a detach of it is still on its way (_detach_reap's signals 1
-      -- and 2: a lock on the partition held or awaited, or the statement itself)
-      continue when p_reattach is not true
-        or exists (select 1 from pg_locks l
-                    where l.locktype = 'relation' and l.database = v_db and l.relation = v_now::oid
-                      and l.mode in ('ShareUpdateExclusiveLock', 'AccessExclusiveLock')
-                      and l.pid <> pg_backend_pid())
-        or exists (select 1 from pg_stat_activity a
-                    where a.datname = current_database() and a.pid <> pg_backend_pid() and a.state = 'active'
-                      and a.query ~* 'detach[[:space:]]+partition' and a.query ~* 'concurrently'
-                      and position(lower(r.child_name) in lower(a.query)) > 0);
-      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
-       where parent_table = p_parent and child_name = r.child_name;
+      -- recalled before: the mark is cleared once no run can still carry the detach (see the header)
+      continue when p_reattach is not true or not pgpm._recall_bound_reached(v_cmd_q, r.recall_seen_run);
+      -- still attached, read AFTER the run log: pg_cron records a run finished only once its detach has committed, so
+      -- a detach that landed since the read above shows here, and the mark stays for the next call to re-attach it
+      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null,
+                       recalled_at = null, recall_xid = null, recall_seen_run = null
+       where parent_table = p_parent and child_name = r.child_name
+         and exists (select 1 from pg_inherits i
+                      where i.inhparent = p_parent and i.inhrelid = v_now and not i.inhdetachpending);
       continue;
     end if;
 
@@ -5091,7 +5284,12 @@ begin
         format('retention no longer reaches %I.%I, which is detached under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, r.child_name));
       continue;
     end if;
-    perform pgpm._idle_detach_job(v_cmd_q);
+    -- #1438: the job is confirmed idle first, by the attempt, or its next run detaches the partition again
+    v_why := pgpm._recall_idle(v_cmd_q);
+    if v_why is not null then
+      perform pgpm._recall_refused(p_parent, r.child_name, r.lo, r.hi, v_nsp, v_why);
+      continue;
+    end if;
     begin
       -- by-name-ok: checked by its effect just below (v_now must be attached to p_parent), raised in a handler that
       --   rolls the attach back
@@ -5115,12 +5313,17 @@ begin
         --   for nothing of it
         execute format('alter table %s drop constraint %I', v_now, v_check);
       end loop;
-      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+      -- #1438: the mark and the dispatch record are KEPT (see the header). The idle above is not committed until this
+      -- transaction is, so a run pg_cron starts before then still carries the detach: queued on the parent behind
+      -- this ATTACH, it detaches the partition again once this commits, and a later call re-attaches it. A recall
+      -- already stamped keeps its stamps: the bound is on the runs since it was first seen.
+      update pgpm.part set recalled_at = coalesce(recalled_at, clock_timestamp()),
+                           recall_xid = case when recalled_at is null then pg_current_xact_id() else recall_xid end
        where parent_table = p_parent and child_name = r.child_name;
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'retain_reattach', r.lo, r.hi,
-                format('retention no longer reaches %I.%I (horizon %s), but its dispatched detach had already landed; re-attached',
-                       v_nsp, r.child_name, coalesce(v_boundary, 'none')));
+                format('retention no longer reaches %I.%I (horizon %s), but its dispatched detach had already landed; re-attached%s',
+                       v_nsp, r.child_name, coalesce(v_boundary, 'none'), pgpm._recall_unbounded_note()));
       v_n := v_n + 1;
     exception when others then
       insert into pgpm.log (parent_table, action, lo, hi, method)
@@ -15968,6 +16171,9 @@ begin
   -- one-shot schedule, so a per-retirement job would keep firing after it succeeded.
   execute format('select cron.schedule_in_database(%L, %L, %L, %L)',
                  'pgpm_detach', p_every, 'select 1', current_database());
+  -- #1438: pgpm's own record of whether pgpm_detach exists, which a role that cannot see another role's job reads
+  -- (_recall_idle): the last of these rows and unschedule()'s says which of the two ran last
+  insert into pgpm.log (parent_table, action, method) values (null, 'schedule', format('by %I', current_user));
   return v_jobid;
 end;
 $$;
@@ -15981,6 +16187,10 @@ begin
   end if;
   execute 'select count(*)::int from (select cron.unschedule(jobid) from cron.job '
        || 'where jobname in (''pgpm'', ''pgpm_obtain'', ''pgpm_detach'') and database = current_database()) s' into v_n;
+  -- #1438: see schedule()
+  if v_n > 0 then
+    insert into pgpm.log (parent_table, action, method) values (null, 'unschedule', format('by %I, %s job(s) removed', current_user, v_n));
+  end if;
   return v_n;
 end;
 $$;
@@ -16569,7 +16779,7 @@ returns table (
   paused boolean, n_partitions bigint, coarse_partitions bigint, inflight_partitions bigint,
   newest_bound text,
   fks_suspended bigint, fks_unvalidated bigint, history_unregrained boolean, retain_drop_failures bigint,
-  retain_backlog bigint, retain_detaching bigint, parent_missing boolean, regrain_to text
+  retain_backlog bigint, retain_detaching bigint, parent_missing boolean, regrain_to text, retain_recalled bigint
 )
 language plpgsql as $$
 declare
@@ -16577,7 +16787,7 @@ declare
   v_missing boolean;
 
   v_fks_susp bigint; v_fks_unval bigint;
-  v_last_retain_id bigint; v_drop_fails bigint; v_detaching bigint;
+  v_last_retain_id bigint; v_drop_fails bigint; v_detaching bigint; v_recalled bigint;
   v_retain_boundary text; v_retain_backlog bigint;
 begin
   for r in select * from pgpm.config loop
@@ -16643,12 +16853,16 @@ begin
       where parent_table = r.parent_table
         and action in ('fail_retain_drop', 'fail_retain_crossing', 'fail_retain_detach',
                        'fail_retain_identity', 'fail_archive_identity', 'fail_write_block_identity',
-                       'fail_archive_contract', 'fail_retain_reattach')
+                       'fail_archive_contract', 'fail_retain_reattach', 'fail_retain_recall')
         and id > coalesce(v_last_retain_id, 0);
     -- Partitions whose concurrent detach has been dispatched and not yet completed (issue #268).
     -- Non-zero is normal for a tick or two while cron performs the detach; persistently non-zero with
     -- retain_drop_failures climbing means the dispatch has nowhere to go.
-    select count(*) into v_detaching from pgpm.part
+    -- A recalled retirement keeps its mark (#1438) with nothing in flight: counted apart, in retain_recalled.
+    -- Non-zero for a tick or two after a recall while pg_cron shows its runs; persistently non-zero where
+    -- cron.log_run is off, which leaves nothing to show it, until retention reaches the partition again.
+    select count(*) filter (where recalled_at is null), count(*) filter (where recalled_at is not null)
+      into v_detaching, v_recalled from pgpm.part
       where parent_table = r.parent_table and retiring_at is not null;
     -- retain_backlog: eligible-but-undropped partitions (whole range at/below the retention horizon,
     -- issue #189). Non-zero is normal while retain_batch paces a backlog across ticks, or while
@@ -16678,7 +16892,7 @@ begin
     coarse_partitions := v_coarse; inflight_partitions := v_inflight; history_unregrained := v_coarse > 0;
     newest_bound := v_new;
     fks_suspended := v_fks_susp; fks_unvalidated := v_fks_unval; retain_drop_failures := v_drop_fails;
-    retain_backlog := v_retain_backlog; retain_detaching := v_detaching;
+    retain_backlog := v_retain_backlog; retain_detaching := v_detaching; retain_recalled := v_recalled;
     parent_missing := v_missing; regrain_to := r.regrain_to;
     return next;
   end loop;

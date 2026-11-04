@@ -1208,6 +1208,7 @@ run_perf() {
     "bench/regrain_reconcile_identity.sh pgpm_perf321"
     "bench/regrain_child_oid_sites.sh pgpm_perf124"
     "bench/retain_recall_armed_detach.sh pgpm_perf145"
+    "bench/retain_recall_late_detach.sh pgpm_perf448"
     "bench/moved_parent_lifecycle.sh pgpm_perf148"
     "bench/orphan_guard_id_labels.sh pgpm_perf147"
     "bench/reap_and_abort_lock_timeout.sh pgpm_perf149"

@@ -52,6 +52,8 @@ returns void language sql as $$
   update cron.job set command = coalesce(alter_job.command, job.command) where jobid = job_id
 $$;
 insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
+create table cron.job_run_details (jobid bigint, runid bigserial, database text, username text, command text,
+                                   status text, start_time timestamptz, end_time timestamptz);
 
 create schema pgpm_t362;
 create schema pgpm_t362_else;
@@ -63,6 +65,13 @@ begin
   execute format('select array_agg(id order by id) from %s where id < %s', p_rel, coalesce(p_below, 9223372036854775807)) into v;
   return v;
 end;
+$$;
+-- a run of the standing job, recorded in cron.job_run_details as pg_cron's launcher records one (#1438); \gexec runs it
+create function pgpm_t362.ran() returns text language sql as $$
+  insert into cron.job_run_details (jobid, database, username, command, status, start_time, end_time)
+  select jobid, database, current_user, command, 'succeeded', clock_timestamp(), clock_timestamp()
+    from cron.job where jobname = 'pgpm_detach'
+  returning command
 $$;
 create function pgpm_t362.armed() returns text language sql as $$
   select command from cron.job where jobname = 'pgpm_detach'
@@ -269,8 +278,13 @@ select format('alter table pgpm_t362.ud_kept rename to %I', :'d_doomed') \gexec
 select substring(method from '(alter table \S+ attach partition [^;]*;)') from pgpm.log
  where parent_table = 'pgpm_t362.ud'::regclass and lo = '0' and action = 'fail_retain_identity' \gexec
 call pgpm.maintain('pgpm_t362.ud');
+-- #1438: the recall keeps the mark until pg_cron shows a run of the idle job started after a later tick saw it
+select pgpm_t362.ran() \gexec
+call pgpm.maintain('pgpm_t362.ud');
+select pgpm_t362.ran() \gexec
+call pgpm.maintain('pgpm_t362.ud');
 select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t362.ud'::regclass and lo = '0'), null,
-  'D: once repaired, the next tick clears the mark');
+  'D: once repaired, and pg_cron shows a run of the idle job since, a tick clears the mark');
 select is(pgpm_t362.ids('pgpm_t362.ud', 100), array[21]::bigint[], 'D: and the row is served through the parent again');
 
 -- PART C, continued, last (its tick retires the next partition, and one detach is in flight at a time): retention
