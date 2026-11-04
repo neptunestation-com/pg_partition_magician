@@ -7,12 +7,19 @@
 # started before that commit, still carrying the armed DETACH ... CONCURRENTLY and queued on the parent behind the
 # ATTACH, took the partition out again and left a row that read as attached with nothing to take back. The file is
 # the acceptance test; this wrapper exists so the mutation has a guard the discriminate track can run against the
-# mutant, in the shape of bench/retain_recall_renamed_detached.sh.
+# mutant, in the shape of bench/retain_recall_renamed_detached.sh. A recalled retirement now keeps its mark for
+# good (until retention reaches it again), and a caller that cannot see the job is refused (fail_retain_recall).
 #
-# THREE mutations are required to fail against it (bench/mutations/mutate.py):
+# NINE mutations are required to fail against it (bench/mutations/mutate.py):
 #   recall_reattach_clears_mark       -- the re-attach clears the marker in its own transaction again. Part A.
-#   recall_clear_after_idle_in_xact   -- the still-attached clear takes this transaction's own idle. Part B.
-#   retire_slot_held_by_idle_mark     -- retire() yields to an older mark the job does not hold. Part C.
+#   recall_mark_cleared_on_idle_tick  -- a tick finding the job idle clears a recalled mark. Part A's late run.
+#   recalled_mark_counted_detaching   -- status().retain_detaching counts a recalled mark. Part A.
+#   retire_slot_held_by_idle_mark     -- retire() yields to an older mark the job does not hold. Part B.
+#   retire_redispatch_keeps_recalled  -- retire()'s re-dispatch leaves recalled_at set. Part D.
+#   recall_unseen_job_attached        -- a caller that cannot see the job recalls anyway. Part E.
+#   recall_unseen_job_reattached      -- ... or re-attaches under a job it cannot idle. Part E.
+#   recall_unseen_refuses_superuser   -- a superuser that sees there is no job is refused. Part F.
+#   recall_unseen_without_cron        -- a database with no pg_cron is refused. Part F.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove; the second sessions are dblink connections ordered by
 # the parent's lock, polled server-side, and the test brings its own stand-in for pg_cron's catalog).

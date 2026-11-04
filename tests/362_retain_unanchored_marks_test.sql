@@ -269,8 +269,9 @@ select format('alter table pgpm_t362.ud_kept rename to %I', :'d_doomed') \gexec
 select substring(method from '(alter table \S+ attach partition [^;]*;)') from pgpm.log
  where parent_table = 'pgpm_t362.ud'::regclass and lo = '0' and action = 'fail_retain_identity' \gexec
 call pgpm.maintain('pgpm_t362.ud');
-select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t362.ud'::regclass and lo = '0'), null,
-  'D: once repaired, the next tick clears the mark');
+-- #1438: retention no longer reaches it, so the recall keeps the mark, stamped recalled, as it keeps every one
+select isnt((select recalled_at from pgpm.part where parent_table = 'pgpm_t362.ud'::regclass and lo = '0'), null,
+  'D: once repaired, the next tick takes the retirement back, its mark kept and stamped recalled');
 select is(pgpm_t362.ids('pgpm_t362.ud', 100), array[21]::bigint[], 'D: and the row is served through the parent again');
 
 -- PART C, continued, last (its tick retires the next partition, and one detach is in flight at a time): retention

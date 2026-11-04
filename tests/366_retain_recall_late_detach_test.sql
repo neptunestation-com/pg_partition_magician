@@ -13,9 +13,11 @@
 -- recalls, so the job stays armed), and the tick's recall re-attaches it while the next cadence's run is queued.
 --
 -- THE CONTRACT.
---   The re-attach keeps the marker and pgpm's dispatch record, as the attached branch does (#652), so a late
---   run's detach is still pgpm's own retirement: the next tick re-attaches it once more. A tick after that, with
---   the job idle and no detach of it running, clears the marker.
+--   A recalled retirement keeps its marker and pgpm's dispatch record, stamped recalled_at, until retention
+--   reaches it again (retire() re-dispatches and clears recalled_at), so a late run's detach is pgpm's own
+--   retirement on any later tick and the tick re-attaches it once more. status().retain_detaching does not count
+--   a recalled mark. A caller that cannot see the pgpm_detach job (pg_cron shows a job only to its owner and to
+--   superusers) is refused, fail_retain_recall, and neither recalls nor re-attaches.
 --
 -- TWO SESSIONS, ordered by locks, not by time: dblink connection `rc` runs the recall (retain(), the call
 -- maintain makes) inside an open transaction; connection `rd` sends the armed command, as pg_cron's worker
@@ -30,7 +32,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(36);
+select plan(66);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -164,15 +166,23 @@ select is(pgpm_test366.actions(), array['retain_detach', 'retain_reattach', 'ret
 select is(pgpm_test366.armed(), 'select 1', 'the standing job is idle');
 
 call pgpm.maintain('public.rl366');
+call pgpm.maintain('public.rl366');
 
-select ok(pgpm_test366.attached(:'doomed_oid'), 'a further tick leaves the partition attached');
-select is((select retiring_at from pgpm.part where parent_table = 'public.rl366'::regclass and lo = '0'),
-  null, 'the tick after, finding no detach of it running, clears the marker');
-select is((select detach_dispatched_oid from pgpm.part where parent_table = 'public.rl366'::regclass and lo = '0'),
-  null, 'and the dispatch record');
+select ok(pgpm_test366.attached(:'doomed_oid'), 'two further ticks leave the partition attached');
+select results_eq($$ select retiring_at is not null, detach_dispatched_oid, recalled_at is not null from pgpm.part
+                      where parent_table = 'public.rl366'::regclass and lo = '0' $$,
+  format('values (true, %s::oid, true)', :'doomed_oid'),
+  'with the job idle and no detach of it running, the ticks keep the marker and the dispatch record, stamped recalled');
 select is(pgpm_test366.ids(20000), array[1, 2, 3]::bigint[], 'ids 1, 2, 3 are still served');
 select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'public.rl366'::regclass $$,
   $$ values (0::bigint, 0::bigint) $$, 'status() reports nothing failed and nothing detaching');
+
+-- a run of the old command that lands only now (a background worker's cache, a launcher that has not looked)
+select :'cmd' \gexec
+select ok(not pgpm_test366.attached(:'doomed_oid'), 'LIVENESS: a run landing three ticks later detached the partition');
+call pgpm.maintain('public.rl366');
+select ok(pgpm_test366.attached(:'doomed_oid'), 'the next tick re-attached it, the kept marker naming it pgpm''s own');
+select is(pgpm_test366.ids(20000), array[1, 2, 3]::bigint[], 'ids 1, 2, 3 are served again');
 select lives_ok($$ insert into public.rl366_ref values (2, 2) $$,
   'a referencing row can point into the re-attached range');
 
@@ -243,10 +253,142 @@ select is(pgpm_test366.armed(), 'select 1', 'LIVENESS: (C) the job is idle');
 select ok(not pgpm.retire('public.rl366c', :'c_doomed'), 'fixture: (C) retire() of the other parent''s partition returns');
 select is(pgpm_test366.armed(), format('alter table public.rl366c detach partition public.%I concurrently', :'c_doomed'),
   'C: it dispatched its detach rather than yield to B''s kept mark');
+select pgpm_test366.armed() as c_cmd_run \gset
 
 call pgpm.maintain('public.rl366b');
-select is((select retiring_at from pgpm.part where parent_table = 'public.rl366b'::regclass and lo = '0'),
-  null, 'B: a later tick, the job holding another detach, clears B''s mark');
+select isnt((select recalled_at from pgpm.part where parent_table = 'public.rl366b'::regclass and lo = '0'),
+  null, 'B: a later tick, the job holding another detach, keeps B''s mark, recalled');
 select is(pgpm_test366.served('public.rl366b', 20000), array[11, 12]::bigint[], 'B: ids 11, 12 are still served');
 
+-- ============ PART D: retention reaches a recalled retirement again ============
+-- retire() dispatches its detach anew and clears recalled_at: the mark is a detach in flight once more, and
+-- status() counts it. C's detach is run first, so the slot is free.
+select :'c_cmd_run' \gexec
+select ok(not pgpm_test366.on_parent('public.rl366c', (select child_oid from pgpm.part where parent_table = 'public.rl366c'::regclass and lo = '0')),
+  'LIVENESS: (D) C''s detach landed, so no attached retirement holds the slot');
+update pgpm.config set retain = '25000' where parent_table = 'public.rl366b'::regclass;   -- set_retain refuses a tightening that drops
+select ok(not pgpm.retire('public.rl366b', :'b_doomed'), 'fixture: (D) retire() of B''s recalled partition returns');
+select is(pgpm_test366.armed(), :'b_cmd', 'LIVENESS: (D) retire() re-dispatched B''s detach');
+select is((select recalled_at from pgpm.part where parent_table = 'public.rl366b'::regclass and lo = '0'),
+  null, 'D: the re-dispatch clears recalled_at');
+select is((select retain_detaching from pgpm.status() where parent = 'public.rl366b'::regclass), 1::bigint,
+  'D: status() counts B''s retirement as detaching again');
+select :'b_cmd' \gexec
+select ok(not pgpm_test366.on_parent('public.rl366b', :'b_oid'), 'LIVENESS: (D) B''s detach landed');
+
+-- ============ PART E: a caller that cannot see the job is refused ============
+-- pg_cron shows a job only to its owner (cron.job's row-level policy) and to superusers. The table's owner, a
+-- non-superuser, loosens retention and catches up: it cannot idle the armed job, so its recall must not be taken
+-- for one. Refused at the attached site, and again at the re-attach site once the run lands; a superuser's tick
+-- then recalls and re-attaches. Ids 31, 32, 33 in the doomed partition.
+create table public.rl366e (id bigint primary key, payload text);
+insert into public.rl366e values (31, 'x'), (32, 'y'), (33, 'z');
+call pgpm.transmute('public.rl366e', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rl366e', '60000');
+insert into public.rl366e values (50005, 'frontier');
+create table public.rl366e_ref (id bigint primary key, p_id bigint references public.rl366e(id));
+insert into public.rl366e_ref values (1, 50005);
+select child_name as e_doomed, child_oid as e_oid from pgpm.part
+ where parent_table = 'public.rl366e'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('public.rl366e', :'e_doomed'), 'fixture: (E) retire() dispatches the concurrent detach');
+select pgpm_test366.armed() as e_cmd \gset
+select is(:'e_cmd', format('alter table public.rl366e detach partition public.%I concurrently', :'e_doomed'),
+  'LIVENESS: (E) the job is armed with the partition''s detach');
+
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = 'pgpm_test366_owner') then
+    execute 'reassign owned by pgpm_test366_owner to current_user';
+    execute 'drop owned by pgpm_test366_owner'; execute 'drop role pgpm_test366_owner';
+  end if;
+end $$;
+create role pgpm_test366_owner nologin;
+alter table cron.job enable row level security;
+create policy job_owner on cron.job using (false);   -- a job another role owns
+grant usage on schema cron to pgpm_test366_owner;
+grant select on cron.job to pgpm_test366_owner;
+grant usage on schema pgpm to pgpm_test366_owner;
+grant select, insert, update, delete on all tables in schema pgpm to pgpm_test366_owner;
+grant usage on all sequences in schema pgpm to pgpm_test366_owner;
+-- the owner owns the table and every partition, so a re-attach it should not make would succeed
+select format('alter table %s owner to pgpm_test366_owner', c) from (
+  select 'public.rl366e'::regclass as c
+  union all select inhrelid::regclass from pg_inherits where inhparent = 'public.rl366e'::regclass) t \gexec
+
+set role pgpm_test366_owner;
+select set_config('pgpm_test366.seen', (select count(*) from cron.job)::text, false);
+select pgpm.set_retain('public.rl366e', '45000');
+select pgpm.retain('public.rl366e'::regclass);
+reset role;
+select is(current_setting('pgpm_test366.seen'), '0', 'LIVENESS: (E) the owner role sees no job in cron.job');
+select is(pgpm_test366.armed(), :'e_cmd', 'LIVENESS: (E) the job is still armed: the owner could not idle it');
+select is(pgpm_test366.served('public.rl366e', 20000), array[31, 32, 33]::bigint[], 'LIVENESS: (E) ids 31, 32, 33 are served');
+select is((select array_agg(action order by id) from pgpm.log where parent_table = 'public.rl366e'::regclass and lo = '0'),
+  array['retain_detach', 'fail_retain_recall', 'fail_retain_recall'],
+  'E: set_retain''s recall and retain()''s are each refused, fail_retain_recall');
+select ok((select bool_and(position('pgpm_test366_owner' in method) > 0) from pgpm.log
+            where parent_table = 'public.rl366e'::regclass and action = 'fail_retain_recall'),
+  'E: the refusal names the role');
+select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'public.rl366e'::regclass $$,
+  $$ values (2::bigint, 1::bigint) $$, 'E: status() counts both refusals, and the retirement as still detaching');
+select is((select recalled_at from pgpm.part where parent_table = 'public.rl366e'::regclass and lo = '0'),
+  null, 'E: the refused retirement is not stamped recalled');
+
+-- the run lands; the owner's next catch-up meets the re-attach site
+select :'e_cmd' \gexec
+select ok(not pgpm_test366.on_parent('public.rl366e', :'e_oid'), 'LIVENESS: (E) the run detached the partition');
+set role pgpm_test366_owner;
+select pgpm.retain('public.rl366e'::regclass);
+reset role;
+select ok(not pgpm_test366.on_parent('public.rl366e', :'e_oid'),
+  'E: the owner''s recall did not re-attach under a job it cannot idle');
+select is((select relowner::regrole::text from pg_class where oid = :'e_oid'), 'pgpm_test366_owner',
+  'LIVENESS: (E) the owner owns the detached partition, so nothing but the refusal kept it from re-attaching');
+select is((select array_agg(action order by id) from pgpm.log where parent_table = 'public.rl366e'::regclass and lo = '0'),
+  array['retain_detach', 'fail_retain_recall', 'fail_retain_recall', 'fail_retain_recall'],
+  'E: refused again at the re-attach site');
+
+call pgpm.maintain('public.rl366e');
+select ok(pgpm_test366.on_parent('public.rl366e', :'e_oid'), 'E: a superuser''s tick re-attached it');
+select is(pgpm_test366.served('public.rl366e', 20000), array[31, 32, 33]::bigint[], 'E: ids 31, 32, 33 are served again');
+select is(pgpm_test366.armed(), 'select 1', 'E: and the job is idle');
+
+-- ============ PART F: what is not refused ============
+-- The refusal is for a caller to whom an existing job is invisible. A superuser sees every job, so one that sees
+-- none sees that there is none (unscheduled after the dispatch: nothing is left to run the detach), and in a
+-- database with no pg_cron nothing can be armed at all. Both recall as before. C's detach landed in part D;
+-- F's partition is still attached. Id 41 in F's doomed partition.
+create table public.rl366f (id bigint primary key, payload text);
+insert into public.rl366f values (41, 'f');
+call pgpm.transmute('public.rl366f', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rl366f', '60000');
+insert into public.rl366f values (50005, 'frontier');
+create table public.rl366f_ref (id bigint primary key, p_id bigint references public.rl366f(id));
+insert into public.rl366f_ref values (1, 50005);
+select child_name as f_doomed from pgpm.part where parent_table = 'public.rl366f'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('public.rl366f', :'f_doomed'), 'fixture: (F) retire() dispatches the concurrent detach');
+select ok(pgpm_test366.armed() like 'alter table public.rl366f detach partition %',
+  'LIVENESS: (F) the job is armed with F''s detach, so F''s mark records a dispatch');
+
+delete from cron.job;   -- unscheduled
+select pgpm.set_retain('public.rl366c', '45000');
+call pgpm.maintain('public.rl366c');
+select ok(pgpm_test366.on_parent('public.rl366c', (select child_oid from pgpm.part where parent_table = 'public.rl366c'::regclass and lo = '0')),
+  'F: a superuser that sees no job, there being none, re-attaches C''s partition');
+select is((select count(*)::int from pgpm.log where parent_table = 'public.rl366c'::regclass and action = 'fail_retain_recall'),
+  0, 'F: and is not refused');
+
+drop schema cron cascade;   -- no pg_cron in this database
+grant select on public.rl366f to pgpm_test366_owner;
+set role pgpm_test366_owner;
+select pgpm.set_retain('public.rl366f', '45000');
+select pgpm.retain('public.rl366f'::regclass);
+reset role;
+select is((select array_agg(action order by id) from pgpm.log where parent_table = 'public.rl366f'::regclass and lo = '0'),
+  array['retain_detach'], 'F: with no pg_cron here, the non-superuser''s recall is not refused');
+select isnt((select recalled_at from pgpm.part where parent_table = 'public.rl366f'::regclass and lo = '0'),
+  null, 'F: and it stamps the retirement recalled');
+
 select * from finish();
+reassign owned by pgpm_test366_owner to current_user;
+drop owned by pgpm_test366_owner;
+drop role pgpm_test366_owner;
