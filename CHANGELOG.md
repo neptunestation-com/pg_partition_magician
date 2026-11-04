@@ -13,7 +13,12 @@
   a late run took out, and a later tick that finds no detach of it running clears the mark. Found by the formal
   model's claim C1 (formal methods Phase 2). `bench/retain_recall_late_detach.sh` runs `tests/366`, two sessions
   ordered by the parent's lock (mutation `recall_reattach_clears_mark`); `tests/194` and `tests/204` part B now
-  expect the mark to clear one tick after the re-attach.
+  expect the mark to clear one tick after the re-attach. Two more ways to the same harm, found by the PR's
+  verification, are closed with it. The recall of a still-attached partition no longer clears a mark in the
+  transaction that idled the job, which `set_retain` followed by `retain()` in one transaction did
+  (`recall_clear_after_idle_in_xact`, part B). And `retire`'s one-detach-in-flight rule counts a mark only while
+  the job holds its detach or its partition is pending one, so a mark a recall kept, or one refused before its
+  dispatch, no longer stalls every other table's referenced retirement (`retire_slot_held_by_idle_mark`, part C).
 
 - **A retirement mark that records no oid at all is refused, never judged by its name out of the parent**
   (#1432, #1434). A pgpm older than v0.5.0 wrote a mark as `retiring_at` alone. Once its detach landed and the

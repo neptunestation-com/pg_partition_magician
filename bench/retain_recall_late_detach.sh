@@ -9,8 +9,10 @@
 # the acceptance test; this wrapper exists so the mutation has a guard the discriminate track can run against the
 # mutant, in the shape of bench/retain_recall_renamed_detached.sh.
 #
-# ONE mutation is required to fail against it (bench/mutations/mutate.py):
-#   recall_reattach_clears_mark   -- the re-attach clears the marker in its own transaction again.
+# THREE mutations are required to fail against it (bench/mutations/mutate.py):
+#   recall_reattach_clears_mark       -- the re-attach clears the marker in its own transaction again. Part A.
+#   recall_clear_after_idle_in_xact   -- the still-attached clear takes this transaction's own idle. Part B.
+#   retire_slot_held_by_idle_mark     -- retire() yields to an older mark the job does not hold. Part C.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove; the second sessions are dblink connections ordered by
 # the parent's lock, polled server-side, and the test brings its own stand-in for pg_cron's catalog).

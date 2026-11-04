@@ -3704,6 +3704,7 @@ $$;
 -- the safe direction: the next successful dispatch overwrites the command anyway.
 create or replace function pgpm._idle_detach_job(p_cmd text)
 returns void language plpgsql as $$
+declare v_n bigint;
 begin
   if p_cmd is null then
     execute 'select cron.alter_job(jobid, command => ''select 1'') from cron.job'
@@ -3712,6 +3713,13 @@ begin
     execute 'select cron.alter_job(jobid, command => ''select 1'') from cron.job'
          || ' where jobname = ''pgpm_detach'' and database = current_database() and command = $1'
       using p_cmd;
+  end if;
+  -- #1438: the idle is not seen by pg_cron until this transaction commits (it reads a job's command from a cache
+  -- only a commit refreshes), so a run it starts meanwhile still carries the armed command. Noted for the rest of
+  -- the transaction, which must not take the idle for a quiesced job (_retain_recall's clear).
+  get diagnostics v_n = row_count;
+  if v_n > 0 then
+    perform set_config('pgpm.detach_idled_in_xact', 'on', true);
   end if;
 exception when others then
   null;   -- no pg_cron, or no such job: there is nothing to quiesce
@@ -4483,6 +4491,7 @@ declare
   v_referenced boolean; v_child regclass; v_now regclass; v_why text;
   v_cross text[]; v_coltype text; v_lo_lit text; v_hi_lit text; v_deleted int; v_reason text;
   v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean; v_rec oid;
+  v_job_cmd text; v_job_known boolean;
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('retire', json_build_object('p_parent', p_parent, 'p_child', p_child));
@@ -4780,10 +4789,28 @@ begin
       -- total order the oldest marker always wins, so there is always exactly one partition able to make
       -- progress and the loser simply retries. An unmarked candidate sorts last (`infinity`), so a fresh
       -- retirement always yields to one already under way.
+      -- What holds the slot is the job, not the mark (#1438): a mark on a partition still attached and not pending
+      -- holds it only while the job is armed with that partition's detach. A recall keeps a mark with the job idle
+      -- (so that a late run's detach is still known as pgpm's own), and so does a retirement refused before its
+      -- dispatch; neither is a detach in flight, and yielding to one stalled every other table's referenced
+      -- retirement for as long as its parent went unticked or kept refusing. With no pg_cron to read, every mark
+      -- counts, as before.
+      begin
+        execute 'select command from cron.job where jobname = ''pgpm_detach'' and database = current_database()'
+          into v_job_cmd;
+        v_job_known := true;
+      exception when others then
+        v_job_known := false;
+      end;
       if exists (
         select 1 from pgpm.part p
          where p.retiring_at is not null
            and not (p.parent_table = p_parent and p.child_name = p_child)
+           and (not v_job_known
+                or v_job_cmd is not distinct from pgpm._detach_cmd(p.parent_table, pgpm._child_nsp(p.parent_table, p.child_name), p.child_name)
+                or exists (select 1 from pg_inherits i
+                            where i.inhparent = p.parent_table and i.inhdetachpending
+                              and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)))
            and (p.retiring_at, p.parent_table::text, p.child_name)
              < (coalesce(r.retiring_at, 'infinity'::timestamptz), p_parent::text, p_child)
            and exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid   -- #1365: its anchor's
@@ -5059,8 +5086,11 @@ begin
         continue;
       end if;
       -- not armed: clear the marker unless a detach of it is still on its way (_detach_reap's signals 1
-      -- and 2: a lock on the partition held or awaited, or the statement itself)
+      -- and 2: a lock on the partition held or awaited, or the statement itself), or this transaction idled the
+      -- job (#1438): until it commits, a run pg_cron starts still carries the armed detach, which no probe here can
+      -- see yet, and it lands after the commit on a partition whose mark this call would have cleared
       continue when p_reattach is not true
+        or current_setting('pgpm.detach_idled_in_xact', true) = 'on'
         or exists (select 1 from pg_locks l
                     where l.locktype = 'relation' and l.database = v_db and l.relation = v_now::oid
                       and l.mode in ('ShareUpdateExclusiveLock', 'AccessExclusiveLock')

@@ -17301,6 +17301,20 @@ MUTATIONS["recall_reattach_clears_mark"] = (
       "      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
       "        values (p_parent, 'retain_reattach', r.lo, r.hi,", 1)],
 )
+MUTATIONS["recall_clear_after_idle_in_xact"] = (
+    "bench/retain_recall_late_detach.sh",
+    "PR #1441 verification V-01: the recall's attached-branch clear takes an idle this transaction made for a quiesced "
+    "job, so set_retain then retain() in one transaction clears the mark while a run pg_cron starts before the commit "
+    "still carries the armed detach. One clause. tests/366 part B catches it.",
+    [("        or current_setting('pgpm.detach_idled_in_xact', true) = 'on'\n", "", 1)],
+)
+MUTATIONS["retire_slot_held_by_idle_mark"] = (
+    "bench/retain_recall_late_detach.sh",
+    "PR #1441 verification V-02 and P1-02: retire()'s one-detach-in-flight rule yields to any older mark on an attached "
+    "partition, though the job does not hold it (a mark a recall kept, or one refused before its dispatch), stalling "
+    "every other table's referenced retirement. One clause. tests/366 part C catches it.",
+    [("           and (not v_job_known\n", "           and (true\n", 1)],
+)
 
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the
 # name only where the name agrees with its mark, and the recall reports a v0.4.0 row with no oid and nothing under

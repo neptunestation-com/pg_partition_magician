@@ -1737,7 +1737,9 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
 - still attached: the `pgpm_detach` job is returned to idle (only if it still holds this partition's
   command), logged `retain_recall`. `retiring_at` is cleared by a later tick that finds no detach of the
   partition still running, so a detach pg_cron had already started is still recognised as pgpm's own when
-  it lands.
+  it lands. Never in the transaction that returned the job to idle: pg_cron does not see the idle until
+  that transaction commits, so `set_retain` followed by `retain()` in one transaction leaves the clear to
+  the next tick.
 - already detached by that detach: the job is returned to idle and the partition is re-attached on its own
   bounds, logged `retain_reattach`, and the `CHECK` constraint the concurrent detach left on it is
   dropped again. `retiring_at` is kept and cleared by a later tick, as above: a detach pg_cron started
@@ -1792,6 +1794,12 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   renamed table's new name, which pgpm cannot know. This holds for a retirement that was not renamed too,
   since pgpm cannot tell it apart: it costs one statement. Nothing write-blocks a table under such a row's
   name that is no partition of the parent.
+
+A mark the recall keeps does not hold up anyone else's retirement. Only one concurrent detach is in flight
+at a time, database-wide, because there is one `pgpm_detach` job, and a retirement waits for an older one
+that holds it. A mark counts as holding it only while the job is armed with that partition's detach or the
+partition is pending a detach, so a kept mark, or one whose retirement was refused before its dispatch,
+never stalls another table's retirement while its own table waits for a tick.
 
 ##### What `retire` checks a partition's identity against
 

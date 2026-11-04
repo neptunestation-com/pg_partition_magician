@@ -30,7 +30,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(21);
+select plan(36);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -62,6 +62,31 @@ create function pgpm_test366.actions() returns text[] language sql as $$
    where parent_table = 'public.rl366'::regclass and lo = '0'
      and action in ('retain_detach', 'retain_recall', 'retain_reattach', 'fail_retain_reattach',
                     'retain_drop', 'fail_retain_drop', 'fail_retain_identity', 'retain_disown')
+$$;
+-- a backend of this application_name waiting on any lock at all (a concurrent detach's second phase waits on the
+-- virtual transaction ids of older snapshots, not on a relation)
+create function pgpm_test366.wait_for_any(p_app text) returns boolean language plpgsql as $$
+begin
+  for i in 1 .. 3000 loop
+    perform pg_stat_clear_snapshot();
+    if exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid
+                where a.application_name = p_app and not l.granted) then
+      return true;
+    end if;
+    perform pg_sleep(0.01);
+  end loop;
+  return false;
+end;
+$$;
+create function pgpm_test366.on_parent(p_parent regclass, p_oid oid) returns boolean language sql as $$
+  select exists (select 1 from pg_inherits where inhparent = p_parent and inhrelid = p_oid and not inhdetachpending)
+$$;
+create function pgpm_test366.served(p_parent regclass, p_below bigint) returns bigint[] language plpgsql as $$
+declare v bigint[];
+begin
+  execute format('select array_agg(id order by id) from %s where id < %s', p_parent, p_below) into v;
+  return v;
+end;
 $$;
 -- polled server-side: pg_locks is read live, so one call can wait for another backend's lock request
 create function pgpm_test366.wait_for_waiter(p_app text) returns boolean language plpgsql as $$
@@ -150,5 +175,78 @@ select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.sta
   $$ values (0::bigint, 0::bigint) $$, 'status() reports nothing failed and nothing detaching');
 select lives_ok($$ insert into public.rl366_ref values (2, 2) $$,
   'a referencing row can point into the re-attached range');
+
+-- ============ PART B: set_retain and retain() in ONE transaction, a run started while it is open ============
+-- The recall's attached branch: set_retain idles the armed job and keeps the mark, and retain() in the same
+-- transaction found the job idle and cleared it. The idle was not committed, so a run pg_cron started meanwhile
+-- still carried the armed detach; it waited on the transaction and detached the partition once it committed, under
+-- no mark. The clear now waits for a transaction that did not idle the job. Ids 11, 12 in the doomed partition.
+create table public.rl366b (id bigint primary key, payload text);
+insert into public.rl366b values (11, 'k'), (12, 'l');
+call pgpm.transmute('public.rl366b', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rl366b', '60000');
+insert into public.rl366b values (50005, 'frontier');
+create table public.rl366b_ref (id bigint primary key, p_id bigint references public.rl366b(id));
+insert into public.rl366b_ref values (1, 50005);
+select child_name as b_doomed, child_oid as b_oid from pgpm.part
+ where parent_table = 'public.rl366b'::regclass and lo = '0' \gset
+
+select ok(not pgpm.retire('public.rl366b', :'b_doomed'), 'fixture: (B) retire() dispatches the concurrent detach');
+select pgpm_test366.armed() as b_cmd \gset
+select is(:'b_cmd', format('alter table public.rl366b detach partition public.%I concurrently', :'b_doomed'),
+  'LIVENESS: (B) the job is armed with the still-attached partition''s detach');
+
+select dblink_connect('tb', 'dbname=' || current_database() || ' application_name=rl366b_txn');
+select dblink_connect('rb', 'dbname=' || current_database() || ' application_name=rl366b_run');
+select dblink_exec('tb', 'begin');
+select * from dblink('tb', $q$ select pgpm.set_retain('public.rl366b', '45000')::text $q$) as t(r text);
+select * from dblink('tb', $q$ select pgpm.retain('public.rl366b'::regclass)::text $q$) as t(r text);
+select is(t.c, 'select 1', 'LIVENESS: (B) inside the transaction the job is idle, uncommitted')
+  from dblink('tb', $q$ select command from cron.job where jobname = 'pgpm_detach' $q$) as t(c text);
+select dblink_send_query('rb', :'b_cmd');
+select ok(pgpm_test366.wait_for_any('rl366b_run'),
+  'LIVENESS: (B) the run''s detach is waiting on the open transaction');
+select dblink_exec('tb', 'commit');
+select is(t.r, 'ALTER TABLE', 'LIVENESS: (B) once the transaction committed, the run detached the partition')
+  from dblink_get_result('rb') as t(r text);
+select dblink_get_result('rb');
+select dblink_disconnect('rb');
+select dblink_disconnect('tb');
+select ok(not pgpm_test366.on_parent('public.rl366b', :'b_oid'), 'LIVENESS: (B) the partition is out of the parent');
+
+select results_eq($$ select retiring_at is not null, detach_dispatched_oid from pgpm.part
+                      where parent_table = 'public.rl366b'::regclass and lo = '0' $$,
+  format('values (true, %s::oid)', :'b_oid'),
+  'B: the transaction that idled the job did not clear the mark or the dispatch record');
+
+call pgpm.maintain('public.rl366b');
+select ok(pgpm_test366.on_parent('public.rl366b', :'b_oid'), 'B: the next tick re-attached the same relation');
+select is(pgpm_test366.served('public.rl366b', 20000), array[11, 12]::bigint[], 'B: ids 11, 12 are served again');
+select isnt((select retiring_at from pgpm.part where parent_table = 'public.rl366b'::regclass and lo = '0'),
+  null, 'LIVENESS: (C) the re-attach kept B''s mark, older than any other, with the job idle');
+
+-- ============ PART C: a mark kept with the job idle does not hold the one detach slot ============
+-- One detach is in flight at a time, database-wide, and a retirement yields to an older one. A mark kept by a
+-- recall (or one whose retirement was refused before its dispatch) is no detach in flight: the job does not hold
+-- it. Yielding to it stalled every other table's referenced retirement until its parent ticked again (never, if
+-- paused). Another parent's retirement now dispatches while B's mark is kept. Id 21 in its doomed partition.
+create table public.rl366c (id bigint primary key, payload text);
+insert into public.rl366c values (21, 'u');
+call pgpm.transmute('public.rl366c', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rl366c', '60000');
+insert into public.rl366c values (50005, 'frontier');
+create table public.rl366c_ref (id bigint primary key, p_id bigint references public.rl366c(id));
+insert into public.rl366c_ref values (1, 50005);
+select child_name as c_doomed from pgpm.part where parent_table = 'public.rl366c'::regclass and lo = '0' \gset
+select is(pgpm_test366.armed(), 'select 1', 'LIVENESS: (C) the job is idle');
+
+select ok(not pgpm.retire('public.rl366c', :'c_doomed'), 'fixture: (C) retire() of the other parent''s partition returns');
+select is(pgpm_test366.armed(), format('alter table public.rl366c detach partition public.%I concurrently', :'c_doomed'),
+  'C: it dispatched its detach rather than yield to B''s kept mark');
+
+call pgpm.maintain('public.rl366b');
+select is((select retiring_at from pgpm.part where parent_table = 'public.rl366b'::regclass and lo = '0'),
+  null, 'B: a later tick, the job holding another detach, clears B''s mark');
+select is(pgpm_test366.served('public.rl366b', 20000), array[11, 12]::bigint[], 'B: ids 11, 12 are still served');
 
 select * from finish();
