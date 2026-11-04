@@ -1,5 +1,8 @@
 # Formal methods: Phase 1 record (custody)
 
+Phase 2, the PostgreSQL reproductions of this record's claims and masks, is recorded in
+`docs/formal/phase2-record.md`.
+
 Phase 1 of the program in `docs/pgpm-formal-methods-context-pack.md`, run on 2026-10-29 under the budget the
 maintainer set in `docs/formal/tier12-catalogue.md` ("Decided by the maintainer"). It built a TLA+ model of the
 archive-then-retain custody chain, checked it with TLC, and asked whether the model would have caught the
