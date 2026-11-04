@@ -156,8 +156,10 @@ update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_
 update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
 
 -- ============================ PART B: a mark held by a namesake ============================
--- parent B1: a retirement under way (marked, detach dispatched and landed), its detached table then dropped by
--- hand, and a namesake of the operator's in another schema attached to B1
+-- parent B1: a retirement under way (marked, its detach dispatched and armed), its partition then detached and
+-- dropped by hand before pg_cron runs the detach, and a namesake of the operator's in another schema attached to B1. The job still
+-- holds B1's detach, which is what makes B1's mark a detach in flight for the one-detach rule (#1438: a mark whose
+-- job does not hold its detach holds nothing, so only an armed one reaches the anchor this part pins).
 create table public.rb355 (id bigint primary key, payload text);
 insert into public.rb355 values (111, 'a'), (112, 'b');
 call pgpm.transmute('public.rb355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
@@ -170,18 +172,19 @@ select is(pgpm.retire('public.rb355', :'b_cell'), false, 'LIVENESS: B1''s retire
 select is((select command from cron.job where jobname = 'pgpm_detach'),
   format('alter table public.rb355 detach partition public.%I concurrently', :'b_cell'),
   'LIVENESS: B1''s detach is the one armed');
-select command from cron.job
- where jobname = 'pgpm_detach' and command = format('alter table public.rb355 detach partition public.%I concurrently', :'b_cell') \gexec
+alter table public.rb355 detach partition public.:"b_cell";   -- by hand, and dropped
 drop table public.:"b_cell";
 create schema rb355_ops;
 create table rb355_ops.:"b_cell" (id bigint primary key, payload text);
 insert into rb355_ops.:"b_cell" values (7007, 'operator');
 alter table public.rb355 attach partition rb355_ops.:"b_cell" for values from (7000) to (7100);
-select is(pgpm.retire('public.rb355', :'b_cell'), false, 'LIVENESS: retire() of B1''s cell refuses');
-select ok((select retiring_at is not null from pgpm.part where parent_table = 'public.rb355'::regclass and child_name = :'b_cell')
-          and exists (select 1 from pgpm.log where parent_table = 'public.rb355'::regclass and lo = '100'
-                       and action = 'fail_retain_identity'),
-  'LIVENESS: B1''s mark stands, wedged on identity (fail_retain_identity)');
+select is((select command from cron.job where jobname = 'pgpm_detach'),
+  format('alter table public.rb355 detach partition public.%I concurrently', :'b_cell'),
+  'LIVENESS: the job still holds B1''s detach, its run not yet started');
+select ok((select retiring_at is not null and retiring_oid = :b_cell_oid from pgpm.part
+            where parent_table = 'public.rb355'::regclass and child_name = :'b_cell')
+          and to_regclass(format('public.%I', :'b_cell')) is null,
+  'LIVENESS: B1''s mark stands on the relation that was dropped');
 select ok(exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid
                    where i.inhparent = 'public.rb355'::regclass and c.relname = :'b_cell'),
   'LIVENESS: a partition of B1 carries the mark''s name (the namesake)');

@@ -32,10 +32,10 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(66);
+select plan(73);
 
 create schema cron;
-create table cron.job (jobid bigint primary key, jobname text, database text, command text);
+create table cron.job (jobid bigint primary key, jobname text, database text, command text, username text default current_user);
 create function cron.alter_job(job_id bigint, schedule text default null, command text default null,
                                database text default null, username text default null, active boolean default null)
 returns void language sql as $$
@@ -303,7 +303,7 @@ do $$ begin
 end $$;
 create role pgpm_test366_owner nologin;
 alter table cron.job enable row level security;
-create policy job_owner on cron.job using (false);   -- a job another role owns
+create policy job_owner on cron.job using (username = current_user);   -- pg_cron's own policy: a job shows to its owner
 grant usage on schema cron to pgpm_test366_owner;
 grant select on cron.job to pgpm_test366_owner;
 grant usage on schema pgpm to pgpm_test366_owner;
@@ -333,12 +333,17 @@ select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.sta
 select is((select recalled_at from pgpm.part where parent_table = 'public.rl366e'::regclass and lo = '0'),
   null, 'E: the refused retirement is not stamped recalled');
 
--- the run lands; the owner's next catch-up meets the re-attach site
+-- the run lands; the owner's next catch-up meets the re-attach site, now with BYPASSRLS: it SEES the job, but pg_cron
+-- lets only the job's owner or a superuser change it, so seeing it is not being able to idle it
 select :'e_cmd' \gexec
 select ok(not pgpm_test366.on_parent('public.rl366e', :'e_oid'), 'LIVENESS: (E) the run detached the partition');
+alter role pgpm_test366_owner bypassrls;
 set role pgpm_test366_owner;
+select set_config('pgpm_test366.seen', (select count(*) from cron.job)::text, false);
 select pgpm.retain('public.rl366e'::regclass);
 reset role;
+alter role pgpm_test366_owner nobypassrls;
+select is(current_setting('pgpm_test366.seen'), '1', 'LIVENESS: (E) with BYPASSRLS the owner role sees the job');
 select ok(not pgpm_test366.on_parent('public.rl366e', :'e_oid'),
   'E: the owner''s recall did not re-attach under a job it cannot idle');
 select is((select relowner::regrole::text from pg_class where oid = :'e_oid'), 'pgpm_test366_owner',
@@ -351,6 +356,46 @@ call pgpm.maintain('public.rl366e');
 select ok(pgpm_test366.on_parent('public.rl366e', :'e_oid'), 'E: a superuser''s tick re-attached it');
 select is(pgpm_test366.served('public.rl366e', 20000), array[31, 32, 33]::bigint[], 'E: ids 31, 32, 33 are served again');
 select is(pgpm_test366.armed(), 'select 1', 'E: and the job is idle');
+
+-- ============ PART G: the role that dispatched the detach is not refused ============
+-- A non-superuser that ran pgpm.schedule() owns the job, so its retire() arms it and records it as the dispatcher.
+-- Then it unschedules: the job is gone, and seeing none it sees that there is none. Its recall re-attaches the
+-- partition the detach took out, as before. Ids 51, 52 in G's doomed partition.
+create table public.rl366g (id bigint primary key, payload text);
+insert into public.rl366g values (51, 'p'), (52, 'q');
+call pgpm.transmute('public.rl366g', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rl366g', '60000');
+insert into public.rl366g values (50005, 'frontier');
+create table public.rl366g_ref (id bigint primary key, p_id bigint references public.rl366g(id));
+insert into public.rl366g_ref values (1, 50005);
+select child_name as g_doomed, child_oid as g_oid from pgpm.part
+ where parent_table = 'public.rl366g'::regclass and lo = '0' \gset
+select format('alter table %s owner to pgpm_test366_owner', c) from (
+  select 'public.rl366g'::regclass as c union all select 'public.rl366g_ref'::regclass
+  union all select inhrelid::regclass from pg_inherits where inhparent = 'public.rl366g'::regclass) t \gexec
+update cron.job set username = 'pgpm_test366_owner';   -- the owner ran pgpm.schedule()
+grant update on cron.job to pgpm_test366_owner;
+set role pgpm_test366_owner;
+select pgpm.retire('public.rl366g', :'g_doomed');
+reset role;
+select is((select format('%s %s', detach_dispatched_oid, detach_dispatched_by) from pgpm.part
+            where parent_table = 'public.rl366g'::regclass and lo = '0'),
+  format('%s %s', :'g_oid', 'pgpm_test366_owner'),
+  'G: the owner''s retire() dispatched the detach and recorded itself as the dispatcher');
+select pgpm_test366.armed() as g_cmd \gset
+select ok(:'g_cmd' like 'alter table public.rl366g detach partition %', 'LIVENESS: (G) the job is armed with G''s detach');
+select :'g_cmd' \gexec
+delete from cron.job;   -- the owner unschedules
+select ok(not pgpm_test366.on_parent('public.rl366g', :'g_oid'), 'LIVENESS: (G) the detach landed and no job is left');
+set role pgpm_test366_owner;
+select pgpm.set_retain('public.rl366g', '45000');
+select pgpm.retain('public.rl366g'::regclass);
+reset role;
+select ok(pgpm_test366.on_parent('public.rl366g', :'g_oid'), 'G: the dispatcher''s recall re-attached the partition');
+select is(pgpm_test366.served('public.rl366g', 20000), array[51, 52]::bigint[], 'G: ids 51, 52 are served again');
+select is((select count(*)::int from pgpm.log where parent_table = 'public.rl366g'::regclass and action = 'fail_retain_recall'),
+  0, 'G: and it was not refused');
+insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1', 'postgres');   -- for part F
 
 -- ============ PART F: what is not refused ============
 -- The refusal is for a caller to whom an existing job is invisible. A superuser sees every job, so one that sees
@@ -370,6 +415,9 @@ select ok(pgpm_test366.armed() like 'alter table public.rl366f detach partition 
   'LIVENESS: (F) the job is armed with F''s detach, so F''s mark records a dispatch');
 
 delete from cron.job;   -- unscheduled
+-- C's detach as another role's dispatch (the owner that scheduled, then unscheduled), so only the superuser clause
+-- can exempt this caller
+update pgpm.part set detach_dispatched_by = 'pgpm_test366_owner' where parent_table = 'public.rl366c'::regclass and lo = '0';
 select pgpm.set_retain('public.rl366c', '45000');
 call pgpm.maintain('public.rl366c');
 select ok(pgpm_test366.on_parent('public.rl366c', (select child_oid from pgpm.part where parent_table = 'public.rl366c'::regclass and lo = '0')),

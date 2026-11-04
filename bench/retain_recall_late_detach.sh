@@ -10,7 +10,7 @@
 # mutant, in the shape of bench/retain_recall_renamed_detached.sh. A recalled retirement now keeps its mark for
 # good (until retention reaches it again), and a caller that cannot see the job is refused (fail_retain_recall).
 #
-# NINE mutations are required to fail against it (bench/mutations/mutate.py):
+# TWELVE mutations are required to fail against it (bench/mutations/mutate.py):
 #   recall_reattach_clears_mark       -- the re-attach clears the marker in its own transaction again. Part A.
 #   recall_mark_cleared_on_idle_tick  -- a tick finding the job idle clears a recalled mark. Part A's late run.
 #   recalled_mark_counted_detaching   -- status().retain_detaching counts a recalled mark. Part A.
@@ -20,6 +20,9 @@
 #   recall_unseen_job_reattached      -- ... or re-attaches under a job it cannot idle. Part E.
 #   recall_unseen_refuses_superuser   -- a superuser that sees there is no job is refused. Part F.
 #   recall_unseen_without_cron        -- a database with no pg_cron is refused. Part F.
+#   recall_bypassrls_not_refused      -- a BYPASSRLS role that sees the job but cannot idle it recalls. Part E.
+#   recall_dispatcher_refused         -- the role that dispatched the detach is refused. Part G.
+#   dispatch_role_unrecorded          -- retire() does not record the dispatcher. Part G.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove; the second sessions are dblink connections ordered by
 # the parent's lock, polled server-side, and the test brings its own stand-in for pg_cron's catalog).

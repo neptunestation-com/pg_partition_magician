@@ -15,18 +15,21 @@
   maintainer decided, a recalled retirement now keeps its mark and dispatch record, stamped in a new
   `pgpm.part.recalled_at` column, until retention reaches it again (`retire` re-dispatches and clears
   `recalled_at`) or it is dropped. Any later tick re-attaches a partition a late run takes out, and
-  `status().retain_detaching` does not count a recalled mark. pg_cron shows a job only to its owner and to
-  superusers, so where pg_cron is installed and the caller sees no `pgpm_detach` job, a retirement not yet
-  recalled is refused rather than recalled or re-attached: the new `fail_retain_recall`, counted in
-  `status().retain_drop_failures`, names the role. `retire`'s one-detach-in-flight rule counts a mark only while
+  `status().retain_detaching` does not count a recalled mark. pg_cron lets only a job's owner or a superuser
+  change it, so where pg_cron is installed a retirement not yet recalled is refused rather than recalled or
+  re-attached unless the caller is a superuser, owns the `pgpm_detach` job, or is the role that dispatched the
+  detach (the new `pgpm.part.detach_dispatched_by`; a `BYPASSRLS` role sees the job but cannot change it): the new
+  `fail_retain_recall`, counted in `status().retain_drop_failures`, names the role. `retire`'s one-detach-in-flight rule counts a mark only while
   the job holds its detach or its partition is pending one, so a recalled mark, or one refused before its
   dispatch, never stalls another table's referenced retirement. Found by the formal model's claim C1 (formal
   methods Phase 2). `bench/retain_recall_late_detach.sh` runs `tests/366`, two sessions ordered by the parent's
-  lock and a role that cannot see the job (mutations `recall_reattach_clears_mark`,
+  lock and a role that cannot idle the job (mutations `recall_reattach_clears_mark`,
   `recall_mark_cleared_on_idle_tick`, `recalled_mark_counted_detaching`, `retire_slot_held_by_idle_mark`,
   `retire_redispatch_keeps_recalled`, `recall_unseen_job_attached`, `recall_unseen_job_reattached`,
-  `recall_unseen_refuses_superuser`, `recall_unseen_without_cron`); `tests/194` and `tests/204` now expect the
-  mark kept.
+  `recall_unseen_refuses_superuser`, `recall_unseen_without_cron`, `recall_bypassrls_not_refused`,
+  `recall_dispatcher_refused`, `dispatch_role_unrecorded`); `tests/194`, `tests/204` and `tests/362` now expect
+  the mark kept, and `tests/355` part B arms the job with the dropped partition's detach, the only state in which
+  that mark still holds the one-detach slot.
 
 - **A retirement mark that records no oid at all is refused, never judged by its name out of the parent**
   (#1432, #1434). A pgpm older than v0.5.0 wrote a mark as `retiring_at` alone. Once its detach landed and the

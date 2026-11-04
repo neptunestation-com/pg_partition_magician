@@ -5610,9 +5610,11 @@ $$;''',
         "frontier moves back), pg_cron detaches it, retire() is never called on it again and nothing "
         "re-attaches it, so its rows vanish from every read of the parent with nothing logged. One site, "
         "_retain_recall's loop, made to select nothing. tests/194 parts A, B and C catch it.",
-        [("  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, recalled_at from pgpm.part\n"
+        [("  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, detach_dispatched_by, recalled_at\n"
+          "             from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null\n",
-          "  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, recalled_at from pgpm.part\n"
+          "  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, detach_dispatched_by, recalled_at\n"
+          "             from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null and false\n", 1)],
     ),
     "retain_recall_clears_at_once": (
@@ -16414,7 +16416,7 @@ MUTATIONS["disown_namesake_mark_kept"] = (
     "row's, and disarms the job of its detach, but does not clear it, so the mark is honoured: every later retire() "
     "of an anchored cell refuses as fail_retain_identity, and an unanchored one detaches the operator's table. One "
     "statement, the clearing. tests/355 parts C, K, L, M and N catch it.",
-    [("  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, recalled_at = null\n   where parent_table = p_parent and child_name = p_child;\n",
+    [("  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, detach_dispatched_by = null, recalled_at = null\n   where parent_table = p_parent and child_name = p_child;\n",
       "  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n", 1)],
 )
 MUTATIONS["child_oid_backfill_by_relname"] = (
@@ -17064,9 +17066,9 @@ MUTATIONS["disown_unanchored"] = (
     "and retire an impostor attached under it, detached and dropped with its rows (#407's substitution). One site, "
     "_disown_retirement, which every path that clears such a mark goes through. tests/363 parts G (retire()'s "
     "release), I (the recall's), J (the install pass) and K (retire()'s no-dispatch-record branch) catch it.",
-    [("  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, recalled_at = null,\n"
+    [("  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, detach_dispatched_by = null, recalled_at = null,\n"
       "                       child_oid = coalesce(child_oid, retiring_oid)\n",
-      "  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, recalled_at = null\n", 1)],
+      "  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, detach_dispatched_by = null, recalled_at = null\n", 1)],
 )
 MUTATIONS["retire_release_attached_elsewhere"] = (
     "bench/retire_renamed_detached.sh",
@@ -17347,20 +17349,22 @@ MUTATIONS["recall_unseen_job_attached"] = (
     "PR #1441 verification V-03: a caller that cannot see the pgpm_detach job (pg_cron shows a job only to its owner) "
     "takes the job for idle, stamps the still-attached retirement recalled, and the detach it never recalled lands. "
     "tests/366 part E catches it.",
-    [("v_unseen\n                                         and r.recalled_at is null and r.detach_dispatched_oid is not null);",
+    [("v_unseen\n                                         and r.detach_dispatched_by is distinct from current_user\n"
+      "                                         and r.recalled_at is null and r.detach_dispatched_oid is not null);",
       "false);", 1)],
 )
 MUTATIONS["recall_unseen_job_reattached"] = (
     "bench/retain_recall_late_detach.sh",
     "PR #1441 verification V-04: a caller that cannot see the pgpm_detach job re-attaches a partition its detach took "
     "out, under a job it cannot idle, which detaches it again. tests/366 part E's re-attach site catches it.",
-    [("v_unseen and r.recalled_at is null);", "false);", 1)],
+    [("v_unseen\n                                       and r.detach_dispatched_by is distinct from current_user and r.recalled_at is null);",
+      "false);", 1)],
 )
 MUTATIONS["recall_unseen_refuses_superuser"] = (
     "bench/retain_recall_late_detach.sh",
     "#1438: the recall refuses a superuser that sees no pgpm_detach job, though a superuser sees every job and so sees "
     "that there is none to run the detach. tests/366 part F catches it.",
-    [("    and not exists (select 1 from pg_roles where rolname = current_user and (rolsuper or rolbypassrls));",
+    [("    and not exists (select 1 from pg_roles where rolname = current_user and rolsuper);",
       "    and true;", 1)],
 )
 MUTATIONS["recall_unseen_without_cron"] = (
@@ -17370,6 +17374,29 @@ MUTATIONS["recall_unseen_without_cron"] = (
     [("    and exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
       "                 where n.nspname = 'cron' and c.relname = 'job')\n",
       "    and true\n", 1)],
+)
+MUTATIONS["recall_bypassrls_not_refused"] = (
+    "bench/retain_recall_late_detach.sh",
+    "PR #1441 round-3 V-01 and P1-02: the recall counts any visible pgpm_detach job as one the caller can idle, so a "
+    "BYPASSRLS role, which sees the administrator's job but cannot change it (pg_cron lets only its owner or a "
+    "superuser), is not refused: it stamps the retirement recalled while the job stays armed. tests/366 part E's "
+    "re-attach site catches it.",
+    [("         || ' and username = current_user)'\n", "         || ')'\n", 1)],
+)
+MUTATIONS["recall_dispatcher_refused"] = (
+    "bench/retain_recall_late_detach.sh",
+    "PR #1441 round-3 V-02: the recall refuses the role that dispatched the detach, though it could arm the job and so "
+    "could idle it, and seeing no job sees that there is none: a non-superuser that unscheduled its own job is refused "
+    "on every tick, its partition out for good. Both sites. tests/366 part G catches it.",
+    [("                                         and r.detach_dispatched_by is distinct from current_user\n", "", 1),
+     ("                                       and r.detach_dispatched_by is distinct from current_user and r.recalled_at is null);",
+      "                                       and r.recalled_at is null);", 1)],
+)
+MUTATIONS["dispatch_role_unrecorded"] = (
+    "bench/retain_recall_late_detach.sh",
+    "#1438: retire()'s dispatch does not record the role that armed the job, so the recall cannot tell the dispatcher "
+    "from any other non-superuser and refuses it. tests/366 part G catches it.",
+    [(", detach_dispatched_by = current_user\n", "\n", 1)],
 )
 
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the
