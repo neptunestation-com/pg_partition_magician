@@ -1777,12 +1777,19 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   under it, so a renamed, moved or dropped retirement drops out of the pass, the squatter is not disowned in
   its place, and the recall releases a renamed table by its oid as above (a moved one is refused as
   `fail_retain_identity`). A mark written by a pgpm older than v0.5.0 records no oid at all, so once its
-  detached table is renamed nothing can find it by its oid. With nothing under the name, the recall refuses it
-  as `fail_retain_identity` on every tick (counted in `status().retain_drop_failures`), the job is returned to
-  idle, and the `method` spells the repair, the rename back and the `ATTACH`, after which the next tick clears
-  the mark. With a table created under the name since, every path still takes that table for the retirement:
-  do not create a table under the name of a renamed retirement from such an install until its mark is
-  cleared.
+  detached table is out of the parent nothing tells it from a table created under its name since. Such a mark
+  is never judged by the name out of the parent: the pass leaves it, and `retire` and the recall refuse it as
+  `fail_retain_identity` on every call (counted in `status().retain_drop_failures`), keep the mark, return the
+  job to idle, and attach, disown and drop nothing. The `method` says which case it found and spells both
+  ways out. With nothing under the name: rename the detached table back and `ATTACH` it. With a table under
+  the name: find which table holds the rows of the range, and attach that one under the row's name on the
+  row's bounds (moving the other aside first, after dropping any write block an older pgpm left on it). Or, in
+  either case, keep the detached table as your own and give up the range: delete the row from `pgpm.part` (clearing
+  the mark alone would leave a row that `retire` refuses on every call) and drop any write block an older pgpm
+  left on the table you keep; the `method` spells it under the name pgpm can see, and asks you to supply a
+  renamed table's new name, which pgpm cannot know. This holds for a retirement that was not renamed too,
+  since pgpm cannot tell it apart: it costs one statement. Nothing write-blocks a table under such a row's
+  name that is no partition of the parent.
 
 ##### What `retire` checks a partition's identity against
 

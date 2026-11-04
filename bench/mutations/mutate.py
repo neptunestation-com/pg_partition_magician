@@ -165,6 +165,13 @@ WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid, p.retiring_oid
       return;
     end if;
   end if;
+  if found and v_anchor is null and (pgpm._part_rel(p_parent, p_child)) is not null
+     and not exists (select 1 from pg_inherits i
+                      where i.inhparent = p_parent and i.inhrelid = pgpm._part_rel(p_parent, p_child))
+     and not exists (select 1 from pg_partition_ancestors(pgpm._part_rel(p_parent, p_child)) a
+                      where a.relid = p_parent::oid) then
+    return;   -- #1432: no oid at all, and the name denotes a table out of the parent: the operator's, never blocked
+  end if;
   if found and r.child_oid is null   -- #1365: a row with no oid of its own, by its range (a mark's oid shadows nothing)
      and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
     insert into pgpm.log (parent_table, action, lo, hi, method)
@@ -5603,9 +5610,9 @@ $$;''',
         "frontier moves back), pg_cron detaches it, retire() is never called on it again and nothing "
         "re-attaches it, so its rows vanish from every read of the parent with nothing logged. One site, "
         "_retain_recall's loop, made to select nothing. tests/194 parts A, B and C catch it.",
-        [("  for r in select child_name, lo, hi, retiring_oid, child_oid from pgpm.part\n"
+        [("  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null\n",
-          "  for r in select child_name, lo, hi, retiring_oid, child_oid from pgpm.part\n"
+          "  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null and false\n", 1)],
     ),
     "retain_recall_clears_at_once": (
@@ -17198,12 +17205,96 @@ MUTATIONS["write_block_mark_shadows_stranger"] = (
       "  if found and r.child_oid is null and r.retiring_oid is null   -- #1365:", 1)],
 )
 
+# Issues #1432 and #1434: a retirement mark that records no oid at all (retiring_at alone, as a pgpm older than v0.5.0
+# wrote it) is refused by retire() and the recall (_refuse_unrecorded_mark) once its row's name denotes nothing or a
+# table out of the parent, the install pass leaves it, and the write-block step never blocks that table.
+# bench/unrecorded_mark_refused.sh runs tests/365 against the mutant.
+MUTATIONS["unrecorded_mark_pass_by_name"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "Issue #1432 in the install pass: a mark with no oid is judged by its name out of the parent again, so a table "
+    "created under the name is disowned as the retirement. One clause. tests/365 parts D and E catch it.",
+    [("                       and (p.detach_dispatched_oid is not null\n"
+      "                            or exists (select 1 from pg_inherits i where i.inhparent = p.parent_table and i.inhrelid = c.oid))))\n",
+      "                       and true))\n", 1)],
+)
+MUTATIONS["retire_unrecorded_mark_unrefused"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "Issues #1432 and #1434 in retire(): a mark with no oid is taken on by its name, raising out of the write block "
+    "when nothing is there and disowning the table that is. One site. tests/365 parts A, B and E catch it.",
+    [("  if r.retiring_at is not null and r.retiring_oid is null and r.child_oid is null and r.detach_dispatched_oid is null\n"
+      "     and (v_now is null or",
+      "  if false\n     and (v_now is null or", 1)],
+)
+MUTATIONS["recall_unrecorded_mark_disowned"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "Issue #1432 in _retain_recall: only a name that denotes nothing is refused (#1430), and a table under it is "
+    "disowned as the retirement. One clause. tests/365 part C catches it.",
+    [("    if v_now is null\n       or (r.retiring_oid is null and r.child_oid is null and r.detach_dispatched_oid is null) then\n",
+      "    if v_now is null then\n", 1)],
+)
+MUTATIONS["write_block_unrecorded_blocks"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "Issue #1432 in _install_write_block: a row with no oid is judged by its range alone, so the operator's table "
+    "under its name, no partition of the parent, is blocked. One site. tests/365 parts B and E catch it.",
+    [("  if found and v_anchor is null and (pgpm._part_rel(p_parent, p_child)) is not null\n",
+      "  if false and (pgpm._part_rel(p_parent, p_child)) is not null\n", 1)],
+)
+MUTATIONS["write_block_unrecorded_any_rel"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "Issue #1432's write-block arm without its 'out of the parent' clauses: a row with no oid is never blocked, its "
+    "own partition included, so it is never archived nor retired. Two clauses. tests/365 part F catches it.",
+    [("     and not exists (select 1 from pg_inherits i\n"
+      "                      where i.inhparent = p_parent and i.inhrelid = pgpm._part_rel(p_parent, p_child))\n"
+      "     and not exists (select 1 from pg_partition_ancestors(pgpm._part_rel(p_parent, p_child)) a\n"
+      "                      where a.relid = p_parent::oid) then\n",
+      "     then\n", 1)],
+)
+MUTATIONS["unrecorded_mark_job_armed"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "Issue #1434's refusal without its disarm: the job still holds the detach of a table pgpm cannot identify, and "
+    "takes it out again once the repair puts it back. One site. tests/365 part A catches it.",
+    [("  perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));   -- only if it still holds this detach\n"
+      "  begin\n    select * into strict cfg",
+      "  begin\n    select * into strict cfg", 1)],
+)
+
+MUTATIONS["unrecorded_mark_aside_block_unnamed"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "PR #1437 verification V-01: the refusal's move-aside branch without the block's drop. An operator following it "
+    "moves the table under the name aside still carrying the block an older tick left on it, and no log row names it "
+    "under its new name. One site. tests/365 part C catches it.",
+    [("If it is another, renamed since, lift the write block an older pgpm may have left on %s (drop trigger if exists "
+      "pgpm_write_block on %s;), move it aside,",
+      "If it is another, renamed since, move %s aside,", 1),
+     ("v_now_q, v_attach, v_now_q, v_now_q, p_child, v_nsp, v_now_q, v_forget, v_now_q)",
+      "v_now_q, v_attach, v_now_q, p_child, v_nsp, v_now_q, v_forget, v_now_q)", 1)],
+)
+MUTATIONS["unrecorded_mark_keep_clears"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "PR #1437 verification round 2 V-02: the keep-it way out clears the mark instead of forgetting the row, half a "
+    "repair. The row then names a table out of the parent, or nothing, and retire() refuses it on every call. One "
+    "site. tests/365 parts E and G catch it.",
+    [("  v_forget := format('delete from pgpm.part where parent_table = %L::regclass and child_name = %L;', v_parent_q, p_child);",
+      "  v_forget := format('update pgpm.part set retiring_at = null where parent_table = %L::regclass and child_name = %L;', v_parent_q, p_child);", 1)],
+)
+MUTATIONS["unrecorded_mark_kept_block_unnamed"] = (
+    "bench/unrecorded_mark_refused.sh",
+    "PR #1437 verification round 2 V-01: with nothing under the name, the keep-it way out names no block on the renamed "
+    "retirement the operator keeps, which still carries the one v0.4.0's retire() laid. Followed as written, the table "
+    "refuses every write and nothing names why. One site. tests/365 part G catches it.",
+    [(" If you keep it, lift the write block an older pgpm may have left on it too, under the name you gave it: drop "
+      "trigger if exists pgpm_write_block on <its new name>;',", "',", 1)],
+)
+
 # Issues #1429 and #1430: an older install's unanchored retirement mark. The install pass judges a v0.5.0 row by the
 # name only where the name agrees with its mark, and the recall reports a v0.4.0 row with no oid and nothing under
 # its name instead of skipping it. bench/retain_unanchored_marks.sh runs tests/362 against the mutant; one mutation
 # for each fix and one per clause of the pass's condition.
 UNANCHORED_PASS_COND = (
-    "              and (p.child_oid is not null or p.retiring_oid is null or p.retiring_oid = c.oid)\n"
+    "              and (p.child_oid is not null or p.retiring_oid = c.oid\n"
+    "                   or (p.retiring_oid is null\n"
+    "                       and (p.detach_dispatched_oid is not null\n"
+    "                            or exists (select 1 from pg_inherits i where i.inhparent = p.parent_table and i.inhrelid = c.oid))))\n"
 )
 MUTATIONS["install_pass_unanchored_by_name"] = (
     "bench/retain_unanchored_marks.sh",
@@ -17215,8 +17306,9 @@ MUTATIONS["install_pass_unanchored_by_name"] = (
 MUTATIONS["install_pass_v040_unjudged"] = (
     "bench/retain_unanchored_marks.sh",
     "PR for #1429, the pass's condition without its v0.4.0 clause: a mark that records no oid is never judged by the "
-    "name, so a v0.4.0 row detached without pgpm's record keeps its mark through the upgrade. One clause. tests/362 "
-    "part E catches it.",
+    "name. Since #1432 the clause judges such a mark only while the name denotes a partition of the parent, so "
+    "without it a v0.4.0 mark on a partition still attached, its detach armed, gets no dispatch record and the "
+    "detach that lands reads as an operator's. One clause. tests/362 part G catches it.",
     [(UNANCHORED_PASS_COND,
       "              and (p.child_oid is not null or p.retiring_oid = c.oid)\n", 1)],
 )
@@ -17226,7 +17318,7 @@ MUTATIONS["install_pass_mark_on_name_unjudged"] = (
     "name is skipped, so the detached partition keeps a mark with no record of pgpm's dispatch through the upgrade. "
     "One clause. tests/362 part B catches it.",
     [(UNANCHORED_PASS_COND,
-      "              and (p.child_oid is not null or p.retiring_oid is null)\n", 1)],
+      UNANCHORED_PASS_COND.replace(" or p.retiring_oid = c.oid\n", "\n"), 1)],
 )
 MUTATIONS["install_pass_relname_agrees"] = (
     "bench/retain_unanchored_marks.sh",
@@ -17235,22 +17327,27 @@ MUTATIONS["install_pass_relname_agrees"] = (
     "disowns the squatter under the name in the old schema, its remedy an ATTACH of the squatter. One clause. "
     "tests/362 parts C and F catch it.",
     [(UNANCHORED_PASS_COND,
-      "              and (p.child_oid is not null or p.retiring_oid is null\n"
-      "                   or exists (select 1 from pg_class m where m.oid = p.retiring_oid and m.relname = p.child_name))\n", 1)],
+      UNANCHORED_PASS_COND.replace(
+          " or p.retiring_oid = c.oid\n",
+          "\n                   or exists (select 1 from pg_class m where m.oid = p.retiring_oid and m.relname = p.child_name)\n"),
+      1)],
 )
 MUTATIONS["recall_v040_skipped_silently"] = (
     "bench/retain_unanchored_marks.sh",
     "Issue #1430, the pre-fix shape: a v0.4.0 mark with no oid and nothing under its name is skipped on every tick, "
     "nothing logged, nothing counted. One site. tests/362 part D catches it.",
-    [("    if v_now is null then\n      perform pgpm._idle_detach_job(v_cmd_q);\n",
-      "    continue when v_now is null;\n    if false then\n      perform pgpm._idle_detach_job(v_cmd_q);\n", 1)],
+    [("    if v_now is null\n       or (r.retiring_oid is null and r.child_oid is null and r.detach_dispatched_oid is null) then\n"
+      "      perform pgpm._refuse_unrecorded_mark(",
+      "    continue when v_now is null;\n    if false then\n      perform pgpm._refuse_unrecorded_mark(", 1)],
 )
 MUTATIONS["recall_v040_job_left_armed"] = (
     "bench/retain_unanchored_marks.sh",
     "PR for #1430, the refusal without its disarm: the pgpm_detach job keeps the detach, and takes the table out "
-    "again once the operator runs the logged repair. One line. tests/362 part D catches it.",
-    [("    if v_now is null then\n      perform pgpm._idle_detach_job(v_cmd_q);\n",
-      "    if v_now is null then\n", 1)],
+    "again once the operator runs the logged repair. The disarm now lives in the refusal the recall shares with "
+    "retire() (_refuse_unrecorded_mark, #1432), so the one line is that one. tests/362 part D catches it.",
+    [("  perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));   -- only if it still holds this detach\n"
+      "  begin\n    select * into strict cfg",
+      "  begin\n    select * into strict cfg", 1)],
 )
 
 # The schema-swap class as one lever (the pass-13 record): the statements the per-family fixes (#1399, #1400, #1402)

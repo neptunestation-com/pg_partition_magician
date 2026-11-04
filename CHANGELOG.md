@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **A retirement mark that records no oid at all is refused, never judged by its name out of the parent**
+  (#1432, #1434). A pgpm older than v0.5.0 wrote a mark as `retiring_at` alone. Once its detach landed and the
+  operator renamed the detached table, `retire` met a name that denoted nothing, passed every identity gate and
+  raised out of the write block on every tick, which `retain` logged as an uncounted `skip_retain` (#1434). With a
+  table created under the old name since, the install pass, `retire` and the recall each took that table for the
+  retirement, disowned the mark with a remedy that `ATTACH`ed it, and the write-block step blocked it (#1432).
+  Nothing can tell such a table from the retirement, so `retire` and the recall now refuse the mark as
+  `fail_retain_identity` (counted), keep it, disarm the job, and spell both ways out: attach the table that
+  holds the range, or delete the row and drop any block to keep the table as the operator's own. The install
+  pass leaves such a mark once its relation is out of the parent, and the write-block step never blocks a table
+  out of the parent under a row with no oid. As the maintainer decided, a genuine v0.4.0 retirement that was not
+  renamed is refused the same way, which costs the operator one statement. `bench/unrecorded_mark_refused.sh`
+  runs `tests/365` (mutations `unrecorded_mark_pass_by_name`, `retire_unrecorded_mark_unrefused`,
+  `recall_unrecorded_mark_disowned`, `write_block_unrecorded_blocks`, `write_block_unrecorded_any_rel`,
+  `unrecorded_mark_job_armed`, `unrecorded_mark_aside_block_unnamed`, `unrecorded_mark_keep_clears`,
+  `unrecorded_mark_kept_block_unnamed`); `tests/362` part E now expects the install pass to leave such a mark.
+
 - **The write-block step anchors an older install's row by its retirement mark, and names a block it put on the
   operator's table** (#1435). The step compared a partition's name against `child_oid` alone, and a v0.5.0 row
   records a retirement's oid in `retiring_oid` only. So when the operator renamed such a detached retirement and
