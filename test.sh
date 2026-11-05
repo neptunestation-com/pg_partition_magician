@@ -1764,8 +1764,13 @@ lint_job_shellcheck() {
   bash scripts/image_build_key.sh --selftest
 }
 lint_job_lock_view_selftest() {
-  python3 -m venv .venv-lockview
-  .venv-lockview/bin/pip install --quiet matplotlib
+  # Reused across runs like the lockview track's: a second `python3 -m venv` over an existing venv
+  # fails where the venv's activate scripts are written read-only (Homebrew's 3.14), so every local
+  # run after the first would fail here. CI starts from a clean checkout and always builds it.
+  if [ ! -d .venv-lockview ]; then
+    python3 -m venv .venv-lockview
+    .venv-lockview/bin/pip install --quiet matplotlib
+  fi
   .venv-lockview/bin/python bench/lock_view_selftest.py
 }
 lint_job_sql_syntax() {
