@@ -2,7 +2,7 @@
 name: finder
 description: Adversarial reviewer for one slice of a pgpm review tree under declared lenses. Produces claims with executable reproductions and a null-results file. Use from the /review-pass skill (one finder per slice) or the /pr-verify skill (one finder per pull request, on the units its diff touches and their callers).
 tools: Read, Grep, Glob, Bash, Write
-model: fable
+model: sonnet
 effort: high
 ---
 
