@@ -85,7 +85,8 @@ coordinator notes. The per-finder table in the record carries each finder's cove
 precision.
 
 **Model-tier split** (the methodology's way of choosing models with data): give two slices to a second
-finder each, run with a different `model` on the Agent call, same prompt. Record which finder id ran on
+finder each, run with `model: haiku` on the Agent call (the base finder runs on sonnet, per
+`.claude/agents/finder.md`), same prompt. Record which finder id ran on
 which model; per-finder recall and precision are computed later.
 
 If the user has opted into multi-agent orchestration ("use a workflow"), the fan-out and per-claim
