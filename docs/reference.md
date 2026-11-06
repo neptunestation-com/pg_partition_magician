@@ -1735,9 +1735,7 @@ before the `DROP` (`set_retain` loosened it, or an `id` table's frontier moved b
 rows were deleted), the retirement is taken back, by `set_retain` itself or by the next tick's `retain()`:
 
 - still attached: the `pgpm_detach` job is returned to idle (only if it still holds this partition's
-  command), logged `retain_recall`. `retiring_at` is cleared by a later tick that finds no detach of the
-  partition still running, so a detach pg_cron had already started is still recognised as pgpm's own when
-  it lands.
+  command), logged `retain_recall`.
 - already detached by that detach: the job is returned to idle and the partition is re-attached on its own
   bounds, logged `retain_reattach`, and the `CHECK` constraint the concurrent detach left on it is
   dropped again. A re-attach that fails is logged `fail_retain_reattach`, counts in
@@ -1790,6 +1788,32 @@ rows were deleted), the retirement is taken back, by `set_retain` itself or by t
   renamed table's new name, which pgpm cannot know. This holds for a retirement that was not renamed too,
   since pgpm cannot tell it apart: it costs one statement. Nothing write-blocks a table under such a row's
   name that is no partition of the parent.
+
+**A recalled retirement keeps its mark.** In both cases above `retiring_at` and the record of pgpm's dispatch
+stay on the `pgpm.part` row, stamped `recalled_at`, until retention reaches the partition again (`retire`
+dispatches its detach anew and clears `recalled_at`) or the partition is dropped. pg_cron runs a job's command
+from a copy that only a committed change refreshes, so a run it starts before the recall commits, or before its
+launcher next looks, still carries the detach, and nothing pgpm can read says that the last such run has
+started. When that late detach takes the partition out, the kept mark is what tells the next tick it is pgpm's
+own retirement, and the tick re-attaches it as above. `status().retain_detaching` does not count a recalled
+mark.
+
+**A caller that cannot idle the job is refused.** pg_cron lets only the role that owns a job (the one that ran
+`pgpm.schedule()`) or a superuser change it, and shows it only to them (a `BYPASSRLS` role sees it but still
+cannot change it). Any other role cannot return an armed `pgpm_detach` job to idle, and the detach it failed to
+recall would land anyway. So where pg_cron is installed, a retirement not yet recalled is neither recalled nor
+re-attached unless the caller is a superuser, owns the `pgpm_detach` job, or is the role whose `retire` dispatched
+this detach (recorded as `pgpm.part.detach_dispatched_by`; that role could arm the job, so it can idle it, and if
+it sees no job there is none left to run the detach). Otherwise the call logs `fail_retain_recall` and counts it in
+`status().retain_drop_failures`, with a `method` naming the role. Run `pgpm.maintain` for the table as the role
+that ran `pgpm.schedule()` or as a superuser (pgpm's own scheduled tick runs as that role), and the recall goes
+through.
+
+A mark the recall keeps does not hold up anyone else's retirement. Only one concurrent detach is in flight
+at a time, database-wide, because there is one `pgpm_detach` job, and a retirement waits for an older one
+that holds it. A mark counts as holding it only while the job is armed with that partition's detach or the
+partition is pending a detach, so a kept mark, or one whose retirement was refused before its dispatch,
+never stalls another table's retirement.
 
 ##### What `retire` checks a partition's identity against
 
@@ -3731,7 +3755,8 @@ One row per managed table. Beyond the static config it surfaces:
   strategy's returned `covered_hi` that broke the contract, so coverage does not advance), since all
   seven wedge retention the same way. It also counts `fail_retain_reattach`: a partition whose
   retirement retention no longer reaches, taken out of the parent by its detach and not yet put back,
-  so its rows are missing from every read of the parent until it is.
+  so its rows are missing from every read of the parent until it is. And `fail_retain_recall`: such a
+  retirement whose detach the caller could not recall, because it cannot idle the `pgpm_detach` job.
 - `parent_missing` -- the managed relation itself is **gone**: dropped without
   [`untransmute`](#untransmute), leaving the `pgpm.config` row pointing at an oid that no longer
   resolves. Everything else in the row still reports (it comes from pgpm's own catalog), but the
@@ -3739,7 +3764,8 @@ One row per managed table. Beyond the static config it surfaces:
   and `retain_backlog` is null, because the retention horizon is derived from `max(control)` read from the
   relation and there is no honest answer without it. Clear the state with
   [`forget_missing`](#forget_missing).
-- `retain_detaching` -- partitions whose concurrent detach has been dispatched and not yet completed
+- `retain_detaching` -- partitions whose concurrent detach has been dispatched and not yet completed,
+  not counting a retirement retention stopped reaching, which keeps its mark (see [`retire`](#retire)).
   Non-zero for a tick or two is normal; persistently non-zero alongside climbing
   `retain_drop_failures` means the dispatch has nowhere to go -- run `pgpm.schedule()`.
 - `retain_backlog` -- partitions whose whole range is past the retention horizon but which are not yet
@@ -4097,6 +4123,8 @@ session; for `id`, the number.
 | `retiring_at` | `timestamptz` | set when `retire` dispatches a concurrent detach for this partition, so recovery can tell whose detach a pending one was; null for every partition on the ordinary one-step drop path |
 | `retiring_oid` | `oid` | which relation that dispatch meant. The detach travels to pg_cron as text naming the partition, and is re-resolved there; this is what lets `retire` refuse to act when the name has stopped resolving to it (see [identity](#what-retire-checks-a-partitions-identity-against)). Null alongside a null `retiring_at`, and for a retirement already in flight when the column was added |
 | `detach_dispatched_oid` | `oid` | the record that `retire`'s own dispatch of this retirement's detach succeeded: the partition's oid, written in the transaction in which the dispatch armed the `pgpm_detach` job, cleared with `retiring_at`. A mark on a pending or detached partition without it is the operator's, not pgpm's (see [`retire`](#retire)). Null on every row an upgrade finds |
+| `recalled_at` | `timestamptz` | when retention stopped reaching this retirement and the recall took it back. The mark is kept (`retiring_at` and `detach_dispatched_oid` stay) so a detach pg_cron runs late is still known as pgpm's own; `retire` clears it when retention reaches the partition again and it dispatches the detach anew. `status().retain_detaching` does not count a row with it set (see [`retire`](#retire)) |
+| `detach_dispatched_by` | `name` | the role whose `retire` dispatched this retirement's detach, written with `detach_dispatched_oid`. Only a job's owner or a superuser can arm pg_cron's job, so this role can also idle it; the recall refuses a caller that is not a superuser, not the job's owner and not this role (see [`retire`](#retire)). Null on a dispatch an older pgpm made |
 | `child_oid` | `oid` | which relation this row is about, recorded where the partition enters this table (`obtain`, regrain's standalone child, `transmute`'s monolith) rather than at retirement. The write-block step checks `child_name` against it before issuing any DDL, the archive step checks it before reading the child (see [the archive step's identity check](#the-archive-steps-identity-check)), and `retire` checks it before any side effect -- which is what anchors the ordinary one-step `DROP` that `retiring_oid` leaves uncovered (see [identity](#what-retire-checks-a-partitions-identity-against)). A rename does not change an OID, so regrain's own transitional rename leaves it correct. Null reads as unanchored; an upgrade backfills it for every row whose name still resolves |
 
 Primary key `(parent_table, child_name)`. The non-overlap invariant holds over `attached = true` rows
@@ -4186,6 +4214,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan, or either did not get its table's lock in time |
 | `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which its dispatched detach had already taken out of the parent, could not be re-attached (a lock timeout, or something else now holds its range). The table and its rows are left whole, `method` carries the error, and the next tick tries again. Counts in `status().retain_drop_failures` |
+| `fail_retain_recall` | retention no longer reaches a partition whose detach pgpm dispatched, and the caller cannot idle the `pgpm_detach` job to recall it (pg_cron lets only its owner or a superuser change it): it is not a superuser, does not own the job, and did not dispatch the detach. Neither recalled nor re-attached; `method` names the role. Run `pgpm.maintain` for the table as the role that ran `pgpm.schedule()` or as a superuser. Counts in `status().retain_drop_failures` |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
 | `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or its explicit-range stand-in is taken or over 63 bytes, or its own name is over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it, or for a name over 63 bytes gives the name, its length and the bytes to shorten the table name by. Repeats once per tick until the cell is built |
 | `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, not a native value, or on an `id` grid not a value of the control column's type, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |

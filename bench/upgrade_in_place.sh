@@ -152,6 +152,8 @@ pgpm.part:retiring_at
 pgpm.part:retiring_oid
 pgpm.part:child_oid
 pgpm.part:detach_dispatched_oid
+pgpm.part:recalled_at
+pgpm.part:detach_dispatched_by
 pgpm.transmute_inflight:owner_pid
 pgpm.transmute_inflight:owner_backend_start
 pgpm.transmute_inflight:partition_tz

@@ -29,7 +29,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(38);
+select plan(39);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -109,8 +109,9 @@ call pgpm.maintain('pgpm_t204_new.rra');
 
 select ok(pgpm_t204_old.attached('pgpm_t204_new.rra', :'a_oid'::oid), 'A: the kept partition is still attached to the parent');
 select is(pgpm_t204_old.ids('pgpm_t204_new.rra', 20000), array[1, 2, 3]::bigint[], 'A: ids 1, 2, 3 are readable through the parent');
-select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rra'::regclass and child_name = :'a_doomed'),
-  null, 'A: the tick after the recall clears the retiring marker');
+-- #1438: a recalled retirement keeps its marker, stamped recalled, for a detach landing later (tests/366)
+select isnt((select recalled_at from pgpm.part where parent_table = 'pgpm_t204_new.rra'::regclass and child_name = :'a_doomed'),
+  null, 'A: the tick after the recall keeps the retiring marker, stamped recalled');
 select lives_ok($$ insert into pgpm_t204_new.rra values (4, 'd') $$, 'A: a write into the kept range has a partition to land in');
 select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'pgpm_t204_new.rra'::regclass $$,
   $$ values (0::bigint, 0::bigint) $$, 'A: status() reports nothing failed and nothing detaching');
@@ -152,9 +153,13 @@ select is((select array_agg(conname::text order by conname) from pg_constraint w
   :'b_cons'::text[], 'B: the CHECK the concurrent detach added is gone again; its constraints are what they were');
 select is(pgpm_t204_old.actions('pgpm_t204_new.rrb', '0'), array['retain_detach', 'retain_recall', 'retain_reattach'],
   'B: logged as exactly retain_detach, retain_recall, retain_reattach');
-select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
-  null, 'B: the retiring marker is cleared with the re-attach');
+-- #1438: kept through the re-attach and after it, for a detach landing later (tests/366)
+select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
+  null, 'B: the retiring marker is kept through the re-attach');
 select is(pgpm_t204_old.armed(), 'select 1', 'B: the standing job stays idle, so it does not detach the partition again');
+call pgpm.maintain('pgpm_t204_new.rrb');
+select isnt((select recalled_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
+  null, 'B: the next tick keeps the marker, stamped recalled');
 select lives_ok($$ insert into pgpm_t204_new.rrb values (9, 'i') $$, 'B: a write into the range lands');
 select lives_ok($$ insert into public.rr204b_ref values (2, 6) $$, 'LIVENESS: (B) a referencing row can point into the re-attached range');
 select throws_ok($$ delete from pgpm_t204_new.rrb where id = 6 $$, '23503', null,
