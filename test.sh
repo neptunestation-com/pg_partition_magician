@@ -1402,13 +1402,27 @@ run_perf() {
   if [ "${#selected[@]}" -eq 0 ]; then echo "perf track: FAIL (shard ${SHARD_I}/${SHARD_N} selects no guard; a slice that runs nothing verifies nothing)"; return 1; fi
   printf '    %s\n' "${selected[@]}"
   [ -n "$LIST_ONLY" ] && return 0
+  # The guards in bench/old_minor_guards run on the pinned older minor instead (#1450; docker-compose.yml's
+  # postgres17old explains why), brought up only when this shard selected one of them.
+  local oprof="pg17old" osvc="postgres17old" co="pgpm_test-17old" old_up=0
+  local -a old_minor
+  mapfile -t old_minor < <(grep -vE '^[[:space:]]*(#|$)' "$(dirname "$0")/bench/old_minor_guards")
   $DC --profile "$prof" up -d --wait "$svc"
   psql_run "$prof" "$svc" -q -f /repo/pgpm_core/install.sql >/dev/null
-  local rc=0 entry
+  local rc=0 entry target g
   for entry in "${selected[@]}"; do
     # shellcheck disable=SC2086  # the entry is three whitespace-separated words by construction
-    set -- $entry; bash "$1" "$c" "${@:2}" || rc=1
+    set -- $entry
+    target="$c"
+    for g in "${old_minor[@]}"; do
+      if [ "$1" = "$g" ]; then
+        target="$co"
+        if [ "$old_up" = 0 ]; then build_image "$oprof" "$osvc"; $DC --profile "$oprof" up -d --wait "$osvc"; old_up=1; fi
+      fi
+    done
+    bash "$1" "$target" "${@:2}" || rc=1
   done
+  [ "$old_up" = 1 ] && $DC --profile "$oprof" down -v
   $DC --profile "$prof" down -v
   if [ "$rc" -ne 0 ]; then echo "perf track: FAIL"; return 1; fi
   echo "perf track: PASS"
@@ -1446,7 +1460,17 @@ run_discriminate() {
   if [ "$SHARD_I" = 1 ]; then
     bash "$(dirname "$0")/bench/discriminate_installs.sh" "$c" pgpm_discself || rc=1
   fi
-  bash "$(dirname "$0")/bench/discriminate.sh" "--shard=${SHARD_I}/${SHARD_N}" ${LIST_ONLY:+--list} "$c" "$ca" || rc=1
+  # The guards in bench/old_minor_guards run on the pinned older minor (#1450), brought up only when this
+  # shard's listing names one of them.
+  local oprof="pg17old" osvc="postgres17old" co="" g
+  for g in $(grep -vE '^[[:space:]]*(#|$)' "$(dirname "$0")/bench/old_minor_guards"); do
+    if bash "$(dirname "$0")/bench/discriminate.sh" "--shard=${SHARD_I}/${SHARD_N}" --list "$c" "$ca" | cut -f2 | grep -qxF "$g"; then
+      co="pgpm_test-17old"
+    fi
+  done
+  if [ -n "$co" ]; then build_image "$oprof" "$osvc"; $DC --profile "$oprof" up -d --wait "$osvc"; fi
+  bash "$(dirname "$0")/bench/discriminate.sh" "--shard=${SHARD_I}/${SHARD_N}" ${LIST_ONLY:+--list} "$c" "$ca" "$co" || rc=1
+  [ -n "$co" ] && $DC --profile "$oprof" down -v
   $DC --profile "$aprof" down -v
   $DC --profile "$prof" down -v
   return "$rc"

@@ -1,0 +1,7 @@
+# Guards that run on the postgres17old service (PostgreSQL 17.11, pinned by digest in docker-compose.yml), not
+# on postgres17, in both the perf track (test.sh run_perf) and the discriminate track (bench/discriminate.sh).
+# Each one's test file stages a schema swap that PostgreSQL's November 2026 minors hold behind the very lock the
+# swap races, so only an older minor can show the refusal it certifies, or the mutation that removes it (#1450).
+# One path per line; this file is the only list.
+bench/regrain_copy_by_oid.sh
+bench/transmute_by_oid.sh

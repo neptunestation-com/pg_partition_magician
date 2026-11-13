@@ -21,9 +21,20 @@ ARG PGSQL_HTTP_REF=v1.6.2
 # images. docker-compose.yml's `locktrace` service passes WITH_LOCK_TRACER=true.
 ARG WITH_LOCK_TRACER=false
 
-RUN apt-get update \
+# Optional: keep the server at the base image's own minor. postgresql-server-dev-NN from the PGDG repository
+# depends on the newest postgresql-client-NN, so installing it unpinned upgrades the server to the newest minor
+# whatever the base image was; the matrix images run that newest minor. docker-compose.yml's `postgres17old`
+# service passes PG_PIN_MINOR=true to stay at its pinned base (#1450): the dev package is pinned to the server
+# already installed, and the build fails if the server moved anyway. It fails too once PGDG stops serving that
+# version, which is the moment to move the pin, not to drop it.
+ARG PG_PIN_MINOR=false
+
+RUN pin=$(dpkg-query -W -f='${Version}' "postgresql-${PG_MAJOR}") \
+    && dev="postgresql-server-dev-${PG_MAJOR}" \
+    && if [ "$PG_PIN_MINOR" = "true" ]; then dev="$dev=$pin"; fi \
+    && apt-get update \
     && apt-get install -y \
-        postgresql-server-dev-${PG_MAJOR} \
+        "$dev" \
         build-essential \
         git \
     && git clone https://github.com/citusdata/pg_cron.git \
@@ -39,7 +50,10 @@ RUN apt-get update \
        fi \
     && apt-get remove -y build-essential git postgresql-server-dev-${PG_MAJOR} \
     && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && if [ "$PG_PIN_MINOR" = "true" ] && [ "$(dpkg-query -W -f='${Version}' "postgresql-${PG_MAJOR}")" != "$pin" ]; then \
+         echo "PG_PIN_MINOR: the server moved off its base minor $pin"; exit 1; \
+       fi
 
 # pg_cron must be preloaded; point its scheduler at the default database.
 RUN echo "shared_preload_libraries = 'pg_cron'" >> /usr/share/postgresql/postgresql.conf.sample \

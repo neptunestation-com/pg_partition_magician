@@ -64,6 +64,16 @@ if [ "$fail" = 0 ]; then
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi
+  # tests/353 part B stages its schema swap only where the server lets a rename past a session that created an object in the
+  # schema, which PostgreSQL's November 2026 minors do not (#1450): on such a server the file asserts the server's
+  # protection instead, and the refusal this guard certifies goes unexercised. So this guard runs on the pinned
+  # older minor (bench/old_minor_guards), and a run that did not stage the swap is not a pass.
+  if echo "$out" | grep -q '^# SCHEMA_SWAP: stageable$'; then
+    printf 'PASS  %-58s %s\n' "LIVENESS: the server let the schema swap through" "stageable"
+  else
+    printf 'FAIL  %-58s %s\n' "LIVENESS: the server let the schema swap through" "$(echo "$out" | grep -m1 -oE 'SCHEMA_SWAP: [a-z]+' || echo 'no probe line')"
+    fail=1
+  fi
 fi
 
 q -q -c "drop database if exists $DB" >/dev/null 2>&1

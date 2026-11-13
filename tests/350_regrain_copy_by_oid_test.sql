@@ -48,7 +48,36 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
+
+-- PostgreSQL's November 2026 minors (15.20, 17.12, ...) make ALTER SCHEMA ... RENAME wait for a transaction that
+-- created an object in the schema (#1450). PART C's tick has created the copy in c350s before it waits, so on such
+-- a server the swap cannot land: the rename waits behind the tick, and part C asserts that protection instead of
+-- the namesake's. Probed once, here: a second session holds a CREATE open in a scratch schema, and the rename is
+-- tried under a short lock_timeout (and undone by a raise when it lands).
+select dblink_connect('p350', format('dbname=%s user=postgres', current_database())) as p \gset
+create schema probe350;
+select dblink_exec('p350', 'begin') as p1 \gset
+select dblink_exec('p350', 'create table probe350.x (i int)') as p2 \gset
+create function pg_temp.rename_waits_on_creator() returns boolean language plpgsql as $$
+begin
+  perform set_config('lock_timeout', '1s', true);
+  alter schema probe350 rename to probe350_moved;
+  raise exception using errcode = 'P0001', message = 'undo the probe''s rename';
+exception
+  when lock_not_available then return true;
+  when raise_exception then return false;
+end $$;
+select pg_temp.rename_waits_on_creator() as swap_held \gset
+select dblink_exec('p350', 'rollback') as p3 \gset
+select dblink_disconnect('p350') as p4 \gset
+drop schema probe350;
+reset lock_timeout;
+\if :swap_held
+select plan(52);
+\else
 select plan(53);
+\endif
+select diag(case when :'swap_held' then 'SCHEMA_SWAP: held' else 'SCHEMA_SWAP: stageable' end);
 
 -- the call in session r350 is waiting, ungranted, on p_oid (in p_mode, or any mode when it is null): one statement
 -- per sample, snapshot cleared
@@ -84,7 +113,38 @@ begin
   return v;
 end $$;
 
+-- session p_pid is waiting, ungranted, for a lock on the schema p_nsp itself, which p_holder holds (the rename the
+-- November 2026 minors hold behind a session that created an object in the schema)
+create function pg_temp.rename_held_by(p_pid int, p_nsp oid, p_holder int) returns boolean language plpgsql as $$
+begin
+  for i in 1 .. 800 loop
+    perform pg_stat_clear_snapshot();
+    if exists (select 1 from pg_locks l
+                where not l.granted and l.locktype = 'object' and l.classid = 'pg_namespace'::regclass
+                  and l.objid = p_nsp and l.pid = p_pid)
+       and exists (select 1 from pg_locks l
+                    where l.granted and l.locktype = 'object' and l.classid = 'pg_namespace'::regclass
+                      and l.objid = p_nsp and l.pid = p_holder) then
+      return true;
+    end if;
+    perform pg_sleep(0.025);
+  end loop;
+  return false;
+end $$;
+
+-- the result of the statement sent on g350: OK, or its error
+create function pg_temp.outcome_g350() returns text language plpgsql as $$
+declare v text;
+begin
+  perform count(*) from dblink_get_result('g350', false) as t(x text);
+  v := dblink_error_message('g350');
+  perform count(*) from dblink_get_result('g350', false) as t(x text);
+  return v;
+end $$;
+
 select dblink_connect('h350', format('dbname=%s user=postgres', current_database())) as h \gset
+select dblink_connect('g350', format('dbname=%s user=postgres', current_database())) as g \gset
+select pid as g_pid from dblink('g350', 'select pg_backend_pid()') as t(pid int) \gset
 select dblink_connect('r350', format('dbname=%s user=postgres', current_database())) as r \gset
 select set_config('pgpm350.r_pid', (select pid::text from dblink('r350', 'select pg_backend_pid()') as t(pid int)), false) as r_pid \gset
 select dblink_exec('r350', 'set lock_timeout = ''60s''') as r_lt \gset
@@ -203,6 +263,7 @@ insert into c350s.t select g * 10, 1 + g % 5, 'real' from generate_series(1, 99)
 call pgpm.transmute('c350s.t', 'id', 1000, p_paused => true);
 insert into c350s.t values (20000, 1, 'frontier');
 select 'c350s.t'::regclass::oid as c_parent \gset
+select 'c350s'::regnamespace::oid as c_nsp \gset
 select 'public.c350_ref'::regclass::oid as c_ref \gset
 select conname as c_fk from pg_constraint where conrelid = 'c350s.t'::regclass and contype = 'f' \gset
 select is(pgpm.regrain_step('c350s.t', (select child_name from pgpm.part
@@ -216,6 +277,27 @@ select dblink_exec('h350', 'insert into public.c350_ref values (100)') as c2 \gs
 select dblink_send_query('r350', format('select pgpm.regrain_step(%s::oid::regclass, %L, %L, 20)', :'c_parent', :'c_src', '500')) as c3 \gset
 select ok(pg_temp.waits_for(:'c_ref'::oid, 'ShareRowExclusiveLock'),
   'LIVENESS: C: the copy''s key ADD waits for SHARE ROW EXCLUSIVE on the referenced table, behind the writer');
+\if :swap_held
+-- The tick created the copy in c350s before this wait, so the server holds the swap's rename behind it: the rename
+-- lands once the tick has committed, and the tick fills, constrains and anchors the copy it made, by its oid.
+select dblink_send_query('g350', 'alter schema c350s rename to c350s_aside') as c4 \gset
+select ok(pg_temp.rename_held_by(:g_pid, :'c_nsp'::oid, current_setting('pgpm350.r_pid')::int),
+  'LIVENESS: C: the server holds the schema''s rename behind the waiting tick, the holder of the schema''s lock');
+select dblink_exec('h350', 'commit') as c9 \gset
+select coalesce(string_agg(x, ','), 'no row') as c_ret from dblink_get_result('r350', false) as t(x text) \gset
+select dblink_error_message('r350') as c_err \gset
+select count(*) as c_drained from dblink_get_result('r350', false) as t(x text) \gset
+select is(:'c_ret'::text, 'copied:20', format('C: the tick made the copy and copied a batch into it (%s)', :'c_err'));
+select is(pg_temp.outcome_g350(), 'OK', 'C: and the rename lands after it');
+select is(to_regnamespace('c350s'), null, 'C: nothing stands under the old schema name');
+select child_oid as c_cpy_oid from pgpm.part where parent_table = :'c_parent'::oid and not attached and lo = '0' \gset
+select c.oid as c_made from pg_class c where c.relname = :'c_cpy' and c.relnamespace = 'c350s_aside'::regnamespace \gset
+select is(:'c_cpy_oid'::oid, :'c_made'::oid, 'C: pgpm.part anchors the copy the CREATE made, beside the source');
+select is(pg_temp.rows_of(:'c_cpy_oid'), (select array_agg(g * 10 || '=real' order by g) from generate_series(1, 20) g),
+  'C: and that copy holds the batch, ids 10..200');
+select ok(exists (select 1 from pg_constraint where conrelid = :'c_cpy_oid'::oid and conname = :'c_fk' and contype = 'f' and convalidated),
+  'C: with the parent''s key on it, validated');
+\else
 select dblink_exec('h350', 'alter schema c350s rename to c350s_aside') as c4 \gset
 select dblink_exec('h350', 'create schema c350s') as c5 \gset
 select dblink_exec('h350', format('create table c350s.%I (id bigint, ref_id bigint, payload text, constraint %I check (true) not valid)', :'c_cpy', :'c_fk')) as c6 \gset
@@ -241,6 +323,7 @@ select is(pg_temp.rows_of(:'c_cpy_oid'), (select array_agg(g * 10 || '=real' ord
   'C: and that copy holds the batch, ids 10..200');
 select ok(exists (select 1 from pg_constraint where conrelid = :'c_cpy_oid'::oid and conname = :'c_fk' and contype = 'f' and convalidated),
   'C: with the parent''s key on it, validated');
+\endif
 drop owned by c350_reader;
 drop role c350_reader;
 

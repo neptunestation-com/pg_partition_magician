@@ -14,7 +14,10 @@
 # bench/mutations/, build a copy of install.sql with the defect back in, run the guard against it, and
 # require the guard to FAIL. A guard that stays green on its own mutant is not testing anything.
 #
-# Usage: discriminate.sh [--track=NAME] <container> [<archive container>]
+# Usage: discriminate.sh [--track=NAME] <container> [<archive container>] [<old-minor container>]
+# The third container runs the guards listed in bench/old_minor_guards: their files stage a schema swap only an
+# older PostgreSQL minor lets through (#1450; docker-compose.yml's postgres17old). A listed guard with no such
+# container is a FAILURE, as for the archive container.
 # The second container is only needed for mutations scoped to pgpm_archive/install.sql or to a file under
 # tests/archive/ (which require the archive track's own image -- pgsql-http isn't in the plain core image); a mutation
 # whose src needs it, with no such container supplied, is a FAILURE of this check, not a skip --
@@ -72,6 +75,8 @@ if ! [[ "$SHARD_I" =~ ^[0-9]+$ && "$SHARD_N" =~ ^[0-9]+$ ]] || [ "$SHARD_I" -lt 
 fi
 C="${1:?container}"
 CA="${2:-}"
+CO="${3:-}"
+OLD_MINOR=" $(grep -vE '^[[:space:]]*(#|$)' "$(cd "$(dirname "$0")" && pwd)/old_minor_guards" | tr '\n' ' ')"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/bench/results/mutants"       # gitignored
 mkdir -p "$OUT"
@@ -171,6 +176,7 @@ while IFS=$'\t' read -r name guard why src <&3; do
     pgpm_archive/install.sql|tests/archive/*) target_c="$CA" ;;
     *) target_c="$C" ;;
   esac
+  if [[ "$OLD_MINOR" == *" $guard "* ]]; then target_c="$CO"; fi
   if [ -z "$target_c" ]; then
     printf 'FAIL  no container supplied for src %s; guard %s is unverified\n' "$src" "$guard"
     fail=1; continue
@@ -188,9 +194,9 @@ while IFS=$'\t' read -r name guard why src <&3; do
   installed=1
   case "$src" in
     */install.sql)
-      if [[ "$baseline_ok" != *" $src "* ]]; then
+      if [[ "$baseline_ok" != *" $target_c:$src "* ]]; then
         if installs "$target_c" "$src" "$ROOT/$src" "${db}_install" "$OUT/baseline.install.log"; then
-          baseline_ok="$baseline_ok$src "
+          baseline_ok="$baseline_ok$target_c:$src "
         else
           printf 'FAIL  the UNMUTATED %s does not install in %s; guard %s is unverified\n' "$src" "$target_c" "$guard"
           grep -m3 'ERROR' "$OUT/baseline.install.log" | sed 's/^/      /'
