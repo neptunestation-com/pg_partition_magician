@@ -27,7 +27,7 @@
 set timezone = 'UTC';
 set client_min_messages = warning;
 create extension if not exists pgtap;
-select plan(29);
+select plan(30);
 
 -- the off-unit epoch every table below but xc and xn uses, and its seconds key: 8 hex digits of whole seconds
 -- since that epoch, then a 4-digit row tag
@@ -137,8 +137,16 @@ select lives_ok($$ select pgpm.set_regrain('public.xm', '10 days') $$,
   'LIVENESS: set_regrain accepts a 10-day target on the same fixed grid');
 select lives_ok($$ select pgpm.set_regrain('public.xm', null) $$, 'LIVENESS: and turns auto-regrain off again');
 
--- the 10-day regrain of the monolith: a row past it, so the monolith is frozen
-insert into public.xm values (pg_temp.k(pg_temp.f10(now() + interval '40 days') + interval '2 days', 9), 9);
+-- the 10-day regrain of the monolith: a row past it, so the monolith is frozen. Placed by the monolith's own
+-- recorded hi, not by the clock: transmute ends the monolith at the end of the 90-day cell holding now(), so a
+-- row at now() + 40 days cleared it only in a cell's last 40 days and the regrain answered 'active' on the other 50.
+insert into public.xm
+  select pg_temp.k(p.hi::timestamptz + interval '2 days', 9), 9 from pgpm.part p
+   where p.parent_table = 'public.xm'::regclass order by p.lo::timestamptz limit 1;
+select ok((select pgpm._grid_floor('text_time', '90 days', '2000-01-01 00:00:00.5+00', pgpm._frontier_native('public.xm'), 'UTC')::timestamptz
+                  >= p.hi::timestamptz
+             from pgpm.part p where p.parent_table = 'public.xm'::regclass order by p.lo::timestamptz limit 1),
+  'LIVENESS: row 9 puts the frontier''s cell at or past the monolith''s hi, so the monolith is frozen');
 create table public.run (phase text primary key, outcome text);
 do $do$
 declare v_mono name; s text; i int := 0; n int; r record; t text := '';

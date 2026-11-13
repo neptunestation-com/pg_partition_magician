@@ -35,7 +35,36 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 set timezone = 'UTC';
+
+-- PostgreSQL's November 2026 minors (15.20, 17.12, ...) make ALTER SCHEMA ... RENAME wait for a transaction that
+-- created an object in the schema (#1450). PART B's cutover has created objects in b353 before it waits, so on
+-- such a server the swap cannot land: the rename waits behind the cutover, and part B asserts that protection
+-- instead of the refusal. Probed once, here: a second session holds a CREATE open in a scratch schema, and the
+-- rename is tried under a short lock_timeout (and undone by a raise when it lands).
+select dblink_connect('p353', format('dbname=%s user=postgres', current_database())) as p \gset
+create schema probe353;
+select dblink_exec('p353', 'begin') as p1 \gset
+select dblink_exec('p353', 'create table probe353.x (i int)') as p2 \gset
+create function pg_temp.rename_waits_on_creator() returns boolean language plpgsql as $$
+begin
+  perform set_config('lock_timeout', '1s', true);
+  alter schema probe353 rename to probe353_moved;
+  raise exception using errcode = 'P0001', message = 'undo the probe''s rename';
+exception
+  when lock_not_available then return true;
+  when raise_exception then return false;
+end $$;
+select pg_temp.rename_waits_on_creator() as swap_held \gset
+select dblink_exec('p353', 'rollback') as p3 \gset
+select dblink_disconnect('p353') as p4 \gset
+drop schema probe353;
+reset lock_timeout;
+\if :swap_held
+select plan(31);
+\else
 select plan(35);
+\endif
+select diag(case when :'swap_held' then 'SCHEMA_SWAP: held' else 'SCHEMA_SWAP: stageable' end);
 
 -- p_pid is waiting, ungranted, for p_mode on p_oid
 create function pg_temp.waits_for(p_pid int, p_oid oid, p_mode text) returns boolean language plpgsql as $$
@@ -45,6 +74,25 @@ begin
     if exists (select 1 from pg_locks l
                 where not l.granted and l.locktype = 'relation' and l.relation = p_oid and l.mode = p_mode
                   and l.pid = p_pid) then
+      return true;
+    end if;
+    perform pg_sleep(0.025);
+  end loop;
+  return false;
+end $$;
+
+-- p_pid is waiting, ungranted, for a lock on the schema p_nsp itself, which p_holder holds (the rename the November
+-- 2026 minors hold behind a session that created an object in the schema)
+create function pg_temp.rename_held_by(p_pid int, p_nsp oid, p_holder int) returns boolean language plpgsql as $$
+begin
+  for i in 1 .. 600 loop
+    perform pg_stat_clear_snapshot();
+    if exists (select 1 from pg_locks l
+                where not l.granted and l.locktype = 'object' and l.classid = 'pg_namespace'::regclass
+                  and l.objid = p_nsp and l.pid = p_pid)
+       and exists (select 1 from pg_locks l
+                    where l.granted and l.locktype = 'object' and l.classid = 'pg_namespace'::regclass
+                      and l.objid = p_nsp and l.pid = p_holder) then
       return true;
     end if;
     perform pg_sleep(0.025);
@@ -91,6 +139,7 @@ select dblink_connect('g353', format('dbname=%s user=postgres', current_database
 select dblink_connect('r353', format('dbname=%s user=postgres', current_database())) as r \gset
 select dblink_connect('c353', format('dbname=%s user=postgres options=-ctimezone=UTC', current_database())) as c \gset
 select pid as c_pid from dblink('c353', 'select pg_backend_pid()') as t(pid int) \gset
+select pid as g_pid from dblink('g353', 'select pg_backend_pid()') as t(pid int) \gset
 
 -- ======================= (A) the table renamed between phase 2 and the cutover =======================
 create schema a353;
@@ -139,6 +188,7 @@ insert into b353.t select g, now() - make_interval(hours => g), g from generate_
 create trigger t353_b before insert on b353.t for each row execute function public.t353_trg();
 create policy t353_p on b353.t using (true);
 select 'b353.t'::regclass::oid as b_oid \gset
+select 'b353'::regnamespace::oid as b_nsp \gset
 select 'r353.ref'::regclass::oid as ref_oid \gset
 -- a writer's lock on the referenced table (LOCK TABLE: no transaction id): 7a's ADD FOREIGN KEY waits behind it
 select dblink_exec('h353', 'begin') as b1 \gset
@@ -146,6 +196,26 @@ select dblink_exec('h353', 'lock table r353.ref in row exclusive mode') as b2 \g
 select dblink_send_query('c353', $q$call pgpm.transmute('b353.t'::regclass, 'ts', interval '1 month', p_lock_timeout => '60s')$q$) as b3 \gset
 select ok(pg_temp.waits_for(:c_pid, :'ref_oid'::oid, 'ShareRowExclusiveLock'),
   'LIVENESS: B: the cutover waits for the referenced table''s lock, re-adding the outgoing key at the parent (7a)');
+\if :swap_held
+-- The cutover created objects in b353 before this wait, so the server holds the swap's rename behind it: the
+-- rename lands once the cutover has committed, and the cutover converts the table it read, by its oid.
+select dblink_send_query('g353', 'alter schema b353 rename to b353_aside') as b4 \gset
+select ok(pg_temp.rename_held_by(:g_pid, :'b_nsp'::oid, :c_pid),
+  'LIVENESS: B: the server holds the schema''s rename behind the waiting cutover, the holder of the schema''s lock');
+select dblink_exec('h353', 'commit') as b8 \gset
+select is(pg_temp.outcome('c353'), 'OK', 'B: the cutover completes once the writer commits');
+select is(pg_temp.outcome('g353'), 'OK', 'B: and the rename lands after it');
+select is((select parent_table::text from pgpm.config where monolith_oid = :'b_oid'::oid), 'b353_aside.t',
+  'B: the table is converted, under its schema''s new name');
+select is(to_regnamespace('b353'), null, 'B: and nothing stands under the old schema name');
+select is((select array_agg(tgname::text) from pg_trigger where tgrelid = to_regclass('b353_aside.t') and not tgisinternal and tgparentid = 0),
+  array['t353_b'], 'B: its trigger is on the parent');
+select is((select array_agg(polname::text) from pg_policy where polrelid = to_regclass('b353_aside.t')), array['t353_p'],
+  'B: and its policy');
+select is((select confrelid from pg_constraint where conrelid = to_regclass('b353_aside.t') and contype = 'f'), :'ref_oid'::oid,
+  'B: and its outgoing key references the referenced table');
+select is(pg_temp.ids_of(to_regclass('b353_aside.t')::oid), array[1, 2, 3]::bigint[], 'B: the table holds ids 1..3');
+\else
 select dblink_exec('g353', 'alter schema b353 rename to b353_aside') as b4 \gset
 select dblink_exec('g353', 'create schema b353') as b5 \gset
 select dblink_exec('g353', 'create table b353.t (id bigint, ts timestamptz not null, ref_id bigint)') as b6 \gset
@@ -175,6 +245,7 @@ select is((select confrelid from pg_constraint where conrelid = to_regclass('b35
   'B: and its outgoing key references the referenced table');
 select is(pg_temp.ids_of(to_regclass('b353_aside.t')::oid) || pg_temp.ids_of(:'b_squat'::oid), array[1, 2, 3, 7]::bigint[],
   'B: the table holds ids 1..3, the namesake 7');
+\endif
 
 -- ======================= (C) restore_incoming_fks's ADD, the referencing table's schema swapped =======================
 create schema p353;

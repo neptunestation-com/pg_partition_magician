@@ -49,6 +49,20 @@ services:
     container_name: pgpm_test-18
     ports: ["5518:5432"]
 
+  # PostgreSQL 17 at the minor BEFORE the November 2026 releases, pinned by digest, for the guards listed in
+  # bench/old_minor_guards. Those releases make ALTER SCHEMA ... RENAME wait for a transaction that created an
+  # object in the schema, which closes the schema swaps tests/350 part C and tests/353 part B stage while pgpm
+  # waits on another table; on this server the swap still lands, so the refusals those parts certify, and
+  # the mutations that break them, stay verified (#1450). The perf and discriminate tracks bring it up; the
+  # matrix never does (its own profile, never "all").
+  postgres17old:
+    <<: *pg-base
+    profiles: ["pg17old"]
+    build: { context: ., args: { PG_VERSION: "17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f", PG_PIN_MINOR: "true", PGPM_BUILD_KEY: "${PGPM_BUILD_KEY:-dev}" } }
+    image: pgpm_test:17-oldminor
+    container_name: pgpm_test-17old
+    ports: ["5522:5432"]
+
   # The from_hypertable track: PG15 + Apache TimescaleDB, on the Supabase fleet image
   # (public.ecr.aws/supabase/postgres). That is the edition the migration actually targets, and it ships
   # timescaledb (Apache), pgTAP, and the timescaledb shared_preload preloaded -- so no build step is needed.

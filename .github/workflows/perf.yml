@@ -62,6 +62,14 @@ jobs:
         with:
           profile: pg17
           service: postgres17
+      # The pinned older-minor PG17 image the guards in bench/old_minor_guards run on (#1450), the same way; a
+      # shard that selects none of them neither restores nor builds anything it uses, and the save skips it.
+      - name: Restore the PG17 old-minor test image from the cache
+        id: image-old
+        uses: ./.github/actions/test-image-restore
+        with:
+          profile: pg17old
+          service: postgres17old
       - name: Run the perf track, shard ${{ matrix.shard }}
         run: ./test.sh perf --shard=${{ matrix.shard }}
       - name: Save the PG17 test image for the cache
@@ -73,6 +81,15 @@ jobs:
           key: ${{ steps.image.outputs.key }}
           cache-key: ${{ steps.image.outputs.cache-key }}
           tarball: ${{ steps.image.outputs.tarball }}
+      - name: Save the PG17 old-minor test image for the cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/test-image-save
+        with:
+          cache-hit: ${{ steps.image-old.outputs.cache-hit }}
+          image: ${{ steps.image-old.outputs.image }}
+          key: ${{ steps.image-old.outputs.key }}
+          cache-key: ${{ steps.image-old.outputs.cache-key }}
+          tarball: ${{ steps.image-old.outputs.tarball }}
 
   # Every guard is green on correct code. That alone does not show any of them would notice a
   # regression, and this repo has repeatedly produced guards that pass while observing nothing. These
@@ -115,6 +132,14 @@ jobs:
         with:
           profile: archive
           service: archive
+      # The pinned older-minor PG17 image the guards in bench/old_minor_guards run on (#1450), the same way; a
+      # shard that selects none of them neither restores nor builds anything it uses, and the save skips it.
+      - name: Restore the PG17 old-minor test image from the cache
+        id: image-old
+        uses: ./.github/actions/test-image-restore
+        with:
+          profile: pg17old
+          service: postgres17old
       # MinIO from the Actions cache rather than Docker Hub (see the comment on this job). The reference
       # is read from docker-compose.yml, never restated here, and the cached copy is the digest-pulled
       # image under the local tag pgpm-cache/minio:<digest hex>: the runners' classic image store drops
@@ -192,6 +217,15 @@ jobs:
           key: ${{ steps.image-archive.outputs.key }}
           cache-key: ${{ steps.image-archive.outputs.cache-key }}
           tarball: ${{ steps.image-archive.outputs.tarball }}
+      - name: Save the PG17 old-minor test image for the cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/test-image-save
+        with:
+          cache-hit: ${{ steps.image-old.outputs.cache-hit }}
+          image: ${{ steps.image-old.outputs.image }}
+          key: ${{ steps.image-old.outputs.key }}
+          cache-key: ${{ steps.image-old.outputs.cache-key }}
+          tarball: ${{ steps.image-old.outputs.tarball }}
 
   # One stable name for the merge queue and branch protection to require, whatever the shard count.
   summary:

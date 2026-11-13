@@ -3,7 +3,7 @@
 --
 -- _grid_floor's month branch turns "00:00 on the 1st in partition_tz" into an instant with `at time zone`.
 -- Where the zone's clocks went back from 01:00 to 00:00 on the 1st (America/Havana on 2020-11-01, and
--- again on 2026-11-01), that wall time happens twice, and PostgreSQL resolves it to the LATER occurrence,
+-- earlier on 2015-11-01), that wall time happens twice, and PostgreSQL resolves it to the LATER occurrence,
 -- 00:00 CST (05:00Z). _grid_next converts the same way, so that is where the grid's November edge is, in
 -- every grid ever built in such a zone. A value in the FIRST occurrence of the hour (04:00Z to 05:00Z)
 -- reads November on the wall clock but lies before that edge, and _grid_floor returned the edge for it:
@@ -19,7 +19,7 @@
 -- bench/month_floor_doubled_midnight.sh runs this file against a mutant without the step back to the
 -- previous edge (grid_floor_month_later_midnight), so it is also required to FAIL there.
 create extension if not exists pgtap;
-select plan(19);
+select plan(20);
 
 -- ==================== (a) the doubled hour really exists ====================
 select is((timestamptz '2020-11-01 04:30:00+00' at time zone 'America/Havana'), '2020-11-01 00:30:00'::timestamp,
@@ -28,8 +28,12 @@ select is((timestamptz '2020-11-01 05:30:00+00' at time zone 'America/Havana'), 
   'LIVENESS: 05:30Z reads 00:30 too: the hour after midnight on the 1st happens twice');
 select is(('2020-11-01 00:00'::timestamp at time zone 'America/Havana'), timestamptz '2020-11-01 05:00:00+00',
   'LIVENESS: PostgreSQL resolves the doubled 00:00 to the later occurrence, 05:00Z');
-select is((timestamptz '2026-11-01 04:30:00+00' at time zone 'America/Havana'), '2026-11-01 00:30:00'::timestamp,
-  'LIVENESS: it happens again on 2026-11-01: 04:30Z reads 00:30');
+-- The second instance is a past one on purpose: a future transition is a forecast the tz database revises
+-- (tzdata 2026f moved Havana's 2026 fall-back off 2026-11-01, and this file's 2026 half failed under it).
+select is((timestamptz '2015-11-01 04:30:00+00' at time zone 'America/Havana'), '2015-11-01 00:30:00'::timestamp,
+  'LIVENESS: it happened on 2015-11-01 too: 04:30Z reads 00:30');
+select is((timestamptz '2015-11-01 05:30:00+00' at time zone 'America/Havana'), '2015-11-01 00:30:00'::timestamp,
+  'LIVENESS: and 05:30Z reads 00:30 again');
 
 -- ==================== (b) the adapter, under a UTC session and a Havana session ====================
 set timezone = 'UTC';
@@ -56,9 +60,9 @@ select is(pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', '2020-11
 select is(pgpm._grid_floor('time', '3 months', '2000-02-01 05:00:00+00', '2020-11-01 04:30:00+00', 'America/Havana')::timestamptz,
   timestamptz '2020-08-01 04:00:00+00',
   'a quarter step (an anchor at Havana midnight puts the phase on Feb/May/Aug/Nov) floors 04:30Z to the August edge, a whole step back');
-select is(pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', '2026-11-01 04:30:00+00', 'America/Havana')::timestamptz,
-  timestamptz '2026-10-01 04:00:00+00',
-  'on 2026-11-01 the floor of 04:30Z is the October 2026 edge');
+select is(pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', '2015-11-01 04:30:00+00', 'America/Havana')::timestamptz,
+  timestamptz '2015-10-01 04:00:00+00',
+  'on 2015-11-01 the floor of 04:30Z is the October 2015 edge');
 set timezone = 'America/Havana';
 select is(pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', '2020-11-01 04:30:00+00', 'America/Havana')::timestamptz,
   timestamptz '2020-10-01 04:00:00+00',
