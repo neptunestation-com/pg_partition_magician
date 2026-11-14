@@ -10,7 +10,7 @@
 # that no run can still carry the detach. The file is the acceptance test; this wrapper exists so the mutations have
 # a guard the discriminate track can run against the mutant, in the shape of bench/retain_recall_renamed_detached.sh.
 #
-# TWELVE mutations are required to fail against it (bench/mutations/mutate.py):
+# NINETEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   recall_reattach_clears_mark        -- the re-attach clears the marker in its own transaction again. Part A.
 #   recall_bound_without_proof         -- the mark is cleared with no run above the watermark. Part A's late run.
 #   recall_bound_ignores_unfinished    -- an unfinished run of the job does not hold the mark. Part A.
@@ -23,6 +23,13 @@
 #   recall_idle_error_swallowed        -- pg_cron's refusal of the idle is swallowed. Parts E2, E3.
 #   recall_unschedule_record_ignored   -- pgpm's record of unschedule() is not read. Part G.
 #   recall_bound_no_cron_kept          -- with no pg_cron a recalled mark is never cleared. Part F.
+#   recall_attached_clear_unbounded    -- an attached recalled mark is cleared without the bound. Part A.
+#   recall_unreadable_job_idle         -- an unreadable job is taken for idle, the mark cleared at once. Part A.
+#   recall_ledger_not_per_role         -- pgpm's schedule/unschedule record is read as one sequence. Part I.
+#   seed_ledger_skips_unlogged_jobs    -- the install does not log the jobs its record lacks. Part L1.
+#   seed_ledger_no_placeholder         -- a non-superuser install logs no ?unknown placeholder. Part L2.
+#   retire_adopts_recalled_pending     -- retire() adopts a detach pending under a recalled mark. Part J.
+#   redispatch_keeps_dispatch_record   -- a failed re-dispatch leaves the old dispatch record. Part K.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove; the second sessions are dblink connections ordered by
 # the parent's lock, polled server-side, and the test brings its own stand-in for pg_cron's catalog).

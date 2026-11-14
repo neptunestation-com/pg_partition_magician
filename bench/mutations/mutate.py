@@ -12873,7 +12873,8 @@ MUTATIONS["untransmute_detach_pending_unlocked_only"] = (
 # Issue #705 (the pending-detach site at retire(), and bullet 3): retire() leaves a partition pending or detached by a
 # detach pgpm did not issue alone, and asks the catalog under a lock on the partition. bench/retire_pending_detach.sh
 # runs tests/327 against each mutant, and re-runs the mutant's install over a degraded copy of itself.
-_R705_RETIRE_PENDING = ("  if v_pending and not (r.retiring_at is not null and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then\n",
+_R705_RETIRE_PENDING = ("  if v_pending and not (r.retiring_at is not null and r.recalled_at is null\n"
+                        "                        and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then\n",
                         "  if v_pending and r.retiring_at is null then\n", 1)
 _R705_REAP = ("       and not pgpm._detach_dispatched(r.parent, r.crel, r.child_oid) then\n",
               "       and false then\n", 1)
@@ -17510,7 +17511,7 @@ MUTATIONS["recall_unseen_job_absent"] = (
     "to its owner and to superusers, so another role's armed job is invisible, the recall idles nothing, and the "
     "detach lands under a recall that said it was taken back. One site, the last verdict. tests/366 part E1 and "
     "part G catch it.",
-    [("  return 'it sees no pgpm_detach job, and pgpm.unschedule() is not the last of schedule() and unschedule() to have run';\n",
+    [("  return 'it sees no pgpm_detach job, and pgpm''s record does not show every role that ran pgpm.schedule() to have run pgpm.unschedule() since';\n",
       "  return null;\n", 1)],
 )
 MUTATIONS["recall_unschedule_record_ignored"] = (
@@ -17518,7 +17519,7 @@ MUTATIONS["recall_unschedule_record_ignored"] = (
     "Issue #1438 (round 3 V-02): pgpm's own record that unschedule() ran is not read, so a non-superuser that ran "
     "schedule() and unschedule() itself is refused every recall though no job is left to detach anything. One "
     "clause, the record's verdict. tests/366 part G catches it.",
-    [("       order by id desc limit 1) = 'unschedule' then\n", "       order by id desc limit 1) = 'unschedule' and false then\n", 1)],
+    [("  if pgpm._detach_jobs_unscheduled() then\n", "  if pgpm._detach_jobs_unscheduled() and false then\n", 1)],
 )
 MUTATIONS["retire_drops_recalled_detached"] = (
     "bench/retain_recall_late_detach.sh",
@@ -17566,6 +17567,69 @@ MUTATIONS["recall_bound_no_cron_kept"] = (
       "    return false;\n"
       "  end if;\n"
       "  if p_seen_run is null then\n", 1)],
+)
+MUTATIONS["recall_attached_clear_unbounded"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Issue #1438 (the acceptance claims ACC-03, ACC-V-01, ACC-V-02): a recalled mark on a still-attached partition is "
+    "cleared at the next call without the bound, so a retain() after set_retain clears it while a pg_cron run that "
+    "has not seen the idle still carries the detach, which then lands under no mark. One clause, the attached "
+    "branch's bound. tests/366 part A catches it (a later tick clears the mark before the late run).",
+    [("      continue when p_reattach is not true or not pgpm._recall_bound_reached(v_cmd_q, r.recall_seen_run);\n",
+      "      continue when p_reattach is not true;\n", 1)],
+)
+MUTATIONS["recall_unreadable_job_idle"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Issue #1438, the pre-fix shape for a job the caller cannot read (the acceptance claims ACC-V-03, ACC-V-04): the "
+    "recall's idle swallows pg_cron's error, so a role with no access to schema cron recalls under a job still armed, "
+    "and the still-attached retirement's mark is cleared at the next call without the bound, so the armed run then "
+    "detaches the partition under no mark. Two sites, the idle's handler and the attached branch's bound. tests/366 "
+    "part A catches it (the bound's site).",
+    [("    return format('pg_cron refused it (%s)', left(sqlerrm, 120));\n", "    return null;\n", 1),
+     ("      continue when p_reattach is not true or not pgpm._recall_bound_reached(v_cmd_q, r.recall_seen_run);\n",
+      "      continue when p_reattach is not true;\n", 1)],
+)
+MUTATIONS["recall_ledger_not_per_role"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Issue #1438 (round 5 V-01): pgpm's record of schedule() and unschedule() is read as one sequence, not per role. "
+    "pg_cron keeps one pgpm_detach per role, so one role's unschedule() reads as no job left while another role's "
+    "stays armed, and a caller that sees no job recalls under it. One site, the per-role reading. tests/366 part I "
+    "catches it.",
+    [("       last as (select distinct on (who) who, action from l order by who, id desc)\n",
+      "       last as (select ''::text as who, action from l order by id desc limit 1)\n", 1)],
+)
+MUTATIONS["seed_ledger_skips_unlogged_jobs"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Issue #1438 (round 5 V-01, the upgrade path): the install does not log the pgpm_detach jobs it sees that pgpm's "
+    "record lacks, so a job an older pgpm made without logging it is missing, and another role's unschedule() reads "
+    "as no job left. One clause. tests/366 part L catches it.",
+    [("       where pgpm._detach_ledger_last(quote_ident(j.username)) is distinct from 'schedule'$q$;\n",
+      "       where pgpm._detach_ledger_last(quote_ident(j.username)) is distinct from 'schedule' and false$q$;\n", 1)],
+)
+MUTATIONS["seed_ledger_no_placeholder"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Issue #1438 (round 5 V-01, the upgrade path): a non-superuser install that brings up pgpm's record over tables "
+    "already managed logs no placeholder for the other roles' jobs it cannot see, so the record reads as complete "
+    "without them. One clause. tests/366 part L catches it.",
+    [("  elsif (v_uncovered or not v_seen) and pgpm._detach_ledger_last('?unknown') is distinct from 'schedule' then\n",
+      "  elsif false then\n", 1)],
+)
+MUTATIONS["retire_adopts_recalled_pending"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Issue #1438 (round 5 V-02 and P1-02): retire() takes a pending concurrent detach under a recalled mark as its own, "
+    "re-dispatches it, and once the detach finishes drops the table, though the detach may be the operator's, taken "
+    "to keep it. One clause. tests/366 part J catches it.",
+    [("  if v_pending and not (r.retiring_at is not null and r.recalled_at is null\n"
+      "                        and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then\n",
+      "  if v_pending and not (r.retiring_at is not null\n"
+      "                        and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then\n", 1)],
+)
+MUTATIONS["redispatch_keeps_dispatch_record"] = (
+    "bench/retain_recall_late_detach.sh",
+    "Issue #1438 (round 5 P1-01): retire()'s re-dispatch of a recalled retirement keeps its dispatch record, so a "
+    "dispatch that then fails leaves a record of a detach pgpm never made, and an operator's hand detach is read as "
+    "pgpm's own and dropped. One clause. tests/366 part K catches it.",
+    [("                           detach_dispatched_oid = case when recalled_at is null then detach_dispatched_oid end,\n",
+      "                           detach_dispatched_oid = detach_dispatched_oid,\n", 1)],
 )
 
 

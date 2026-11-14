@@ -13,8 +13,11 @@
   `PUBLIC`) recalled nothing and logged that it had. Four rounds of verification on the parked first fix showed
   that no rule predicting who can idle the job, and no reading of the job as idle, is safe, so the recall now
   checks both by their effect. It attempts the idle and reads the job back, and goes ahead only on a job
-  confirmed idle or confirmed absent (no pg_cron, a superuser that sees none, or none visible after
-  `pgpm.unschedule()`, which with `pgpm.schedule()` now logs a row); otherwise it logs the new `fail_retain_recall`
+  confirmed idle or confirmed absent (no pg_cron, a superuser that sees none, or none visible where pgpm's record
+  shows every role that ran `pgpm.schedule()` to have run `pgpm.unschedule()` since: pg_cron keeps one job per role
+  and `unschedule()` removes only the caller's, so both now log a row with the role, read per role, and every
+  install logs the jobs it sees that the record lacks, or a `?unknown` placeholder where a non-superuser upgrade
+  cannot see them); otherwise it logs the new `fail_retain_recall`
   with pg_cron's reason, counted in `status().retain_drop_failures`, and neither recalls nor re-attaches. A recalled
   retirement keeps its mark and dispatch record, stamped in the new `pgpm.part.recalled_at`, so a late run's
   detach is pgpm's own and the next tick re-attaches it, until `cron.job_run_details` shows no run of the job
@@ -22,13 +25,17 @@
   new `recall_seen_run`: a run's `start_time` is written when its command is sent, and pg_cron's libpq mode reads
   the command again then). Where pg_cron logs no runs the mark is kept until retention reaches the partition again,
   counted in the new `status().retain_recalled`, and `retire` never drops a table detached under a recalled mark,
-  since it cannot tell a late run from a hand detach (`fail_retain_drop`). A recalled mark holds no detach slot.
+  since it cannot tell a late run from a hand detach (`fail_retain_drop`), nor adopts a detach pending under one
+  (`skip_retain`, the mark disowned). Its re-dispatch of a recalled retirement clears the old dispatch record, so a
+  dispatch that fails leaves none for a later hand detach to be mistaken by. A recalled mark holds no detach slot.
   `bench/retain_recall_late_detach.sh` runs `tests/366`, dblink sessions ordered by locks against a stand-in
   pg_cron that refuses a non-owner (mutations `recall_reattach_clears_mark`, `recall_bound_without_proof`,
   `recall_bound_ignores_unfinished`, `recall_seen_in_own_xact`, `recall_idle_error_swallowed`,
   `recall_unseen_job_absent`, `recall_unschedule_record_ignored`, `retire_drops_recalled_detached`,
   `retire_slot_held_by_recalled_mark`, `retire_redispatch_keeps_recalled`, `recalled_mark_counted_detaching`,
-  `recall_bound_no_cron_kept`); `tests/194`, `tests/204` and `tests/362` record runs in a stand-in
+  `recall_bound_no_cron_kept`, `recall_attached_clear_unbounded`, `recall_unreadable_job_idle`,
+  `recall_ledger_not_per_role`, `seed_ledger_skips_unlogged_jobs`, `seed_ledger_no_placeholder`,
+  `retire_adopts_recalled_pending`, `redispatch_keeps_dispatch_record`); `tests/194`, `tests/204` and `tests/362` record runs in a stand-in
   `cron.job_run_details` and expect the mark kept until one shows. Found by the formal model's claim C1.
 
 - **A retirement mark that records no oid at all is refused, never judged by its name out of the parent**

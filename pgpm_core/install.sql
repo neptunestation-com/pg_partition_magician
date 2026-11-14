@@ -4723,12 +4723,18 @@ begin
   -- of that is pgpm.part.detach_dispatched_oid (_detach_dispatched), written in the transaction in which the
   -- dispatch armed the job. A mark without it (one whose dispatch failed, or one a pgpm older than the record
   -- stamped on an operator's pending detach) vouches for nothing: the mark is cleared (_disown_retirement, logged
-  -- retain_disown) and the partition refused as above.
-  if v_pending and not (r.retiring_at is not null and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then
+  -- retain_disown) and the partition refused as above. Nor does a RECALLED mark (#1438), whose record is kept only
+  -- for the bound: its detach was taken back, so a pending one is a late run of pgpm's or the operator's own, and
+  -- nothing tells them apart, exactly as for the finished detach refused above. Adopting it would re-dispatch it
+  -- and drop the operator's table once it finished.
+  if v_pending and not (r.retiring_at is not null and r.recalled_at is null
+                        and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then
     if r.retiring_at is not null then
       perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));   -- only if it still holds this detach
       perform pgpm._disown_retirement(p_parent, p_child,
-        format('retire() found %I.%I pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, p_child));
+        case when r.recalled_at is not null
+             then format('retire() found %I.%I pending a concurrent detach under a retirement mark whose detach was recalled', v_nsp, p_child)
+             else format('retire() found %I.%I pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, p_child) end);
     end if;
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'skip_retain', r.lo, r.hi,
@@ -4890,8 +4896,12 @@ begin
       -- of the parent carrying the row's range, the #421 backfill's own rule; once its detach lands it has no bound
       -- left to say so, and _disown_foreign_mark would disown pgpm's own retirement of it. With the anchor the mark is
       -- judged by child_oid, as every anchored row's is.
-      -- #1438: retention reaches a recalled retirement again, and this dispatch puts its detach back in flight
+      -- #1438: retention reaches a recalled retirement again, and this dispatch puts its detach back in flight. Its
+      -- dispatch record goes with the recall: the recall idled the job, so the record vouches for no detach of pgpm's
+      -- now, and kept past a dispatch that fails it would make an operator's later hand detach read as pgpm's own
+      -- and be dropped. A dispatch that succeeds writes it again below.
       update pgpm.part set retiring_at = coalesce(retiring_at, clock_timestamp()),
+                           detach_dispatched_oid = case when recalled_at is null then detach_dispatched_oid end,
                            recalled_at = null, recall_xid = null, recall_seen_run = null,
                            retiring_oid = coalesce(retiring_oid, v_child::oid),
                            child_oid = coalesce(child_oid, v_child::oid)
@@ -4975,14 +4985,40 @@ begin
 end;
 $$;
 
+-- _detach_jobs_unscheduled(): whether pgpm's own record shows no pgpm_detach job left in this database (#1438), for a
+-- caller that sees none: pg_cron shows a job only to its owner and to superusers. pg_cron keeps one job per name AND
+-- role, so every role that ran pgpm.schedule() holds its own pgpm_detach, and pgpm.unschedule() removes only the
+-- caller's. The record is therefore read per role: schedule() and unschedule() log 'by <role>', the install logs a
+-- 'schedule' for every job it sees that the record lacks (one an older pgpm made without logging it), and the pseudo
+-- role ?unknown (no role name quote_ident renders, so none can collide with it) stands for the jobs a non-superuser
+-- upgrade could not see. True only when some row exists and no role's latest row is 'schedule'; a row whose role
+-- cannot be read counts as one that is.
+create or replace function pgpm._detach_jobs_unscheduled()
+returns boolean language sql stable as $$
+  with l as (select substring(method from '^by ("(?:[^"]|"")*"|[^ ,]+)') as who, action, id
+               from pgpm.log where parent_table is null and action in ('schedule', 'unschedule')),
+       last as (select distinct on (who) who, action from l order by who, id desc)
+  select exists (select 1 from last) and not exists (select 1 from last where who is null or action = 'schedule')
+$$;
+
+-- _detach_ledger_last(): the latest of schedule and unschedule that pgpm's record holds for p_who, a role name as
+-- quote_ident renders it (or ?unknown), null for none.
+create or replace function pgpm._detach_ledger_last(p_who text)
+returns text language sql stable as $$
+  select action from pgpm.log
+   where parent_table is null and action in ('schedule', 'unschedule')
+     and substring(method from '^by ("(?:[^"]|"")*"|[^ ,]+)') = p_who
+   order by id desc limit 1
+$$;
+
 -- _recall_idle(): idle the pgpm_detach job if it holds p_cmd, and CONFIRM it by the effect (#1438). Null when the job is
 -- confirmed idle or confirmed absent, else the reason, for _retain_recall to refuse with. The attempt's error is kept,
 -- not swallowed as _idle_detach_job swallows it, and the job is then read back: a role pg_cron does not let change the
 -- job (not its owner, not a superuser, no EXECUTE on cron.alter_job) either errors or changes nothing, and both read
 -- as still armed or unreadable here. Confirmed absent is no pg_cron in this database, a superuser that sees no
--- pgpm_detach job (it sees every job), or a caller that sees none where the last of pgpm.schedule() and
--- pgpm.unschedule() to run was unschedule() (their pgpm.log rows): pg_cron shows a job only to its owner and to
--- superusers, so seeing none says nothing about another role's job unless pgpm knows there is none.
+-- pgpm_detach job (it sees every job), or a caller that sees none where pgpm's record shows every role that ran
+-- pgpm.schedule() to have run pgpm.unschedule() since (_detach_jobs_unscheduled): pg_cron shows a job only to its
+-- owner and to superusers, so seeing none says nothing about another role's job unless pgpm knows there is none.
 create or replace function pgpm._recall_idle(p_cmd text)
 returns text language plpgsql as $$
 declare v_n int; v_armed boolean;
@@ -5007,11 +5043,10 @@ begin
   if v_n > 0 or exists (select 1 from pg_roles where rolname = current_user and rolsuper) then
     return null;
   end if;
-  if (select action from pgpm.log where parent_table is null and action in ('schedule', 'unschedule')
-       order by id desc limit 1) = 'unschedule' then
+  if pgpm._detach_jobs_unscheduled() then
     return null;
   end if;
-  return 'it sees no pgpm_detach job, and pgpm.unschedule() is not the last of schedule() and unschedule() to have run';
+  return 'it sees no pgpm_detach job, and pgpm''s record does not show every role that ran pgpm.schedule() to have run pgpm.unschedule() since';
 end;
 $$;
 
@@ -16171,8 +16206,8 @@ begin
   -- one-shot schedule, so a per-retirement job would keep firing after it succeeded.
   execute format('select cron.schedule_in_database(%L, %L, %L, %L)',
                  'pgpm_detach', p_every, 'select 1', current_database());
-  -- #1438: pgpm's own record of whether pgpm_detach exists, which a role that cannot see another role's job reads
-  -- (_recall_idle): the last of these rows and unschedule()'s says which of the two ran last
+  -- #1438: pgpm's own record of which roles hold a pgpm_detach, which a role that cannot see another role's job reads
+  -- (_detach_jobs_unscheduled): per role, the last of these rows and unschedule()'s says which of the two ran last
   insert into pgpm.log (parent_table, action, method) values (null, 'schedule', format('by %I', current_user));
   return v_jobid;
 end;
@@ -16194,6 +16229,48 @@ begin
   return v_n;
 end;
 $$;
+
+-- _seed_detach_ledger(): bring pgpm's record of which roles hold a pgpm_detach up to what this role can see (#1438), run
+-- by every install. A pgpm older than the record made jobs without logging them, and _detach_jobs_unscheduled would
+-- read the record without them as complete: one role's unschedule() would then read as no job left while another's
+-- stays armed. So every pgpm_detach this role sees whose role the record does not show scheduled is logged. A
+-- superuser sees every job, so it also retires the ?unknown placeholder; a non-superuser bringing up a record that
+-- does not cover the install yet (no row of it, and tables already managed) cannot see other roles' jobs, and logs
+-- the placeholder instead, which keeps a caller that sees no job refused until a superuser runs this again. A
+-- cron.job this role cannot read counts as jobs unseen. Nothing to do where pg_cron is not here.
+create or replace function pgpm._seed_detach_ledger()
+returns void language plpgsql as $$
+declare v_super boolean := exists (select 1 from pg_roles where rolname = current_user and rolsuper);
+        v_uncovered boolean := not exists (select 1 from pgpm.log where parent_table is null
+                                                              and action in ('schedule', 'unschedule'))
+                               and exists (select 1 from pgpm.config);
+        v_seen boolean := true;
+begin
+  if not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where n.nspname = 'cron' and c.relname = 'job') then
+    return;
+  end if;
+  begin
+    execute $q$insert into pgpm.log (parent_table, action, method)
+      select null, 'schedule', format('by %I, found by the install', j.username)
+        from (select distinct username from cron.job
+               where jobname = 'pgpm_detach' and database = current_database()) j
+       where pgpm._detach_ledger_last(quote_ident(j.username)) is distinct from 'schedule'$q$;
+  exception when others then
+    v_seen := false;
+  end;
+  if v_super and v_seen then
+    if pgpm._detach_ledger_last('?unknown') = 'schedule' then
+      insert into pgpm.log (parent_table, action, method)
+        values (null, 'unschedule', 'by ?unknown, a superuser install logged every pgpm_detach job');
+    end if;
+  elsif (v_uncovered or not v_seen) and pgpm._detach_ledger_last('?unknown') is distinct from 'schedule' then
+    insert into pgpm.log (parent_table, action, method)
+      values (null, 'schedule', 'by ?unknown, a non-superuser install could not see other roles'' pgpm_detach jobs');
+  end if;
+end;
+$$;
+select pgpm._seed_detach_ledger();
 
 -- forget_missing(): clear pgpm's state for managed tables whose relation no longer exists (issue #296).
 --

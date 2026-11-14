@@ -16,7 +16,10 @@
 --   can still carry the detach: no run of the job unfinished, and a run of it carrying another command above the
 --   run-id watermark a LATER transaction read once the recall was committed. Then the mark is cleared, and a hand
 --   detach is the operator's again. Until then a late run's detach is pgpm's own and the next tick re-attaches it;
---   retire() never drops a table detached under a recalled mark, and a recalled mark holds no detach slot.
+--   retire() never drops a table detached under a recalled mark, nor adopts a detach pending under one, and its
+--   re-dispatch of a recalled retirement clears the old dispatch record; a recalled mark holds no detach slot.
+--   Confirmed absent reads pgpm's schedule()/unschedule() record per role, since pg_cron keeps one job per role and
+--   unschedule() removes only the caller's, and the install logs the jobs it sees that the record lacks.
 --
 -- TWO SESSIONS where a race matters, ordered by locks, not by time: dblink connection `rc` (or `tb`) holds the recall
 -- open; `rd` (or `rb`) sends the armed command, as pg_cron's worker would, and is seen waiting before the first
@@ -24,12 +27,13 @@
 -- non-owner as pg_cron does; a run is recorded in job_run_details when it starts, as pg_cron's launcher records it.
 --
 -- ASYMMETRIC FIXTURES. Each part's doomed partition holds its own ids (1, 2, 3; 11, 12; 21; 31, 32, 33; 41; 51, 52;
--- 61, 62), so a re-attach of the wrong relation or a lost row cannot pass for the right answer.
+-- 61, 62; 71, 72; 81, 82, 83; 91, 92), so a re-attach of the wrong relation or a lost row cannot pass for the right
+-- answer.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(76);
+select plan(102);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text, username text default current_user);
@@ -395,6 +399,124 @@ select pgpm.retain('public.rl366g'::regclass);
 reset role;
 select ok(pgpm_test366.on_parent('public.rl366g', :'g_oid'), 'G: after pgpm.unschedule(), its recall re-attached the partition');
 select is(pgpm_test366.served('public.rl366g', 20000), array[51, 52]::bigint[], 'G: ids 51, 52 are served again');
+insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1', 'postgres');
+
+-- ============ PART I: pgpm's record is read per role ============
+-- pg_cron keeps one pgpm_detach per role that ran schedule(), and unschedule() removes only the caller's: the owner's
+-- unschedule() after its own schedule() says nothing of the administrator's job, which stays armed.
+call pgpm_test366.landed('rl366i', array[71, 72]);
+select child_name as i_doomed, child_oid as i_oid from pgpm.part where parent_table = 'public.rl366i'::regclass and lo = '0' \gset
+select format('alter table %s owner to pgpm_test366_owner', c) from (
+  select 'public.rl366i'::regclass as c union all select 'public.rl366i_ref'::regclass
+  union all select inhrelid::regclass from pg_inherits where inhparent = 'public.rl366i'::regclass) t \gexec
+insert into pgpm.log (parent_table, action, method) values
+  (null, 'schedule', 'by postgres'), (null, 'schedule', 'by pgpm_test366_owner'),
+  (null, 'unschedule', 'by pgpm_test366_owner, 3 job(s) removed');
+select ok(not pgpm.retire('public.rl366i', :'i_doomed'), 'fixture: (I) retire() dispatches the concurrent detach');
+select pgpm_test366.armed() as i_cmd \gset
+alter table cron.job enable row level security;
+set role pgpm_test366_owner;
+select set_config('pgpm_test366.seen', (select count(*) from cron.job)::text, false);
+select pgpm.set_retain('public.rl366i', '45000');
+select pgpm.retain('public.rl366i'::regclass);
+reset role;
+select is(current_setting('pgpm_test366.seen'), '0', 'LIVENESS: (I) the owner role sees no job');
+select is((select action from pgpm.log where parent_table is null and action in ('schedule', 'unschedule') order by id desc limit 1),
+  'unschedule', 'LIVENESS: (I) the last of schedule() and unschedule() that pgpm records is the owner''s unschedule()');
+select is(pgpm_test366.armed(), :'i_cmd', 'LIVENESS: (I) the administrator''s job is still armed');
+select is(pgpm_test366.actions('public.rl366i'), array['retain_detach', 'fail_retain_recall', 'fail_retain_recall'],
+  'I: with the administrator''s schedule() its own latest row, the owner''s recalls are refused');
+select is((pgpm_test366.mark('public.rl366i')).recalled_at, null, 'I: and nothing is stamped recalled');
+-- the administrator unschedules too: no role holds a job, and the recall is made
+alter table cron.job disable row level security;
+delete from cron.job;
+insert into pgpm.log (parent_table, action, method) values (null, 'unschedule', 'by postgres, 3 job(s) removed');
+set role pgpm_test366_owner;
+select pgpm.retain('public.rl366i'::regclass);
+reset role;
+select isnt((pgpm_test366.mark('public.rl366i')).recalled_at, null, 'I: once every role has unscheduled, the owner''s recall is made');
+insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1', 'postgres');
+
+-- ============ PART J: a hand detach pending under a recalled mark is the operator's ============
+-- A recalled mark's dispatch record is kept only for the bound: a detach pending under it is a late run of pgpm's or
+-- the operator's own, and nothing tells them apart. Retention reaching it again must not adopt it.
+call pgpm_test366.landed('rl366j', array[81, 82, 83]);
+select child_name as j_doomed, child_oid as j_oid from pgpm.part where parent_table = 'public.rl366j'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('public.rl366j', :'j_doomed'), 'fixture: (J) retire() dispatches the concurrent detach');
+select pgpm.set_retain('public.rl366j', '45000');
+select isnt((pgpm_test366.mark('public.rl366j')).recalled_at, null, 'LIVENESS: (J) the recall kept the mark, stamped recalled');
+-- the operator's DETACH ... CONCURRENTLY, cancelled in its wait for an older transaction: left pending
+select dblink_connect('jb', 'dbname=' || current_database());
+select dblink_connect('jo', 'dbname=' || current_database());
+select dblink_exec('jb', 'begin');
+select * from dblink('jb', 'select count(*)::text from public.rl366j') as t(c text);
+select dblink_exec('jo', 'set statement_timeout = 400');
+select dblink_exec('jo', format('alter table public.rl366j detach partition public.%I concurrently', :'j_doomed'), false);
+select dblink_exec('jb', 'rollback');
+select dblink_disconnect('jb');
+select dblink_disconnect('jo');
+select ok((select inhdetachpending from pg_inherits where inhparent = 'public.rl366j'::regclass and inhrelid = :'j_oid'::oid),
+  'LIVENESS: (J) the operator''s hand detach is left pending');
+update pgpm.config set retain = '25000' where parent_table = 'public.rl366j'::regclass;
+select pgpm.retire('public.rl366j', :'j_doomed');
+select is(pgpm_test366.armed(), 'select 1', 'J: retire() does not dispatch a detach pending under a recalled mark');
+select pgpm._detach_reap();
+select ok(not exists (select 1 from pg_inherits where inhrelid = :'j_oid'::oid), 'LIVENESS: (J) the pending detach was finished');
+select pgpm.retire('public.rl366j', :'j_doomed');
+select pgpm.retire('public.rl366j', :'j_doomed');
+select is(pgpm_test366.ids(:'j_oid'), array[81, 82, 83]::bigint[], 'J: the table the operator detached is kept, ids 81, 82, 83');
+select is((pgpm_test366.mark('public.rl366j')).retiring_at, null, 'J: and the recalled mark is disowned');
+
+-- ============ PART K: a re-dispatch that fails leaves no record of a dispatch ============
+call pgpm_test366.landed('rl366k', array[91, 92]);
+select child_name as k_doomed, child_oid as k_oid from pgpm.part where parent_table = 'public.rl366k'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('public.rl366k', :'k_doomed'), 'fixture: (K) retire() dispatches the concurrent detach');
+select pgpm.set_retain('public.rl366k', '45000');
+select ok((select recalled_at is not null and detach_dispatched_oid = :'k_oid'::oid from pgpm.part
+            where parent_table = 'public.rl366k'::regclass and lo = '0'),
+  'LIVENESS: (K) the recall kept the mark and the dispatch record');
+update pgpm.config set retain = '25000' where parent_table = 'public.rl366k'::regclass;
+delete from cron.job;   -- no job to arm: schedule() not run, or unscheduled
+select pgpm.retire('public.rl366k', :'k_doomed');
+select ok(exists (select 1 from pgpm.log where parent_table = 'public.rl366k'::regclass and action = 'fail_retain_detach'),
+  'LIVENESS: (K) the re-dispatch failed');
+select is((pgpm_test366.mark('public.rl366k')).detach_dispatched_oid, null, 'K: the failed re-dispatch left no dispatch record');
+insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1', 'postgres');
+alter table public.rl366k detach partition public.:"k_doomed";
+select pgpm.retire('public.rl366k', :'k_doomed');
+select pgpm.retire('public.rl366k', :'k_doomed');
+select is(pgpm_test366.ids(:'k_oid'), array[91, 92]::bigint[], 'K: the table the operator then detached by hand is kept, ids 91, 92');
+
+-- ============ PART L: the install brings pgpm's record up to the jobs it sees ============
+-- L1: a pgpm_detach an older pgpm made without logging it, where the record shows every role it knows unscheduled
+delete from pgpm.log where parent_table is null and action in ('schedule', 'unschedule');
+insert into pgpm.log (parent_table, action, method) values
+  (null, 'schedule', 'by pgpm_test366_owner'), (null, 'unschedule', 'by pgpm_test366_owner, 3 job(s) removed');
+delete from cron.job;
+insert into cron.job values (2, 'pgpm_detach', current_database(), 'select 1', 'pgpm_test366_old');
+select ok(pgpm._detach_jobs_unscheduled(), 'LIVENESS: (L1) without the install''s pass the record reads as no job left');
+select pgpm._seed_detach_ledger();
+select ok(not pgpm._detach_jobs_unscheduled(), 'L1: the install logs the job it sees that the record lacks');
+select is(pgpm._detach_ledger_last('pgpm_test366_old'), 'schedule', 'L1: under the role that holds it');
+-- L2: a non-superuser brings the record up over tables already managed, and cannot see another role's job
+delete from pgpm.log where parent_table is null and action in ('schedule', 'unschedule');
+alter table cron.job enable row level security;
+set role pgpm_test366_owner;
+select set_config('pgpm_test366.seen', (select count(*) from cron.job)::text, false);
+select pgpm._seed_detach_ledger();
+reset role;
+select is(current_setting('pgpm_test366.seen'), '0', 'LIVENESS: (L2) the owner role sees no job');
+-- the owner then schedules and unschedules its own
+insert into pgpm.log (parent_table, action, method) values
+  (null, 'schedule', 'by pgpm_test366_owner'), (null, 'unschedule', 'by pgpm_test366_owner, 3 job(s) removed');
+select ok(not pgpm._detach_jobs_unscheduled(), 'L2: the placeholder stands for the jobs it could not see');
+-- a superuser's pass logs the job and retires the placeholder; with that job unscheduled too, no job is left
+select pgpm._seed_detach_ledger();
+select is(pgpm._detach_ledger_last('?unknown'), 'unschedule', 'L2: a superuser''s pass retires the placeholder');
+delete from cron.job;
+insert into pgpm.log (parent_table, action, method) values (null, 'unschedule', 'by pgpm_test366_old, 3 job(s) removed');
+select ok(pgpm._detach_jobs_unscheduled(), 'LIVENESS: (L2) once every role has unscheduled, the record reads as no job left');
+alter table cron.job disable row level security;
 insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1', 'postgres');   -- for part F
 
 -- ============ PART F: no pg_cron here ============
