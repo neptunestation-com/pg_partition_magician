@@ -29,7 +29,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(38);
+select plan(40);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -39,6 +39,8 @@ returns void language sql as $$
   update cron.job set command = coalesce(alter_job.command, job.command) where jobid = job_id
 $$;
 insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
+create table cron.job_run_details (jobid bigint, runid bigserial, database text, username text, command text,
+                                   status text, start_time timestamptz, end_time timestamptz);
 
 create schema pgpm_t204_old;
 create schema pgpm_t204_new;
@@ -52,6 +54,13 @@ begin
   execute format('select array_agg(id order by id) from %s where id < %s', p_rel, coalesce(p_below, 9223372036854775807)) into v;
   return v;
 end;
+$$;
+-- a run of the standing job, recorded in cron.job_run_details as pg_cron's launcher records one (#1438); \gexec runs it
+create function pgpm_t204_old.ran() returns text language sql as $$
+  insert into cron.job_run_details (jobid, database, username, command, status, start_time, end_time)
+  select jobid, database, current_user, command, 'succeeded', clock_timestamp(), clock_timestamp()
+    from cron.job where jobname = 'pgpm_detach'
+  returning command
 $$;
 create function pgpm_t204_old.armed() returns text language sql as $$
   select command from cron.job where jobname = 'pgpm_detach'
@@ -104,13 +113,17 @@ select is((select method from pgpm.log where parent_table = 'pgpm_t204_new.rra':
   'A: the recall names the partition in its own schema');
 
 -- pg_cron's next run: whatever the standing job holds, at the top level; then a tick
-select command from cron.job where jobname = 'pgpm_detach' \gexec
+select pgpm_t204_old.ran() \gexec
 call pgpm.maintain('pgpm_t204_new.rra');
 
 select ok(pgpm_t204_old.attached('pgpm_t204_new.rra', :'a_oid'::oid), 'A: the kept partition is still attached to the parent');
 select is(pgpm_t204_old.ids('pgpm_t204_new.rra', 20000), array[1, 2, 3]::bigint[], 'A: ids 1, 2, 3 are readable through the parent');
+select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rra'::regclass and child_name = :'a_doomed'),
+  null, 'A: the tick after the recall keeps the marker: no run has yet started since it saw the recall committed');
+select pgpm_t204_old.ran() \gexec
+call pgpm.maintain('pgpm_t204_new.rra');
 select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rra'::regclass and child_name = :'a_doomed'),
-  null, 'A: the tick after the recall clears the retiring marker');
+  null, 'A: once a run of the idle job started after that, the next tick clears the retiring marker');
 select lives_ok($$ insert into pgpm_t204_new.rra values (4, 'd') $$, 'A: a write into the kept range has a partition to land in');
 select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'pgpm_t204_new.rra'::regclass $$,
   $$ values (0::bigint, 0::bigint) $$, 'A: status() reports nothing failed and nothing detaching');
@@ -152,8 +165,12 @@ select is((select array_agg(conname::text order by conname) from pg_constraint w
   :'b_cons'::text[], 'B: the CHECK the concurrent detach added is gone again; its constraints are what they were');
 select is(pgpm_t204_old.actions('pgpm_t204_new.rrb', '0'), array['retain_detach', 'retain_recall', 'retain_reattach'],
   'B: logged as exactly retain_detach, retain_recall, retain_reattach');
+select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
+  null, 'B: the re-attach keeps the retiring marker, so another late run would still be pgpm''s own');
+select pgpm_t204_old.ran() \gexec
+call pgpm.maintain('pgpm_t204_new.rrb');
 select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
-  null, 'B: the retiring marker is cleared with the re-attach');
+  null, 'B: the tick after an idle run clears the retiring marker');
 select is(pgpm_t204_old.armed(), 'select 1', 'B: the standing job stays idle, so it does not detach the partition again');
 select lives_ok($$ insert into pgpm_t204_new.rrb values (9, 'i') $$, 'B: a write into the range lands');
 select lives_ok($$ insert into public.rr204b_ref values (2, 6) $$, 'LIVENESS: (B) a referencing row can point into the re-attached range');
