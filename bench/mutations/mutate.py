@@ -5686,6 +5686,14 @@ $$;''',
         [("          v_n := v_n + 1;\n        end if;\n        continue;\n      end if;\n",
           "          v_n := v_n + 1;\n          perform pgpm._idle_detach_job(v_cmd_q);\n        end if;\n        continue;\n      end if;\n", 1)],
     ),
+    "untransmute_keeps_detach_check": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1452 verification round 2 P1-02: untransmute hands back a monolith still carrying the CHECK a concurrent "
+        "detach left on it, so a monolith retention released and the operator put back refuses every row past its "
+        "old bound once restored. One site, the drop loop's match. tests/194 part H catches it.",
+        [("       and pg_get_constraintdef(c.oid) = format('CHECK (%s)', pg_get_partition_constraintdef(v_monreg))\n",
+          "       and false\n", 1)],
+    ),
     "retain_recall_ignores_horizon": (
         "bench/retain_recall_armed_detach.sh",
         "Issue #724, overreach in the other direction: every retirement under way is taken back, whether or "

@@ -31,6 +31,9 @@
 --           reaching the rows) is not left silent: the tick logs fail_retain_crossing, counted, with the two ways
 --           out, and does not take the detach back itself. The way out it spells (idle the job) works: the next
 --           tick clears the mark and the partition, never detached, serves its rows.
+--   PART H: the CHECK a concurrent detach leaves on the table it takes out is gone from a monolith handed back by
+--           untransmute after it was released and put back with the remedy's ATTACH, and the table's own CHECK
+--           stays.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
@@ -46,7 +49,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(65);
+select plan(71);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -328,5 +331,36 @@ select is(pgpm_test194.armed(), 'select 1', 'LIVENESS: (G) the statement the row
 call pgpm.maintain('public.rr194g');
 select is(pgpm_test194.mark('public.rr194g', '0'), 'retiring_at null, dispatched null', 'G: the next tick clears the mark');
 select is(pgpm_test194.ids('public.rr194g', 20000), array[61, 62, 63]::bigint[], 'G: and ids 61, 62, 63 are served by the parent');
+
+-- ====== PART H: a released monolith put back by hand comes out of untransmute without the detach's CHECK ======
+create table public.rr194h (id bigint primary key, payload text constraint rr194h_own check (payload <> 'forbidden'));
+insert into public.rr194h values (71, 'x'), (72, 'y'), (73, 'z');
+call pgpm.transmute('public.rr194h', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194h', '60000');
+insert into public.rr194h values (50005, 'frontier');
+create table public.rr194h_ref (id bigint primary key, p_id bigint references public.rr194h(id));
+insert into public.rr194h_ref values (1, 50005);
+select child_name as h_doomed from pgpm.part where parent_table = 'public.rr194h'::regclass and lo = '0' \gset
+
+select ok(not pgpm.retire('public.rr194h', :'h_doomed'), 'fixture: (H) retire() dispatches the monolith''s detach');
+select pgpm_test194.armed() as h_cmd \gset
+select pgpm.set_retain('public.rr194h', '45000');
+select pgpm_test194.cron_run(:'h_cmd');
+select ok(exists (select 1 from pg_constraint where conrelid = format('public.%I', :'h_doomed')::regclass
+                   and contype = 'c' and conname <> 'rr194h_own'),
+  'LIVENESS: (H) the landed concurrent detach left its CHECK on the monolith');
+call pgpm.maintain('public.rr194h');
+select coalesce(substring(method from 'alter table [^;]* attach partition [^;]*;'), '') as h_attach
+  from pgpm.log where parent_table = 'public.rr194h'::regclass and lo = '0' and action = 'retain_disown' \gset
+select :'h_attach' \gexec
+select ok(pgpm_test194.attached('public.rr194h', :'h_doomed'), 'LIVENESS: (H) the remedy''s ATTACH put the monolith back');
+drop table public.rr194h_ref;
+delete from public.rr194h where id >= 10000;
+select pgpm.untransmute('public.rr194h');
+select lives_ok($$ insert into public.rr194h values (20000, 'past the old bound') $$,
+  'H: the restored table takes an id past the monolith''s old bound');
+select throws_ok($$ insert into public.rr194h values (20001, 'forbidden') $$, '23514', NULL,
+  'H: and its own CHECK still holds');
+select is(pgpm_test194.ids('public.rr194h'), array[71, 72, 73, 20000]::bigint[], 'H: the restored table holds ids 71, 72, 73 and 20000');
 
 select * from finish();

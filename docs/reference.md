@@ -1753,7 +1753,9 @@ can take the partition out after any recall commits, so pgpm lets it land and ha
   logged whose `method` spells the `ATTACH` that puts it back on its bounds and says not to drop it, and
   one `fail_retain_reattach` row says its rows are out of the parent until you run that `ATTACH`. It is
   counted in `status().retain_drop_failures` since the last `retain_drop`, like every entry there, so the
-  next drop on the table clears the count but not the release: the `retain_disown` row stays. Check that the `pgpm_detach` job no longer holds the detach before
+  next drop on the table clears the count but not the release: the `retain_disown` row stays. The table keeps the
+  `CHECK` the concurrent detach added, which spares that `ATTACH` its scan of the rows; `untransmute`
+  drops it when it hands the original table back. Check that the `pgpm_detach` job no longer holds the detach before
   you do (`select command from cron.job where jobname = 'pgpm_detach'`).
 - detached, and renamed by hand since: **a hand rename of a detached retirement makes the table the
   operator's.** The recall finds the relation by the oid pgpm recorded, sees that it stands under another

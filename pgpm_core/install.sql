@@ -14232,6 +14232,7 @@ declare
   v_pubdefs text[] := '{}';   -- #780: the parent's publication memberships, as ADD TABLEs naming the restored table
   v_pubwant text[];           -- #1367: the same, kept whole, for the check of where they went
   v_key_name name; v_key_mon name;   -- #789: the parent's key name, and the monolith copy's pgpm_key_<oid>
+  v_ck name;   -- #1438: a CHECK a concurrent detach left on the monolith
   v_ix_oids oid[] := '{}'; v_ix_names name[] := '{}';   -- #830: monolith index oids, and the parent copies' names
   v_ri "char"; v_ri_idx oid;   -- #815: the parent's replica identity, and the monolith's index under its identity index
   v_key_names name[]; v_key_mons name[];   -- #828: every such pair, the key's and each unique constraint's
@@ -14506,6 +14507,21 @@ begin
   -- child of the same name finds coverage without its block and discards it (archive_coverage_reset).
   -- _remove_write_block resolves by name and is drop-if-exists, so on a never-blocked monolith it is a no-op.
   perform pgpm._remove_write_block(p_parent, v_mon);
+
+  -- And the CHECK a concurrent detach left (#1438). DETACH ... CONCURRENTLY adds one to the table it takes out,
+  -- duplicating the partition constraint, and a re-attach by hand (the ATTACH a released retirement's
+  -- retain_disown row spells) keeps it, so a monolith retention reached, released and was put back carried its
+  -- old [lo, hi) as a CHECK, and the restored table refused every row past it. Matched as the recall's own
+  -- re-attach matched it before #1438: a local CHECK, inherited by nothing, whose text is the monolith's partition
+  -- constraint. A table's own CHECK says something else and stays.
+  for v_ck in
+    select c.conname from pg_constraint c
+     where c.conrelid = v_monreg and c.contype = 'c' and c.conislocal and c.coninhcount = 0
+       and pg_get_constraintdef(c.oid) = format('CHECK (%s)', pg_get_partition_constraintdef(v_monreg))
+  loop
+    -- by-name-ok: v_monreg is held ACCESS EXCLUSIVE by oid since the lock after the gate, rendered from its oid
+    execute format('alter table %s drop constraint %I', v_monreg::text, v_ck);
+  end loop;
 
   -- pgpm_regrain_capture and pgpm_regrain_truncate_guard, an in-flight regrain's apparatus (#267, #449).
   -- Before its swap the monolith still holds every row and the fine copies are unreconciled duplicates,
