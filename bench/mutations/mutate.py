@@ -5622,12 +5622,11 @@ $$;''',
         "a commit refreshes, so a run it already started still carries the detach; the next tick, finding the job "
         "idle, clears the mark, and the late run then takes the partition out with nothing in pgpm recording it. One "
         "site, the armed state's branch. tests/194 parts A and F catch it.",
-        [("      -- #1438: armed, the detach is left to land (see above)\n"
-          "      continue when v_armed;\n",
+        [("      if v_armed then\n"
+          "        continue when p_reattach is not true;\n",
           "      if v_armed then\n"
           "        perform pgpm._idle_detach_job(v_cmd_q);\n"
-          "        continue;\n"
-          "      end if;\n", 1)],
+          "        continue;\n", 1)],
     ),
     "recall_reattaches_landed_detach": (
         "bench/retain_recall_armed_detach.sh",
