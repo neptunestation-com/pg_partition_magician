@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **A detach pgpm has handed to pg_cron is never taken back; once it lands, the table is released with its rows**
+  (#1438). When retention stopped reaching a partition whose detach was dispatched, the recall (#724) returned the
+  `pgpm_detach` job to idle and, if the detach had already landed, re-attached the partition, in one transaction.
+  pg_cron reads a job's command from a cache only a commit refreshes, so a run that started while that transaction
+  was open still carried the detach and, queued on the parent behind the re-attach, took the partition out again
+  once it committed: the rows unserved, `pgpm.part` saying attached with no mark, the log ending at
+  `retain_reattach`, `status()` clean, and nothing ever putting it back. Fixing the recall needed two judgements
+  pgpm cannot make reliably (can this caller idle the job; how long after an idle can a run still carry the
+  detach), and six verification rounds over two designs (#1441, closed) each broke one. So the recall no longer
+  takes a dispatched detach back. An armed detach is left to land. A landed one is released: the job is idled
+  after the fact, the mark cleared, `retain_disown` logged with the `ATTACH` that puts the table back and the
+  warning not to drop it, and `fail_retain_reattach` logged and counted in `status().retain_drop_failures`. pgpm
+  never re-attaches it and never drops it. A mark whose job no longer holds its detach is still cleared with the
+  partition attached. The cost, accepted by the maintainer: loosening retention no longer saves a partition whose
+  detach was already handed to pg_cron; the operator attaches it back by hand. `retain_recall` and
+  `retain_reattach` are no longer logged. `tests/194` is rewritten to the new contract, with the race asserted as
+  an invariant (every row of the range served by the parent, or logged out of it); `tests/204` parts A and B
+  follow it on a moved parent; `tests/327` part J also asserts that an operator's own detach is not counted;
+  `tests/345` part D, the recall's re-attach, is gone with it. `bench/retain_recall_armed_detach.sh` has four new
+  mutations (`recall_idles_armed_detach`, `recall_reattaches_landed_detach`, `recall_release_uncounted`,
+  `recall_release_leaves_job_armed`); `retain_recall_clears_at_once` and `retain_recall_attach_unchecked` are
+  retired with the code they mutated.
+
 - **A retirement mark that records no oid at all is refused, never judged by its name out of the parent**
   (#1432, #1434). A pgpm older than v0.5.0 wrote a mark as `retiring_at` alone. Once its detach landed and the
   operator renamed the detached table, `retire` met a name that denoted nothing, passed every identity gate and

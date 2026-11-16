@@ -1,39 +1,48 @@
--- Loosening retention recalls a dispatched detach, and a detach that lands anyway is re-attached
--- (issue #724).
+-- Loosening retention never strands a partition with nothing in pgpm saying so (issues #724, #1438).
 --
--- THE BUG. Retiring a REFERENCED partition is two-step: retire() marks it (pgpm.part.retiring_at) and
--- points the standing pgpm_detach cron job at its concurrent detach, and a later call DROPs it. When
--- retention was loosened in between (set_retain to a longer value, or an id table's frontier moving back
--- because its newest rows were deleted), nothing recalled the armed command. Cron detached the partition,
--- retire() was never called on it again (retain() walks only what the horizon reaches), and nothing put it
--- back: its rows vanished from every read of the parent, writes into its range were refused (23514),
--- pgpm.part still said attached, and status() showed no failure. docs/reference.md's set_retain says a
--- wider horizon only ever keeps a superset of what the narrower one kept.
+-- THE BUG (#724). Retiring a REFERENCED partition is two-step: retire() marks it (pgpm.part.retiring_at) and
+-- points the standing pgpm_detach cron job at its concurrent detach, and a later call DROPs it. When retention
+-- was loosened in between (set_retain to a longer value, or an id table's frontier moving back because its newest
+-- rows were deleted), nothing looked at the armed command again. Cron detached the partition, retire() was never
+-- called on it again (retain() walks only what the horizon reaches), and its rows vanished from every read of the
+-- parent with pgpm.part still saying attached and status() counting no failure.
 --
--- THE CONTRACT.
---   PART A: set_retain recalls the armed detach of a partition the new value no longer reaches, at once
---           (the job is back to `select 1` before cron can run it), logs retain_recall, and the next tick
---           clears the marker. The partition never leaves the parent and its range stays writable.
---   PART B: a detach pg_cron had ALREADY picked up when the recall landed still runs. The tick finds the
---           marked partition detached, retention no longer reaching it, and re-attaches it (the same
---           relation, on its own bounds, without the CHECK the concurrent detach left behind, with the
---           incoming foreign key enforced on it again), logged retain_reattach.
---   PART C: the frontier moving back, with no set_retain at all, is recalled by the tick itself.
---   PART D: one-directional. A loosening that still reaches the partition recalls nothing: the job stays
---           armed with its detach and the retirement completes with a DROP.
---   PART E: a re-attach that cannot succeed is refused loudly: fail_retain_reattach, counted in
---           status().retain_drop_failures, and the detached table and its rows are left whole.
+-- THE BUG (#1438). #724's fix took the dispatch back: it idled the job and, for a partition the detach had already
+-- taken out, re-attached it. But pg_cron reads a job's command from a cache only a commit refreshes, so a run that
+-- started while the recall was uncommitted still carried the detach, and took the partition out again once the
+-- recall committed, the mark by then cleared: the same stranded rows, the log ending at retain_reattach.
+--
+-- THE CONTRACT. A dispatched detach is never taken back; it lands, and the table is released to the operator.
+--   PART A: set_retain after the dispatch leaves the job armed. Once the detach lands, the tick idles the job and
+--           releases the table with its rows: the mark cleared, retain_disown logged with the ATTACH that puts it
+--           back and the warning not to drop it, fail_retain_reattach logged and counted in
+--           status().retain_drop_failures. The remedy's ATTACH, run as written, serves the rows again, and the
+--           idle job leaves it attached.
+--   PART B: #1438's race, no operator. A run carrying the detach that lands AFTER the tick finds nothing to take
+--           out: pgpm re-attached nothing, so the late run cannot strand rows behind a cleared mark.
+--   PART C: the frontier moving back, with no set_retain at all, is settled by the tick the same way.
+--   PART D: one-directional. A loosening that still reaches the partition changes nothing: the retirement
+--           completes with a DROP.
+--   PART E: a mark whose job no longer holds its detach (idled or unscheduled under it) is cleared by the tick,
+--           and the partition never leaves the parent: the one state a loosening still saves it from.
+--   PART F: a run pg_cron had already started when retention loosened, landing after the tick that saw the
+--           loosening, is still recorded: the tick after it releases the table and counts it.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
 -- at the top level, exactly as pg_cron's worker would (tests/77 and the issue's reproduction do the same).
 --
+-- THE INVARIANT parts B and F assert after each late run: every row of the range is served by the parent, or pgpm
+-- has logged the partition out of it (fail_retain_reattach). Rows out with neither is the defect, whichever path
+-- led there.
+--
 -- ASYMMETRIC FIXTURES. Every part's doomed partition holds a different set of ids, so a re-attach of the
 -- wrong relation, a lost row or a resurrected one cannot stand in for the right answer.
 create extension if not exists pgtap;
+create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(51);
+select plan(54);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -55,6 +64,12 @@ begin
   return v;
 end;
 $$;
+-- a pg_cron run: the command in a session of its own, top level as pg_cron sends it; its error (a late run of a
+-- detach that has nothing left to take out) comes back as text rather than ending this file
+create function pgpm_test194.cron_run(p_cmd text) returns text language sql as $$
+  select case when p_cmd = 'select 1' then 'idle'   -- the idle job's command returns a row, which dblink_exec refuses
+              else dblink_exec(format('dbname=%s user=postgres', current_database()), p_cmd, false) end
+$$;
 create function pgpm_test194.armed() returns text language sql as $$
   select command from cron.job where jobname = 'pgpm_detach'
 $$;
@@ -70,11 +85,21 @@ $$;
 create function pgpm_test194.actions(p_parent regclass, p_lo text) returns text[] language sql as $$
   select coalesce(array_agg(action order by id), '{}') from pgpm.log
    where parent_table = p_parent and lo = p_lo
-     and action in ('retain_detach', 'retain_recall', 'retain_reattach', 'fail_retain_reattach',
+     and action in ('retain_detach', 'retain_recall', 'retain_reattach', 'fail_retain_reattach', 'retain_disown',
                     'retain_drop', 'fail_retain_drop', 'fail_retain_identity')
 $$;
+-- the invariant: the range's rows are served by the parent, or pgpm logged the partition out of it
+create function pgpm_test194.accounted(p_parent regclass, p_child name, p_lo text) returns boolean language sql as $$
+  select pgpm_test194.attached(p_parent, p_child)
+      or exists (select 1 from pgpm.log where parent_table = p_parent and lo = p_lo and action = 'fail_retain_reattach')
+$$;
+create function pgpm_test194.mark(p_parent regclass, p_lo text) returns text language sql as $$
+  select format('retiring_at %s, dispatched %s', case when retiring_at is null then 'null' else 'set' end,
+                coalesce(detach_dispatched_oid::text, 'null'))
+    from pgpm.part where parent_table = p_parent and lo = p_lo
+$$;
 
--- ================= PART A: set_retain recalls the armed detach (the issue's reproduction) =================
+-- ============ PART A: set_retain after the dispatch; the detach lands and the table is released ============
 -- monolith [0, 10000) holds 1, 2, 3; the frontier at 50005 puts the retain 25000 horizon at 20000. The
 -- referencing row points at the live frontier row, so there is no crossing and nothing stops the detach.
 create table public.rr194a (id bigint primary key, payload text);
@@ -84,35 +109,47 @@ select pgpm.extend_to('public.rr194a', '60000');
 insert into public.rr194a values (50005, 'frontier');
 create table public.rr194a_ref (id bigint primary key, p_id bigint references public.rr194a(id));
 insert into public.rr194a_ref values (1, 50005);
-select child_name as a_doomed, hi as a_hi from pgpm.part
+select child_name as a_doomed, hi as a_hi, child_oid as a_oid from pgpm.part
  where parent_table = 'public.rr194a'::regclass and lo = '0' \gset
 
 select ok(not pgpm.retire('public.rr194a', :'a_doomed'), 'fixture: (A) retire() dispatches the detach and returns false');
-select is(pgpm_test194.armed(), format('alter table public.rr194a detach partition public.%I concurrently', :'a_doomed'),
+select pgpm_test194.armed() as a_cmd \gset
+select is(:'a_cmd', format('alter table public.rr194a detach partition public.%I concurrently', :'a_doomed'),
   'LIVENESS: (A) the standing job is armed with this partition''s concurrent detach');
-select isnt((select retiring_at from pgpm.part where parent_table = 'public.rr194a'::regclass and child_name = :'a_doomed'),
-  null, 'LIVENESS: (A) the partition is marked retiring');
 
 select pgpm.set_retain('public.rr194a', '45000');   -- horizon 20000 -> 0
 select ok(not pgpm_test194.reached('public.rr194a', :'a_hi'), 'LIVENESS: (A) after loosening, retention no longer reaches the partition');
-select is(pgpm_test194.armed(), 'select 1', 'A: set_retain returns the standing job to idle before cron can run the detach');
-select is(pgpm_test194.actions('public.rr194a', '0'), array['retain_detach', 'retain_recall'],
-  'A: the recall is logged as exactly retain_recall, once');
+select is(pgpm_test194.armed(), :'a_cmd', 'A: set_retain does not take the dispatched detach back: the job stays armed');
+select is(pgpm_test194.actions('public.rr194a', '0'), array['retain_detach'], 'A: and logs nothing over the range');
 
--- pg_cron's next tick: run whatever the standing job holds, at the top level
+-- pg_cron's next run: run whatever the standing job holds, at the top level
 select command from cron.job where jobname = 'pgpm_detach' \gexec
+select ok(not pgpm_test194.attached('public.rr194a', :'a_doomed'), 'LIVENESS: (A) the dispatched detach landed');
 call pgpm.maintain('public.rr194a');
 
-select ok(pgpm_test194.attached('public.rr194a', :'a_doomed'), 'A: the kept partition is still attached to the parent');
-select is(pgpm_test194.ids('public.rr194a', 20000), array[1, 2, 3]::bigint[],
-  'A: ids 1, 2, 3 are still readable through the parent');
-select is((select retiring_at from pgpm.part where parent_table = 'public.rr194a'::regclass and child_name = :'a_doomed'),
-  null, 'A: the tick after the recall clears the retiring marker');
-select lives_ok($$ insert into public.rr194a values (4, 'd') $$, 'A: a write into the kept range has a partition to land in');
+select is(pgpm_test194.ids(format('public.%I', :'a_doomed')), array[1, 2, 3]::bigint[],
+  'A: the detached table stands with ids 1, 2, 3');
+select is(to_regclass(format('public.%I', :'a_doomed'))::oid, :'a_oid'::oid, 'A: and it is the partition''s own relation, by oid');
+select ok(not pgpm_test194.attached('public.rr194a', :'a_doomed'), 'A: pgpm does not re-attach it');
+select is(pgpm_test194.actions('public.rr194a', '0'), array['retain_detach', 'retain_disown', 'fail_retain_reattach'],
+  'A: the release is logged as exactly retain_disown, then fail_retain_reattach');
+select is(pgpm_test194.mark('public.rr194a', '0'), 'retiring_at null, dispatched null', 'A: the retirement''s mark is cleared');
+select is(pgpm_test194.armed(), 'select 1', 'A: the standing job is back to idle');
 select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'public.rr194a'::regclass $$,
-  $$ values (0::bigint, 0::bigint) $$, 'A: status() reports nothing failed and nothing detaching');
+  $$ values (1::bigint, 0::bigint) $$, 'A: status() counts the release in retain_drop_failures, with nothing detaching');
+select coalesce((select method from pgpm.log where parent_table = 'public.rr194a'::regclass and lo = '0' and action = 'retain_disown'), '') as a_method \gset
+select ok(position(format('alter table public.rr194a attach partition public.%I for values from (''0'') to (''10000'');', :'a_doomed')
+                   in :'a_method') > 0, 'A: the retain_disown row gives the ATTACH that puts it back, on its own bounds');
+select ok(:'a_method' like '%Do not drop it%', 'A: and says not to drop it');
+-- the operator follows the remedy as written
+select substring(:'a_method' from 'alter table [^;]* attach partition [^;]*;') \gexec
+select is(pgpm_test194.ids('public.rr194a', 20000), array[1, 2, 3]::bigint[], 'A: the remedy''s ATTACH serves ids 1, 2, 3 through the parent again');
+select pgpm_test194.cron_run(pgpm_test194.armed());
+call pgpm.maintain('public.rr194a');
+select ok(pgpm_test194.attached('public.rr194a', :'a_doomed'), 'A: and a cron run and a tick after it leave it attached');
+select lives_ok($$ insert into public.rr194a values (4, 'd') $$, 'A: a write into the range lands');
 
--- ====== PART B: a detach cron already picked up lands AFTER the recall, and the tick re-attaches it ======
+-- ====== PART B: #1438's race, no operator: a late run of the detach finds nothing pgpm put back ======
 create table public.rr194b (id bigint primary key, payload text);
 insert into public.rr194b values (5, 'e'), (6, 'f'), (7, 'g'), (8, 'h');
 call pgpm.transmute('public.rr194b', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
@@ -122,48 +159,27 @@ create table public.rr194b_ref (id bigint primary key, p_id bigint references pu
 insert into public.rr194b_ref values (1, 50005);
 select child_name as b_doomed, hi as b_hi, child_oid as b_oid from pgpm.part
  where parent_table = 'public.rr194b'::regclass and lo = '0' \gset
-select array_agg(conname::text order by conname) as b_cons from pg_constraint where conrelid = :'b_oid'::oid \gset
 
 select ok(not pgpm.retire('public.rr194b', :'b_doomed'), 'fixture: (B) retire() dispatches the detach');
--- pg_cron has already read the command: this is the text its worker is about to run
 select pgpm_test194.armed() as b_cmd \gset
-select is(:'b_cmd', format('alter table public.rr194b detach partition public.%I concurrently', :'b_doomed'),
-  'LIVENESS: (B) the command cron picked up is this partition''s detach');
-select pgpm.set_retain('public.rr194b', '45000');
-select is(pgpm_test194.armed(), 'select 1', 'LIVENESS: (B) the recall reached the job');
-select ok(not pgpm_test194.reached('public.rr194b', :'b_hi'), 'LIVENESS: (B) retention no longer reaches the partition');
-
--- the worker that started before the recall runs the detach anyway
+-- pgpm's own run lands
 select :'b_cmd' \gexec
-select ok(not pgpm_test194.attached('public.rr194b', :'b_doomed'), 'LIVENESS: (B) the late detach landed: the partition left the parent');
-select is(pgpm_test194.ids('public.rr194b', 20000), null::bigint[], 'LIVENESS: (B) its rows are invisible through the parent');
-
+select ok(not pgpm_test194.attached('public.rr194b', :'b_doomed'), 'LIVENESS: (B) pgpm''s own run detached the partition');
+select pgpm.set_retain('public.rr194b', '45000');
+select ok(not pgpm_test194.reached('public.rr194b', :'b_hi'), 'LIVENESS: (B) retention no longer reaches the partition');
+select is(pgpm_test194.armed(), :'b_cmd', 'LIVENESS: (B) the job still holds the detach, so pg_cron''s next run carries it');
 call pgpm.maintain('public.rr194b');
+-- the run pg_cron started on that cadence, with the command it had already read, lands after the tick
+select pgpm_test194.cron_run(:'b_cmd');
+select ok(pgpm_test194.accounted('public.rr194b', :'b_doomed', '0'),
+  'B: after the late run, the range''s rows are served by the parent or logged out of it');
+select ok(not pgpm_test194.attached('public.rr194b', :'b_doomed'), 'B: pgpm re-attached nothing for the late run to take out');
+select is(pgpm_test194.ids(format('public.%I', :'b_doomed')), array[5, 6, 7, 8]::bigint[], 'B: the released table keeps ids 5, 6, 7, 8');
+select is(pgpm_test194.actions('public.rr194b', '0'), array['retain_detach', 'retain_disown', 'fail_retain_reattach'],
+  'B: logged as exactly retain_detach, retain_disown, fail_retain_reattach');
+select is(pgpm_test194.armed(), 'select 1', 'B: the standing job is back to idle');
 
-select ok(pgpm_test194.attached('public.rr194b', :'b_doomed'), 'B: the tick re-attached the partition');
-select is((select inhrelid from pg_inherits where inhparent = 'public.rr194b'::regclass and inhrelid = :'b_oid'::oid),
-  :'b_oid'::oid, 'B: the relation re-attached is the one that was detached, by oid');
-select is(pgpm_test194.ids('public.rr194b', 20000), array[5, 6, 7, 8]::bigint[],
-  'B: ids 5, 6, 7, 8 are readable through the parent again');
-select is(pg_get_expr(c.relpartbound, c.oid), 'FOR VALUES FROM (''0'') TO (''10000'')', 'B: re-attached on its own bounds')
-  from pg_class c where c.oid = :'b_oid'::oid;
-select is((select array_agg(conname::text order by conname) from pg_constraint where conrelid = :'b_oid'::oid),
-  :'b_cons'::text[], 'B: the CHECK the concurrent detach added is gone again; its constraints are what they were');
-select is(pgpm_test194.actions('public.rr194b', '0'), array['retain_detach', 'retain_recall', 'retain_reattach'],
-  'B: logged as exactly retain_detach, retain_recall, retain_reattach');
-select is((select retiring_at from pgpm.part where parent_table = 'public.rr194b'::regclass and child_name = :'b_doomed'),
-  null, 'B: the retiring marker is cleared with the re-attach');
-select is(pgpm_test194.armed(), 'select 1', 'B: the standing job stays idle, so it does not detach the partition again');
-select command from cron.job where jobname = 'pgpm_detach' \gexec
-select ok(pgpm_test194.attached('public.rr194b', :'b_doomed'), 'B: and a further cron tick leaves it attached');
-select lives_ok($$ insert into public.rr194b values (9, 'i') $$, 'B: a write into the range lands');
-select lives_ok($$ insert into public.rr194b_ref values (2, 6) $$, 'LIVENESS: (B) a referencing row can point into the re-attached range');
-select throws_ok($$ delete from public.rr194b where id = 6 $$, '23503', null,
-  'B: and the incoming foreign key is enforced on the re-attached partition');
-select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'public.rr194b'::regclass $$,
-  $$ values (0::bigint, 0::bigint) $$, 'B: status() reports nothing failed and nothing detaching');
-
--- ============== PART C: the frontier moves back with no set_retain; the tick does the recall ==============
+-- ============== PART C: the frontier moves back with no set_retain; the tick settles it ==============
 create table public.rr194c (id bigint primary key, payload text);
 insert into public.rr194c values (11, 'k'), (12, 'l');
 call pgpm.transmute('public.rr194c', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
@@ -175,25 +191,22 @@ select child_name as c_doomed, hi as c_hi from pgpm.part
  where parent_table = 'public.rr194c'::regclass and lo = '0' \gset
 
 select ok(not pgpm.retire('public.rr194c', :'c_doomed'), 'fixture: (C) retire() dispatches the detach');
-select is(pgpm_test194.armed(), format('alter table public.rr194c detach partition public.%I concurrently', :'c_doomed'),
-  'LIVENESS: (C) the standing job is armed');
+select pgpm_test194.armed() as c_cmd \gset
 delete from public.rr194c where id = 50005;   -- the frontier moves back to 30005: horizon 20000 -> 0
 select ok(not pgpm_test194.reached('public.rr194c', :'c_hi'), 'LIVENESS: (C) retention no longer reaches the partition');
 select is((select retain from pgpm.config where parent_table = 'public.rr194c'::regclass), '25000',
-  'LIVENESS: (C) retain itself was never changed, so set_retain cannot be what recalls it');
-
+  'LIVENESS: (C) retain itself was never changed, so set_retain cannot be what settles it');
 call pgpm.maintain('public.rr194c');
-select is(pgpm_test194.armed(), 'select 1', 'C: the tick recalls the armed detach');
+select is(pgpm_test194.armed(), :'c_cmd', 'C: the tick leaves the dispatched detach armed');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 call pgpm.maintain('public.rr194c');
-select ok(pgpm_test194.attached('public.rr194c', :'c_doomed'), 'C: the partition is still attached');
-select is(pgpm_test194.ids('public.rr194c', 20000), array[11, 12]::bigint[], 'C: ids 11, 12 are readable through the parent');
-select is(pgpm_test194.actions('public.rr194c', '0'), array['retain_detach', 'retain_recall'],
-  'C: logged as exactly retain_detach, retain_recall');
+select is(pgpm_test194.ids(format('public.%I', :'c_doomed')), array[11, 12]::bigint[], 'C: the released table keeps ids 11, 12');
+select is(pgpm_test194.actions('public.rr194c', '0'), array['retain_detach', 'retain_disown', 'fail_retain_reattach'],
+  'C: logged as exactly retain_detach, retain_disown, fail_retain_reattach');
 select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'public.rr194c'::regclass $$,
-  $$ values (0::bigint, 0::bigint) $$, 'C: status() reports nothing failed, and the marker is gone after the second tick');
+  $$ values (1::bigint, 0::bigint) $$, 'C: status() counts it, with nothing detaching');
 
--- ========= PART D: a loosening that still reaches the partition recalls nothing (one-directional) =========
+-- ========= PART D: a loosening that still reaches the partition changes nothing (one-directional) =========
 -- frontier 30005, retain 20000: horizon 10000, which reaches only the monolith [0, 10000)
 create table public.rr194d (id bigint primary key, payload text);
 insert into public.rr194d values (21, 'u'), (22, 'v'), (23, 'w');
@@ -216,9 +229,9 @@ select command from cron.job where jobname = 'pgpm_detach' \gexec
 call pgpm.maintain('public.rr194d');
 select ok(not exists (select 1 from pg_class where oid = :'d_oid'::oid), 'D: the retirement completed: the partition is dropped');
 select is(pgpm_test194.actions('public.rr194d', '0'), array['retain_detach', 'retain_drop'],
-  'D: logged as exactly retain_detach, retain_drop, with no recall');
+  'D: logged as exactly retain_detach, retain_drop, with no release');
 
--- ============== PART E: a re-attach that cannot succeed is refused loudly, and drops nothing ==============
+-- ======= PART E: a mark whose job no longer holds its detach is cleared, and the partition stays =======
 create table public.rr194e (id bigint primary key, payload text);
 insert into public.rr194e values (31, 'x'), (32, 'y');
 call pgpm.transmute('public.rr194e', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
@@ -226,24 +239,50 @@ select pgpm.extend_to('public.rr194e', '60000');
 insert into public.rr194e values (50005, 'frontier');
 create table public.rr194e_ref (id bigint primary key, p_id bigint references public.rr194e(id));
 insert into public.rr194e_ref values (1, 50005);
-select child_name as e_doomed, child_oid as e_oid from pgpm.part
+select child_name as e_doomed, hi as e_hi from pgpm.part
  where parent_table = 'public.rr194e'::regclass and lo = '0' \gset
 
 select ok(not pgpm.retire('public.rr194e', :'e_doomed'), 'fixture: (E) retire() dispatches the detach');
-select pgpm_test194.armed() as e_cmd \gset
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';   -- the job idled under it (schedule() re-run)
 select pgpm.set_retain('public.rr194e', '45000');
-select :'e_cmd' \gexec
--- something else now holds the range in the parent, so the partition cannot go back
-create table public.rr194e_squat partition of public.rr194e for values from (0) to (10000);
-select ok(not pgpm_test194.attached('public.rr194e', :'e_doomed'), 'LIVENESS: (E) the late detach landed');
-
+select ok(not pgpm_test194.reached('public.rr194e', :'e_hi'), 'LIVENESS: (E) retention no longer reaches the partition');
+select is(pgpm_test194.mark('public.rr194e', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194e'::regclass and lo = '0')),
+  'LIVENESS: (E) the mark and pgpm''s dispatch record are still there before the tick');
 call pgpm.maintain('public.rr194e');
-select is(pgpm_test194.actions('public.rr194e', '0'), array['retain_detach', 'retain_recall', 'fail_retain_reattach'],
-  'E: the failed re-attach is logged as exactly fail_retain_reattach');
-select is((select retain_drop_failures from pgpm.status() where parent = 'public.rr194e'::regclass), 1::bigint,
-  'E: and status() counts it in retain_drop_failures');
-select is(pgpm_test194.ids(format('public.%I', :'e_doomed')), array[31, 32]::bigint[],
-  'E: the detached table and its rows are left whole');
-select is(pgpm_test194.armed(), 'select 1', 'E: the standing job stays idle');
+select is(pgpm_test194.mark('public.rr194e', '0'), 'retiring_at null, dispatched null', 'E: the tick clears the mark nothing will detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
+call pgpm.maintain('public.rr194e');
+select ok(pgpm_test194.attached('public.rr194e', :'e_doomed'), 'E: the partition never left the parent');
+select is(pgpm_test194.ids('public.rr194e', 20000), array[31, 32]::bigint[], 'E: ids 31, 32 are readable through the parent');
+select is(pgpm_test194.actions('public.rr194e', '0'), array['retain_detach'], 'E: and nothing is logged over the range');
+select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'public.rr194e'::regclass $$,
+  $$ values (0::bigint, 0::bigint) $$, 'E: status() reports nothing failed and nothing detaching');
+
+-- ====== PART F: a run already started when retention loosened lands after the tick, and is recorded ======
+create table public.rr194f (id bigint primary key, payload text);
+insert into public.rr194f values (41, 'p'), (42, 'q'), (43, 'r'), (44, 's'), (45, 't');
+call pgpm.transmute('public.rr194f', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194f', '60000');
+insert into public.rr194f values (50005, 'frontier');
+create table public.rr194f_ref (id bigint primary key, p_id bigint references public.rr194f(id));
+insert into public.rr194f_ref values (1, 50005);
+select child_name as f_doomed, hi as f_hi from pgpm.part
+ where parent_table = 'public.rr194f'::regclass and lo = '0' \gset
+
+select ok(not pgpm.retire('public.rr194f', :'f_doomed'), 'fixture: (F) retire() dispatches the detach');
+-- pg_cron starts a run: its command is read now
+select pgpm_test194.armed() as f_cmd \gset
+select pgpm.set_retain('public.rr194f', '45000');
+call pgpm.maintain('public.rr194f');
+select ok(pgpm_test194.attached('public.rr194f', :'f_doomed'), 'LIVENESS: (F) the partition is still attached after the tick that saw the loosening');
+-- the run lands
+select :'f_cmd' \gexec
+select ok(not pgpm_test194.attached('public.rr194f', :'f_doomed'), 'LIVENESS: (F) the late run took it out of the parent');
+call pgpm.maintain('public.rr194f');
+select ok(pgpm_test194.accounted('public.rr194f', :'f_doomed', '0'),
+  'F: the range''s rows are served by the parent or logged out of it');
+select is(pgpm_test194.ids(format('public.%I', :'f_doomed')), array[41, 42, 43, 44, 45]::bigint[], 'F: the released table keeps ids 41 to 45');
+select results_eq($$ select retain_drop_failures from pgpm.status() where parent = 'public.rr194f'::regclass $$,
+  $$ values (1::bigint) $$, 'F: and status() counts it');
 
 select * from finish();

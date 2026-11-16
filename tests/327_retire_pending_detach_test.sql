@@ -37,7 +37,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(111);
+select plan(112);
 
 -- The ids in a table, read by name and NULL when no such table exists, so an assertion about a relation the
 -- defect dropped reports instead of killing the file.
@@ -594,7 +594,8 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327
 -- ======================= (J) _retain_recall does not re-attach a detach pgpm did not dispatch =======================
 -- A mark with no dispatch record (as an upgrade from an install older than the record leaves every mark) on a
 -- partition the operator detached, and retention then stops reaching it (set_retain loosens it): the recall's
--- "dispatched detach landed" branch used to re-attach it into the table. [100, 200) holds 191, 192 and 193.
+-- "dispatched detach landed" branch used to re-attach it into the table, and since #1438 (which releases pgpm's own
+-- landed detach, counted) would count it as rows pgpm took out. [100, 200) holds 191, 192 and 193.
 create table public.rp327j (id bigint primary key, payload text);
 insert into public.rp327j values (191, 'j1'), (192, 'j2'), (193, 'j3');
 call pgpm.transmute('public.rp327j', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
@@ -623,6 +624,10 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327
 select is((select relispartition::text from pg_class where oid = to_regclass(format('public.%I', :'j100'))), 'false',
   'J: which stands on its own');
 select is(pg_temp.rp327_ids(:'j100'), array[191, 192, 193]::bigint[], 'J: holding rows 191, 192 and 193');
+-- #1438: pgpm's own landed detach is released too, but counted, since pgpm took those rows out; the operator's is not
+select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327j'::regclass
+            and action = 'fail_retain_reattach' and lo = '100'),
+  0, 'J: and the operator''s detach is not counted as rows pgpm took out of the parent (no fail_retain_reattach)');
 
 -- ======================= (K, L, M) an adopted mark, finished before the upgrade: nothing old vouches =======================
 -- The state an install older than the dispatch record leaves when it adopted an operator's pending detach of a
