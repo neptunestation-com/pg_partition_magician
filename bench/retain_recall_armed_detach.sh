@@ -10,7 +10,7 @@
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_detached_unreferenced.sh.
 #
-# NINE mutations are required to fail against it (bench/mutations/mutate.py):
+# ELEVEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   retain_recall_never             -- nothing settles a retirement retention no longer reaches, the pre-#724
 #                                      shape. Parts A, B, C and F.
 #   retain_recall_ignores_horizon   -- every retirement is settled, reached or not, so a reached partition's
@@ -26,6 +26,10 @@
 #   recall_crossing_unlogged        -- a dispatched detach a foreign key refuses for good is left armed with
 #                                      nothing logged, its mark holding the detach slot silently. Part G.
 #   recall_crossing_takes_back      -- the recall idles that detach itself, which the maintainer ruled out. Part G.
+#   recall_default_unlogged         -- a dispatched detach a DEFAULT partition refuses for good is left armed with
+#                                      nothing logged. Part I.
+#   recall_check_error_counted      -- a reference check that could not run (a lock timeout) is logged and counted
+#                                      as a detach that can never land. Part J.
 #   untransmute_keeps_detach_check  -- untransmute hands back a released, re-attached monolith still carrying the
 #                                      CHECK the concurrent detach left, refusing rows past its old bound. Part H.
 #

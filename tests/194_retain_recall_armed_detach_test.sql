@@ -34,6 +34,12 @@
 --   PART H: the CHECK a concurrent detach leaves on the table it takes out is gone from a monolith handed back by
 --           untransmute after it was released and put back with the remedy's ATTACH, and the table's own CHECK
 --           stays.
+--   PART I: a dispatched detach a DEFAULT partition refuses for good (PostgreSQL detaches no partition concurrently
+--           while one exists) is logged fail_retain_crossing and counted like a foreign key's, naming the DEFAULT.
+--           The first way out it spells works: with the DEFAULT detached, the detach lands and the table is released.
+--   PART J: a reference check that could not run (a lock timeout behind a second session holding the referencing
+--           table) proves no refusal: logged skip_retain_crossing, uncounted, never fail_retain_crossing, and the
+--           detach lands on pg_cron's next run.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
@@ -49,7 +55,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(71);
+select plan(91);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -362,5 +368,83 @@ select lives_ok($$ insert into public.rr194h values (20000, 'past the old bound'
 select throws_ok($$ insert into public.rr194h values (20001, 'forbidden') $$, '23514', NULL,
   'H: and its own CHECK still holds');
 select is(pgpm_test194.ids('public.rr194h'), array[71, 72, 73, 20000]::bigint[], 'H: the restored table holds ids 71, 72, 73 and 20000');
+
+-- ====== PART I: a detach a DEFAULT partition refuses for good is logged and counted, naming the DEFAULT ======
+create table public.rr194i (id bigint primary key, payload text);
+insert into public.rr194i values (81, 'i'), (82, 'j'), (83, 'k');
+call pgpm.transmute('public.rr194i', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194i', '60000');
+insert into public.rr194i values (50005, 'frontier');
+create table public.rr194i_ref (id bigint primary key, p_id bigint references public.rr194i(id));
+insert into public.rr194i_ref values (1, 50005);
+select child_name as i_doomed from pgpm.part where parent_table = 'public.rr194i'::regclass and lo = '0' \gset
+
+select ok(not pgpm.retire('public.rr194i', :'i_doomed'), 'fixture: (I) retire() dispatches the detach');
+select pgpm_test194.armed() as i_cmd \gset
+select pgpm.set_retain('public.rr194i', '45000');
+-- the operator attaches a DEFAULT partition, which nothing in pgpm refuses
+create table public.rr194i_def partition of public.rr194i default;
+select ok(pgpm_test194.cron_run(:'i_cmd') = 'ERROR' and pgpm_test194.attached('public.rr194i', :'i_doomed'),
+  'LIVENESS: (I) pg_cron''s run of the detach is refused, and the partition stays attached');
+select ok(coalesce(array_length(pgpm._crossing_keys('public.rr194i', '0', '10000'), 1), 0) = 0,
+  'LIVENESS: (I) no foreign key references the partition''s rows: the refusal is the DEFAULT''s');
+call pgpm.maintain('public.rr194i');
+call pgpm.maintain('public.rr194i');
+select is((select count(*) from pgpm.log where parent_table = 'public.rr194i'::regclass and lo = '0'
+             and action = 'fail_retain_crossing'), 2::bigint, 'I: each tick logs fail_retain_crossing for the refused detach');
+select ok((select method from pgpm.log where parent_table = 'public.rr194i'::regclass and lo = '0'
+             and action = 'fail_retain_crossing' order by id desc limit 1) ~ 'Detach the DEFAULT partition rr194i_def.*cron\.alter_job',
+  'I: its method names the DEFAULT and gives both ways out');
+select ok((select retain_drop_failures from pgpm.status() where parent = 'public.rr194i'::regclass) > 0,
+  'I: and status() counts it');
+select is(pgpm_test194.armed(), :'i_cmd', 'I: the detach is not taken back: the job still holds it');
+-- the operator takes the first way out
+alter table public.rr194i detach partition public.rr194i_def;
+select ok(pgpm_test194.cron_run(:'i_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194i', :'i_doomed'),
+  'LIVENESS: (I) with the DEFAULT detached, pg_cron''s run lands');
+call pgpm.maintain('public.rr194i');
+select ok(exists (select 1 from pgpm.log where parent_table = 'public.rr194i'::regclass and lo = '0' and action = 'fail_retain_reattach'),
+  'I: the next tick releases the table, counted');
+select is(pgpm_test194.ids(format('public.%I', :'i_doomed')), array[81, 82, 83]::bigint[], 'I: the released table keeps ids 81, 82, 83');
+
+-- ====== PART J: a reference check that could not run is an uncounted skip, and the detach still lands ======
+create table public.rr194j (id bigint primary key, payload text);
+insert into public.rr194j values (91, 'l'), (92, 'm'), (93, 'n');
+call pgpm.transmute('public.rr194j', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194j', '60000');
+insert into public.rr194j values (50005, 'frontier');
+create table public.rr194j_ref (id bigint primary key, p_id bigint references public.rr194j(id));
+insert into public.rr194j_ref values (1, 50005);
+select child_name as j_doomed from pgpm.part where parent_table = 'public.rr194j'::regclass and lo = '0' \gset
+
+select ok(not pgpm.retire('public.rr194j', :'j_doomed'), 'fixture: (J) retire() dispatches the detach');
+select pgpm_test194.armed() as j_cmd \gset
+select pgpm.set_retain('public.rr194j', '45000');
+select ok(coalesce(array_length(pgpm._crossing_keys('public.rr194j', '0', '10000'), 1), 0) = 0,
+  'LIVENESS: (J) no foreign key references the partition''s rows: nothing refuses the detach');
+-- a second session holds the referencing table across the tick
+select dblink_connect('j194', format('dbname=%s user=postgres', current_database())) is not null as j_conn \gset
+select dblink_exec('j194', 'begin') is not null as j_begin \gset
+select dblink_exec('j194', 'lock table public.rr194j_ref in access exclusive mode') is not null as j_lock \gset
+select ok(exists (select 1 from pg_locks l where l.relation = 'public.rr194j_ref'::regclass
+                   and l.mode = 'AccessExclusiveLock' and l.granted and l.pid <> pg_backend_pid()),
+  'LIVENESS: (J) a second session holds the referencing table');
+call pgpm.maintain('public.rr194j');
+select is((select count(*) from pgpm.log where parent_table = 'public.rr194j'::regclass and lo = '0'
+             and action = 'skip_retain_crossing'), 1::bigint, 'J: the tick logs one skip_retain_crossing');
+select ok((select method from pgpm.log where parent_table = 'public.rr194j'::regclass and lo = '0'
+             and action = 'skip_retain_crossing') ~ 'could not check.*lock timeout',
+  'J: its method says the check could not run, and why');
+select is((select count(*) from pgpm.log where parent_table = 'public.rr194j'::regclass and lo = '0'
+             and action = 'fail_retain_crossing'), 0::bigint, 'J: and no fail_retain_crossing');
+select results_eq($$ select retain_drop_failures from pgpm.status() where parent = 'public.rr194j'::regclass $$,
+  $$ values (0::bigint) $$, 'J: status() counts nothing');
+select is(pgpm_test194.armed(), :'j_cmd', 'J: the job still holds the detach');
+select dblink_exec('j194', 'commit') is not null as j_commit \gset
+select dblink_disconnect('j194') is not null as j_disc \gset
+select ok(pgpm_test194.cron_run(:'j_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194j', :'j_doomed'),
+  'J: pg_cron''s next run lands the detach');
+call pgpm.maintain('public.rr194j');
+select is(pgpm_test194.ids(format('public.%I', :'j_doomed')), array[91, 92, 93]::bigint[], 'J: and the next tick releases the table with ids 91, 92, 93');
 
 select * from finish();

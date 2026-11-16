@@ -15,22 +15,24 @@
   after the fact, the mark cleared, `retain_disown` logged with the `ATTACH` that puts the table back and the
   warning not to drop it, and `fail_retain_reattach` logged and counted in `status().retain_drop_failures`. pgpm
   never re-attaches it and never drops it. An armed detach that can never land, because a foreign key references
-  the partition's rows (one added once retention stopped reaching them is ordinary), is not left silent holding the
-  database's one detach slot: each tick logs `fail_retain_crossing`, counted, with the two ways out (remove the
-  references, or idle the job with the statement it spells, after which the next tick clears the mark and keeps the
-  partition). A mark whose job no longer holds its detach is still cleared with the partition attached. The
+  the partition's rows (one added once retention stopped reaching them is ordinary) or the table has a DEFAULT
+  partition, is not left silent holding the database's one detach slot: each tick logs `fail_retain_crossing`,
+  counted, with the two ways out (remove the references or detach the DEFAULT, or idle the job with the statement
+  it spells, after which the next tick clears the mark and keeps the partition). A reference check that cannot run
+  (a lock timeout) is logged `skip_retain_crossing`, uncounted, and asked again next tick. A mark whose job no longer holds its detach is still cleared with the partition attached. The
   `CHECK` a concurrent detach leaves on the table it takes out, which the re-attach used to drop, now stays on a
   released table (it spares the remedy's `ATTACH` its scan), and `untransmute` drops it from the monolith it hands
   back, so a monolith released and put back no longer comes out refusing every row past its old bound. The cost, accepted by the maintainer: loosening retention no longer saves a partition whose
   detach was already handed to pg_cron; the operator attaches it back by hand. `retain_recall` and
   `retain_reattach` are no longer logged. `tests/194` is rewritten to the new contract, with the race asserted as
-  an invariant (every row of the range served by the parent, or logged out of it), part G for the refused
-  detach, and part H for the leftover `CHECK`; `tests/204` parts A and B
+  an invariant (every row of the range served by the parent, or logged out of it), parts G and I for a detach
+  refused by a foreign key and by a DEFAULT partition, part H for the leftover `CHECK`, and part J for a check that
+  could not run; `tests/204` parts A and B
   follow it on a moved parent; `tests/327` part J also asserts that an operator's own detach is not counted;
-  `tests/345` part D, the recall's re-attach, is gone with it. `bench/retain_recall_armed_detach.sh` has seven new
+  `tests/345` part D, the recall's re-attach, is gone with it. `bench/retain_recall_armed_detach.sh` has nine new
   mutations (`recall_idles_armed_detach`, `recall_reattaches_landed_detach`, `recall_release_uncounted`,
   `recall_release_leaves_job_armed`, `recall_crossing_unlogged`, `recall_crossing_takes_back`,
-  `untransmute_keeps_detach_check`); `retain_recall_clears_at_once` and `retain_recall_attach_unchecked` are
+  `recall_default_unlogged`, `recall_check_error_counted`, `untransmute_keeps_detach_check`); `retain_recall_clears_at_once` and `retain_recall_attach_unchecked` are
   retired with the code they mutated.
 
 - **A retirement mark that records no oid at all is refused, never judged by its name out of the parent**

@@ -5675,16 +5675,34 @@ $$;''',
         "by a foreign key referencing its rows, is left armed with nothing logged, so its mark holds the database's "
         "one detach slot and status() reads clean. One site, the crossing check in the recall's armed branch. "
         "tests/194 part G catches it.",
-        [("        if v_err is not null or coalesce(array_length(v_cross, 1), 0) > 0 then\n",
-          "        if false then\n", 1)],
+        [("          continue when coalesce(array_length(v_cross, 1), 0) = 0;\n",
+          "          continue;\n", 1)],
     ),
     "recall_crossing_takes_back": (
         "bench/retain_recall_armed_detach.sh",
         "Issue #1438: the recall takes back a dispatched detach a foreign key refuses, idling the job itself, which "
         "the maintainer ruled out (a reference removed while a run carries the detach lands it unrecorded). One site, "
         "an idle added to the crossing branch. tests/194 part G catches it.",
-        [("          v_n := v_n + 1;\n        end if;\n        continue;\n      end if;\n",
-          "          v_n := v_n + 1;\n          perform pgpm._idle_detach_job(v_cmd_q);\n        end if;\n        continue;\n      end if;\n", 1)],
+        [("        v_n := v_n + 1;\n        continue;\n      end if;\n",
+          "        v_n := v_n + 1;\n        perform pgpm._idle_detach_job(v_cmd_q);\n        continue;\n      end if;\n", 1)],
+    ),
+    "recall_default_unlogged": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1452 verification round 3 V-04: a dispatched detach retention no longer reaches, refused for good because "
+        "the parent has a DEFAULT partition (PostgreSQL detaches no partition concurrently while one exists), is left "
+        "armed with nothing logged, so its mark holds the database's one detach slot and status() reads clean. One "
+        "site, the DEFAULT check in the recall's armed branch. tests/194 part I catches it.",
+        [("          from pg_partitioned_table t where t.partrelid = p_parent and t.partdefid <> 0;\n",
+          "          from pg_partitioned_table t where t.partrelid = p_parent and false;\n", 1)],
+    ),
+    "recall_check_error_counted": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1452 verification round 3 P1-02: a reference check that could not run (a lock timeout behind a holder of "
+        "a referencing table) is logged as a detach that can never land, fail_retain_crossing, and counted in "
+        "status().retain_drop_failures, though nothing refuses the detach and it lands on the next run. One site, the "
+        "check's error handler. tests/194 part J catches it.",
+        [("              values (p_parent, 'skip_retain_crossing', r.lo, r.hi,\n",
+          "              values (p_parent, 'fail_retain_crossing', r.lo, r.hi,\n", 1)],
     ),
     "untransmute_keeps_detach_check": (
         "bench/retain_recall_armed_detach.sh",
