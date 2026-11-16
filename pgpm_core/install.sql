@@ -3924,7 +3924,7 @@ $$;
 --
 -- The statements name the relation the row records by its oid (where it is now; a row with no oid, by its name in
 -- _child_nsp's schema) and the parent by its schema-qualified name, never through the search path, and the ATTACH
--- carries the bounds the grid encodes for the row's range, as _retain_recall's own re-attach does. p_rel, when
+-- carries the bounds the grid encodes for the row's range, as _retain_recall's re-attach did before #1438. p_rel, when
 -- given, is the oid the caller vouched for and the statements name it instead: the install pass hands over the
 -- relation it judged, which a v0.4.0 row (no oid at all) would otherwise name by its name alone. A row with a mark's
 -- oid is named by it without p_rel: the anchor below is written before the statements read it.
@@ -4959,7 +4959,11 @@ $$;
 -- a role setup or a run timing that broke them (#1441). So the detach is left to land, and from each state:
 --
 --   ARMED, still attached: nothing is done. The detach lands on pg_cron's next run, and a later call finds
---   the partition detached.
+--   the partition detached. Except when it never can: a foreign key referencing the partition's rows (one
+--   added once retention stopped reaching them is ordinary) makes PostgreSQL refuse the detach on every run,
+--   and the mark, holding the one detach slot of the database, starves every other retirement. A tick finds
+--   those references as retire() does (_crossing_keys) and logs fail_retain_crossing, counted, with the two
+--   ways out: remove the references, or return the job to idle so the next tick clears the mark.
 --
 --   NOT ARMED, still attached (the job was idled or unscheduled under it, or there is no pg_cron): nothing
 --   will detach it, so the mark is cleared, unless a detach of it is still on its way (#652). This is the
@@ -4986,7 +4990,7 @@ create or replace function pgpm._retain_recall(p_parent regclass, p_reattach boo
 returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_boundary text; v_nsp name; r record; v_now regclass; v_cmd_q text; v_rec oid;
-  v_armed boolean; v_pending boolean; v_n int := 0;
+  v_armed boolean; v_pending boolean; v_n int := 0; v_cross text[]; v_err text;
   v_db oid := (select oid from pg_database where datname = current_database());
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
@@ -5015,7 +5019,7 @@ begin
       perform pgpm._idle_detach_job(v_cmd_q);
       -- #1424: the relation the anchors record, when they agree, still stands under another name and is no
       -- partition of this parent: the detach took it out and the operator renamed it since (a move to another
-      -- schema under its own name is no rename: _child_nsp follows the oid there, and the recall re-attaches it; on
+      -- schema under its own name is no rename: _child_nsp follows the oid there, and the recall releases it; on
       -- a row with no child_oid it cannot, and the unchanged name keeps it out of the release, refused below).
       -- A hand rename of a detached retirement makes it the operator's table, so the retirement is released
       -- (_disown_retirement: the mark cleared, retain_disown logged with the ATTACH that would put it back),
@@ -5049,8 +5053,27 @@ begin
       from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v_now;
     if found then
       continue when v_pending;
-      -- #1438: armed, the detach is left to land (see above)
-      continue when v_armed;
+      -- #1438: armed, the detach is left to land (see above), unless a reference to its rows refuses it for good
+      if v_armed then
+        continue when p_reattach is not true;
+        begin
+          v_cross := pgpm._crossing_keys(p_parent, r.lo, r.hi);
+          v_err := null;
+        exception when others then
+          v_cross := null; v_err := left(sqlerrm, 200);
+        end;
+        if v_err is not null or coalesce(array_length(v_cross, 1), 0) > 0 then
+          insert into pgpm.log (parent_table, action, lo, hi, method)
+            values (p_parent, 'fail_retain_crossing', r.lo, r.hi,
+                    format('retention no longer reaches %I.%I, but the detach pgpm dispatched for it %s, so it can never land and its retirement holds the one detach slot of this database. Remove the references, and the detach lands and the table is released with its rows; or return the job to idle (select cron.alter_job(jobid, command => ''select 1'') from cron.job where jobname = ''pgpm_detach'' and command = %L), and the next tick clears the mark and keeps the partition',
+                           v_nsp, r.child_name,
+                           coalesce('could not be checked: ' || v_err,
+                                    format('is refused: %s of its key(s) are referenced by a foreign key', array_length(v_cross, 1))),
+                           v_cmd_q));
+          v_n := v_n + 1;
+        end if;
+        continue;
+      end if;
       -- not armed: clear the marker unless a detach of it is still on its way (_detach_reap's signals 1
       -- and 2: a lock on the partition held or awaited, or the statement itself)
       continue when p_reattach is not true

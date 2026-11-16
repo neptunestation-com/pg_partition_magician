@@ -5670,6 +5670,23 @@ $$;''',
           "    perform pgpm._idle_detach_job(v_cmd_q);\n",
           "    -- #1438: pgpm's own detach landed. Released, never re-attached: a run of the job may still carry the detach\n", 1)],
     ),
+    "recall_crossing_unlogged": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #1438, V-02 of #1452's verification: a dispatched detach retention no longer reaches, refused for good "
+        "by a foreign key referencing its rows, is left armed with nothing logged, so its mark holds the database's "
+        "one detach slot and status() reads clean. One site, the crossing check in the recall's armed branch. "
+        "tests/194 part G catches it.",
+        [("        if v_err is not null or coalesce(array_length(v_cross, 1), 0) > 0 then\n",
+          "        if false then\n", 1)],
+    ),
+    "recall_crossing_takes_back": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #1438: the recall takes back a dispatched detach a foreign key refuses, idling the job itself, which "
+        "the maintainer ruled out (a reference removed while a run carries the detach lands it unrecorded). One site, "
+        "an idle added to the crossing branch. tests/194 part G catches it.",
+        [("          v_n := v_n + 1;\n        end if;\n        continue;\n      end if;\n",
+          "          v_n := v_n + 1;\n          perform pgpm._idle_detach_job(v_cmd_q);\n        end if;\n        continue;\n      end if;\n", 1)],
+    ),
     "retain_recall_ignores_horizon": (
         "bench/retain_recall_armed_detach.sh",
         "Issue #724, overreach in the other direction: every retirement under way is taken back, whether or "

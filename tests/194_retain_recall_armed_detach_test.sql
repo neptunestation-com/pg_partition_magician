@@ -27,6 +27,10 @@
 --           and the partition never leaves the parent: the one state a loosening still saves it from.
 --   PART F: a run pg_cron had already started when retention loosened, landing after the tick that saw the
 --           loosening, is still recorded: the tick after it releases the table and counts it.
+--   PART G: a dispatched detach a foreign key refuses for good (a reference added once retention stopped
+--           reaching the rows) is not left silent: the tick logs fail_retain_crossing, counted, with the two ways
+--           out, and does not take the detach back itself. The way out it spells (idle the job) works: the next
+--           tick clears the mark and the partition, never detached, serves its rows.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
@@ -42,7 +46,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(54);
+select plan(65);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -284,5 +288,45 @@ select ok(pgpm_test194.accounted('public.rr194f', :'f_doomed', '0'),
 select is(pgpm_test194.ids(format('public.%I', :'f_doomed')), array[41, 42, 43, 44, 45]::bigint[], 'F: the released table keeps ids 41 to 45');
 select results_eq($$ select retain_drop_failures from pgpm.status() where parent = 'public.rr194f'::regclass $$,
   $$ values (1::bigint) $$, 'F: and status() counts it');
+
+-- ====== PART G: a detach a foreign key refuses for good is logged and counted, with a way out ======
+create table public.rr194g (id bigint primary key, payload text);
+insert into public.rr194g values (61, 'u'), (62, 'v'), (63, 'w');
+call pgpm.transmute('public.rr194g', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194g', '60000');
+insert into public.rr194g values (50005, 'frontier');
+create table public.rr194g_ref (id bigint primary key, p_id bigint references public.rr194g(id));
+insert into public.rr194g_ref values (1, 50005);
+select child_name as g_doomed, hi as g_hi from pgpm.part
+ where parent_table = 'public.rr194g'::regclass and lo = '0' \gset
+
+select ok(not pgpm.retire('public.rr194g', :'g_doomed'), 'fixture: (G) retire() dispatches the detach');
+select pgpm_test194.armed() as g_cmd \gset
+select pgpm.set_retain('public.rr194g', '45000');
+select ok(not pgpm_test194.reached('public.rr194g', :'g_hi'), 'LIVENESS: (G) retention no longer reaches the partition');
+-- the rows are kept now, so a reference to one of them is ordinary
+insert into public.rr194g_ref values (2, 62);
+select ok(pgpm_test194.cron_run(:'g_cmd') = 'ERROR' and pgpm_test194.attached('public.rr194g', :'g_doomed'),
+  'LIVENESS: (G) pg_cron''s run of the detach is refused, and the partition stays attached');
+call pgpm.maintain('public.rr194g');
+call pgpm.maintain('public.rr194g');
+select is((select count(*) from pgpm.log where parent_table = 'public.rr194g'::regclass and lo = '0'
+             and action = 'fail_retain_crossing'), 2::bigint, 'G: each tick logs fail_retain_crossing for the refused detach');
+select ok((select method from pgpm.log where parent_table = 'public.rr194g'::regclass and lo = '0'
+             and action = 'fail_retain_crossing' order by id desc limit 1) ~ 'Remove the references.*cron\.alter_job',
+  'G: its method gives both ways out');
+select ok((select retain_drop_failures from pgpm.status() where parent = 'public.rr194g'::regclass) > 0,
+  'G: and status() counts it');
+select is(pgpm_test194.armed(), :'g_cmd', 'G: the detach is not taken back: the job still holds it');
+select is(pgpm_test194.mark('public.rr194g', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194g'::regclass and lo = '0')),
+  'G: and the mark stands until the operator acts');
+-- the operator takes the second way out, with the statement the row spells
+select substring(method from $re$select cron\.alter_job\(jobid, command => 'select 1'\) from cron\.job where jobname = 'pgpm_detach' and command = '[^']*'$re$)
+  from pgpm.log where parent_table = 'public.rr194g'::regclass and lo = '0' and action = 'fail_retain_crossing'
+ order by id desc limit 1 \gexec
+select is(pgpm_test194.armed(), 'select 1', 'LIVENESS: (G) the statement the row spells idled the job');
+call pgpm.maintain('public.rr194g');
+select is(pgpm_test194.mark('public.rr194g', '0'), 'retiring_at null, dispatched null', 'G: the next tick clears the mark');
+select is(pgpm_test194.ids('public.rr194g', 20000), array[61, 62, 63]::bigint[], 'G: and ids 61, 62, 63 are served by the parent');
 
 select * from finish();

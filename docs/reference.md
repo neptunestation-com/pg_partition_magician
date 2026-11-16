@@ -1737,15 +1737,23 @@ pg_cron is never taken back**: pg_cron may already have read the command, and a 
 can take the partition out after any recall commits, so pgpm lets it land and hands the table to you:
 
 - still attached, the `pgpm_detach` job holding its detach: nothing is done. The detach lands on pg_cron's
-  next run, and the tick after it finds the partition detached (next bullet).
+  next run, and the tick after it finds the partition detached (next bullet). Unless a foreign key
+  references the partition's rows (one added once retention stopped reaching them is ordinary):
+  PostgreSQL then refuses the detach on every run, and the mark holds the one detach slot of the database,
+  so no other table's retirement is dispatched. Each tick finds those references and logs
+  `fail_retain_crossing`, counted, whose `method` gives the two ways out: remove the references, and the
+  detach lands and the table is released (next bullet); or return the job to idle with the
+  `cron.alter_job` statement it spells, and the next tick clears the mark and keeps the partition (the
+  bullet after).
 - still attached, the job no longer holding its detach (it was idled or unscheduled under it, or there is
   no pg_cron): nothing will detach it, so `retiring_at` is cleared by a tick that finds no detach of the
   partition still running, and the partition never leaves the parent.
 - already detached by that detach: the job is returned to idle and the table is **released to you with its
   rows**, never re-attached by pgpm and never dropped: the mark is cleared, one `retain_disown` row is
   logged whose `method` spells the `ATTACH` that puts it back on its bounds and says not to drop it, and
-  one `fail_retain_reattach` row, counted in `status().retain_drop_failures`, says its rows are out of the
-  parent until you run that `ATTACH`. Check that the `pgpm_detach` job no longer holds the detach before
+  one `fail_retain_reattach` row says its rows are out of the parent until you run that `ATTACH`. It is
+  counted in `status().retain_drop_failures` since the last `retain_drop`, like every entry there, so the
+  next drop on the table clears the count but not the release: the `retain_disown` row stays. Check that the `pgpm_detach` job no longer holds the detach before
   you do (`select command from cron.job where jobname = 'pgpm_detach'`).
 - detached, and renamed by hand since: **a hand rename of a detached retirement makes the table the
   operator's.** The recall finds the relation by the oid pgpm recorded, sees that it stands under another
@@ -4188,7 +4196,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
 | `skip_archive_retired_range` | the archive step left out a partition whose range overlaps a chunk `retire()` marked retired: archived, its first chunk would go to that chunk's object key, over the only copy of the dropped rows. Logged once per partition; `method` names the retired chunks, their object keys and the remedy (export the partition with `archive.to_s3`, then detach and drop it and delete its `pgpm.part` row), and, for a chunk whose bound names no instant and is held at its widest, its `lo` and the ledger update that writes the bound with its offset. The tick archives the parent's next partition instead, and `retire` never drops this one (see [the archive step](#byte-budget-chunked-archiving)) |
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan, or either did not get its table's lock in time |
-| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
+| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete, or a dispatched detach retention no longer reaches is refused for good by a foreign key referencing its rows (`method` gives the two ways out) / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which pgpm's dispatched detach had already taken out of the parent, was released to the operator rather than re-attached, since a pg_cron run may still carry the detach. The table and its rows are left whole; the `retain_disown` row logged with it gives the `ATTACH` that puts it back. Logged once. Counts in `status().retain_drop_failures` |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
 | `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or its explicit-range stand-in is taken or over 63 bytes, or its own name is over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it, or for a name over 63 bytes gives the name, its length and the bytes to shorten the table name by. Repeats once per tick until the cell is built |
