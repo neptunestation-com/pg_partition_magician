@@ -1,4 +1,4 @@
--- Loosened retention takes back a retirement on a MOVED parent, in the partition's own schema (issue #778).
+-- Loosened retention settles a retirement on a MOVED parent, in the partition's own schema (issues #778, #1438).
 --
 -- THE BUG. _retain_recall (#724) resolved a retiring partition as <the parent's CURRENT schema>.<child_name>
 -- and built the detach command it disarms the same way, the one lifecycle step #727 left on the parent's
@@ -11,11 +11,12 @@
 -- into their range were refused.
 --
 -- THE CONTRACT. After the parent moves, _retain_recall works exactly as on an unmoved parent (tests/194):
---   PART A  set_retain recalls the armed detach (the job back to `select 1` before cron runs it), logged
---           retain_recall naming the partition in its own schema, and the partition never leaves the parent.
---   PART B  a detach cron had already picked up lands anyway, and the tick re-attaches the same relation, in
---           its own schema, on its own bounds, without the CHECK the concurrent detach left, logged
---           retain_reattach.
+--   PART A  set_retain leaves the dispatched detach armed (#1438: a dispatched detach is never taken back). Once
+--           it lands, the tick idles the job and releases the table: retain_disown naming the partition in its own
+--           schema, with the ATTACH that puts it back under the parent's new name, and fail_retain_reattach,
+--           counted. The remedy's ATTACH, run as written, serves the rows again.
+--   PART B  a run carrying the detach that lands after the tick finds nothing pgpm put back: the rows stay in
+--           the released table, recorded as out of the parent.
 --   PART C  the identity anchor still holds in the partition's own schema: a relation squatting on the
 --           retiring partition's name there is refused (fail_retain_identity), the job is disarmed, and
 --           neither the squatter nor the renamed partition is touched.
@@ -27,9 +28,10 @@
 -- C 11, 12), so a re-attach of the wrong relation, a lost row or a resurrected one cannot stand in for the
 -- right answer.
 create extension if not exists pgtap;
+create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(38);
+select plan(33);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -53,6 +55,12 @@ begin
   return v;
 end;
 $$;
+-- a pg_cron run: the command in a session of its own, top level as pg_cron sends it; its error (a late run of a
+-- detach that has nothing left to take out) comes back as text rather than ending this file
+create function pgpm_t204_old.cron_run(p_cmd text) returns text language sql as $$
+  select case when p_cmd = 'select 1' then 'idle'   -- the idle job's command returns a row, which dblink_exec refuses
+              else dblink_exec(format('dbname=%s user=postgres', current_database()), p_cmd, false) end
+$$;
 create function pgpm_t204_old.armed() returns text language sql as $$
   select command from cron.job where jobname = 'pgpm_detach'
 $$;
@@ -70,7 +78,7 @@ $$;
 create function pgpm_t204_old.actions(p_parent regclass, p_lo text) returns text[] language sql as $$
   select coalesce(array_agg(action order by id), '{}') from pgpm.log
    where parent_table = p_parent and lo = p_lo
-     and action in ('retain_detach', 'retain_recall', 'retain_reattach', 'fail_retain_reattach',
+     and action in ('retain_detach', 'retain_recall', 'retain_reattach', 'fail_retain_reattach', 'retain_disown',
                     'retain_drop', 'fail_retain_drop', 'fail_retain_identity')
 $$;
 
@@ -94,28 +102,34 @@ select ok(not pgpm.retire('pgpm_t204_new.rra', :'a_doomed'), 'fixture: (A) retir
 select is(pgpm_t204_old.armed(), format('alter table pgpm_t204_new.rra detach partition pgpm_t204_old.%I concurrently', :'a_doomed'),
   'LIVENESS: (A) the standing job is armed with the partition''s detach, named in its own schema');
 
+select pgpm_t204_old.armed() as a_cmd \gset
 select pgpm.set_retain('pgpm_t204_new.rra', '45000');   -- horizon 20000 -> 0
 select ok(not pgpm_t204_old.reached('pgpm_t204_new.rra', :'a_hi'), 'LIVENESS: (A) after loosening, retention no longer reaches the partition');
-select is(pgpm_t204_old.armed(), 'select 1', 'A: set_retain returns the standing job to idle before cron can run the detach');
-select is(pgpm_t204_old.actions('pgpm_t204_new.rra', '0'), array['retain_detach', 'retain_recall'],
-  'A: logged as exactly retain_detach, retain_recall, with no identity failure');
-select is((select method from pgpm.log where parent_table = 'pgpm_t204_new.rra'::regclass and lo = '0' and action = 'retain_recall'),
-  format('retention no longer reaches pgpm_t204_old.%s (horizon 0); its dispatched concurrent detach was recalled and the partition stays attached', :'a_doomed'),
-  'A: the recall names the partition in its own schema');
+select is(pgpm_t204_old.armed(), :'a_cmd', 'A: set_retain leaves the dispatched detach armed');
+select is(pgpm_t204_old.actions('pgpm_t204_new.rra', '0'), array['retain_detach'], 'A: with no identity failure logged');
 
 -- pg_cron's next run: whatever the standing job holds, at the top level; then a tick
 select command from cron.job where jobname = 'pgpm_detach' \gexec
+select ok(not pgpm_t204_old.attached('pgpm_t204_new.rra', :'a_oid'::oid), 'LIVENESS: (A) the detach landed');
 call pgpm.maintain('pgpm_t204_new.rra');
 
-select ok(pgpm_t204_old.attached('pgpm_t204_new.rra', :'a_oid'::oid), 'A: the kept partition is still attached to the parent');
-select is(pgpm_t204_old.ids('pgpm_t204_new.rra', 20000), array[1, 2, 3]::bigint[], 'A: ids 1, 2, 3 are readable through the parent');
+select is(pgpm_t204_old.actions('pgpm_t204_new.rra', '0'), array['retain_detach', 'retain_disown', 'fail_retain_reattach'],
+  'A: the release is logged as exactly retain_disown, then fail_retain_reattach');
+select coalesce((select method from pgpm.log where parent_table = 'pgpm_t204_new.rra'::regclass and lo = '0' and action = 'retain_disown'), '') as a_method \gset
+select ok(:'a_method' like format('retention no longer reaches pgpm_t204_old.%s (horizon 0)%%', :'a_doomed'),
+  'A: the release names the partition in its own schema');
+select ok(position(format('alter table pgpm_t204_new.rra attach partition pgpm_t204_old.%I for values from (''0'') to (''10000'');', :'a_doomed')
+                   in :'a_method') > 0, 'A: and gives the ATTACH under the parent''s new name');
+select is(pgpm_t204_old.armed(), 'select 1', 'A: the standing job is back to idle');
+select is(pgpm_t204_old.ids(format('pgpm_t204_old.%I', :'a_doomed')), array[1, 2, 3]::bigint[], 'A: the released table keeps ids 1, 2, 3');
 select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rra'::regclass and child_name = :'a_doomed'),
-  null, 'A: the tick after the recall clears the retiring marker');
-select lives_ok($$ insert into pgpm_t204_new.rra values (4, 'd') $$, 'A: a write into the kept range has a partition to land in');
+  null, 'A: the retiring marker is cleared');
 select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'pgpm_t204_new.rra'::regclass $$,
-  $$ values (0::bigint, 0::bigint) $$, 'A: status() reports nothing failed and nothing detaching');
+  $$ values (1::bigint, 0::bigint) $$, 'A: status() counts the release, with nothing detaching');
+select substring(:'a_method' from 'alter table [^;]* attach partition [^;]*;') \gexec
+select is(pgpm_t204_old.ids('pgpm_t204_new.rra', 20000), array[1, 2, 3]::bigint[], 'A: the remedy''s ATTACH serves ids 1, 2, 3 through the parent again');
 
--- ====== PART B: on a moved parent, a detach cron already picked up lands, and the tick re-attaches it ======
+-- ====== PART B: on a moved parent, a late run of the detach finds nothing pgpm put back ======
 create table pgpm_t204_old.rrb (id bigint primary key, payload text);
 insert into pgpm_t204_old.rrb values (5, 'e'), (6, 'f'), (7, 'g'), (8, 'h');
 call pgpm.transmute('pgpm_t204_old.rrb', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
@@ -125,42 +139,27 @@ create table public.rr204b_ref (id bigint primary key, p_id bigint references pg
 insert into public.rr204b_ref values (1, 50005);
 select child_name as b_doomed, hi as b_hi, child_oid as b_oid from pgpm.part
  where parent_table = 'pgpm_t204_old.rrb'::regclass and lo = '0' \gset
-select array_agg(conname::text order by conname) as b_cons from pg_constraint where conrelid = :'b_oid'::oid \gset
 
 alter table pgpm_t204_old.rrb set schema pgpm_t204_new;
 select ok(not pgpm.retire('pgpm_t204_new.rrb', :'b_doomed'), 'fixture: (B) retire() dispatches the detach');
--- pg_cron has already read the command: this is the text its worker is about to run
 select pgpm_t204_old.armed() as b_cmd \gset
 select is(:'b_cmd', format('alter table pgpm_t204_new.rrb detach partition pgpm_t204_old.%I concurrently', :'b_doomed'),
-  'LIVENESS: (B) the command cron picked up is this partition''s detach, in its own schema');
+  'LIVENESS: (B) the job holds this partition''s detach, in its own schema');
+-- pgpm's own run lands
+select :'b_cmd' \gexec
+select ok(not pgpm_t204_old.attached('pgpm_t204_new.rrb', :'b_oid'::oid), 'LIVENESS: (B) the detach landed: the partition left the parent');
 select pgpm.set_retain('pgpm_t204_new.rrb', '45000');
 select ok(not pgpm_t204_old.reached('pgpm_t204_new.rrb', :'b_hi'), 'LIVENESS: (B) retention no longer reaches the partition');
-
--- the worker that started before the recall runs the detach anyway
-select :'b_cmd' \gexec
-select ok(not pgpm_t204_old.attached('pgpm_t204_new.rrb', :'b_oid'::oid), 'LIVENESS: (B) the late detach landed: the partition left the parent');
-select is(pgpm_t204_old.ids('pgpm_t204_new.rrb', 20000), null::bigint[], 'LIVENESS: (B) its rows are invisible through the parent');
-
 call pgpm.maintain('pgpm_t204_new.rrb');
-
-select ok(pgpm_t204_old.attached('pgpm_t204_new.rrb', :'b_oid'::oid), 'B: the tick re-attached the relation that was detached, by oid');
-select is(pgpm_t204_old.nsp_of(:'b_oid'::oid), 'pgpm_t204_old', 'B: and it is still in its own schema');
-select is(pgpm_t204_old.ids('pgpm_t204_new.rrb', 20000), array[5, 6, 7, 8]::bigint[], 'B: ids 5, 6, 7, 8 are readable through the parent again');
-select is(pg_get_expr(c.relpartbound, c.oid), 'FOR VALUES FROM (''0'') TO (''10000'')', 'B: re-attached on its own bounds')
-  from pg_class c where c.oid = :'b_oid'::oid;
-select is((select array_agg(conname::text order by conname) from pg_constraint where conrelid = :'b_oid'::oid),
-  :'b_cons'::text[], 'B: the CHECK the concurrent detach added is gone again; its constraints are what they were');
-select is(pgpm_t204_old.actions('pgpm_t204_new.rrb', '0'), array['retain_detach', 'retain_recall', 'retain_reattach'],
-  'B: logged as exactly retain_detach, retain_recall, retain_reattach');
-select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new.rrb'::regclass and child_name = :'b_doomed'),
-  null, 'B: the retiring marker is cleared with the re-attach');
-select is(pgpm_t204_old.armed(), 'select 1', 'B: the standing job stays idle, so it does not detach the partition again');
-select lives_ok($$ insert into pgpm_t204_new.rrb values (9, 'i') $$, 'B: a write into the range lands');
-select lives_ok($$ insert into public.rr204b_ref values (2, 6) $$, 'LIVENESS: (B) a referencing row can point into the re-attached range');
-select throws_ok($$ delete from pgpm_t204_new.rrb where id = 6 $$, '23503', null,
-  'B: and the incoming foreign key is enforced on the re-attached partition');
-select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'pgpm_t204_new.rrb'::regclass $$,
-  $$ values (0::bigint, 0::bigint) $$, 'B: status() reports nothing failed and nothing detaching');
+-- the run pg_cron started on that cadence, with the command it had already read, lands after the tick
+select pgpm_t204_old.cron_run(:'b_cmd');
+select ok(not pgpm_t204_old.attached('pgpm_t204_new.rrb', :'b_oid'::oid), 'B: pgpm re-attached nothing for the late run to take out');
+select ok(exists (select 1 from pgpm.log where parent_table = 'pgpm_t204_new.rrb'::regclass and lo = '0' and action = 'fail_retain_reattach'),
+  'B: and the range is recorded as out of the parent');
+select is(pgpm_t204_old.nsp_of(:'b_oid'::oid), 'pgpm_t204_old', 'B: the released table is still in its own schema');
+select is(pgpm_t204_old.ids(format('pgpm_t204_old.%I', :'b_doomed')), array[5, 6, 7, 8]::bigint[], 'B: and keeps ids 5, 6, 7, 8');
+select is(pgpm_t204_old.actions('pgpm_t204_new.rrb', '0'), array['retain_detach', 'retain_disown', 'fail_retain_reattach'],
+  'B: logged as exactly retain_detach, retain_disown, fail_retain_reattach');
 
 -- ====== PART C: the identity anchor still holds in the partition's own schema on a moved parent ======
 create table pgpm_t204_old.rrc (id bigint primary key, payload text);

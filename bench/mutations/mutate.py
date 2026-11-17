@@ -5609,26 +5609,108 @@ $$;''',
         "referenced partition's dispatched detach stays armed after set_retain loosens retention (or an id "
         "frontier moves back), pg_cron detaches it, retire() is never called on it again and nothing "
         "re-attaches it, so its rows vanish from every read of the parent with nothing logged. One site, "
-        "_retain_recall's loop, made to select nothing. tests/194 parts A, B and C catch it.",
+        "_retain_recall's loop, made to select nothing. tests/194 parts A, B, C and F catch it.",
         [("  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null\n",
           "  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null and false\n", 1)],
     ),
-    "retain_recall_clears_at_once": (
+    "recall_idles_armed_detach": (
         "bench/retain_recall_armed_detach.sh",
-        "Issue #724, the plausible-but-wrong fix: the recall clears the retiring marker in the same call that "
-        "returns the job to idle. A detach pg_cron had already picked up still runs, and lands on a partition "
-        "with no marker, which reads as detached by an operator, so nothing re-attaches it and its rows stay "
-        "out of the parent. One site, the marker cleared in the recall branch. tests/194 part B catches it.",
-        [("                         v_nsp, r.child_name, coalesce(v_boundary, 'none')));\n"
-          "        v_n := v_n + 1;\n"
-          "        continue;\n",
-          "                         v_nsp, r.child_name, coalesce(v_boundary, 'none')));\n"
-          "        update pgpm.part set retiring_at = null, retiring_oid = null\n"
-          "         where parent_table = p_parent and child_name = r.child_name;\n"
-          "        v_n := v_n + 1;\n"
+        "Issue #1438, #724's recall of an armed detach put back: a loosening that stops reaching a partition whose "
+        "detach is armed returns the job to idle in the same transaction. pg_cron reads the command from a cache only "
+        "a commit refreshes, so a run it already started still carries the detach; the next tick, finding the job "
+        "idle, clears the mark, and the late run then takes the partition out with nothing in pgpm recording it. One "
+        "site, the armed state's branch. tests/194 parts A and F catch it.",
+        [("      if v_armed then\n"
+          "        continue when p_reattach is not true;\n",
+          "      if v_armed then\n"
+          "        perform pgpm._idle_detach_job(v_cmd_q);\n"
           "        continue;\n", 1)],
+    ),
+    "recall_reattaches_landed_detach": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #1438, the pre-fix shape: a partition pgpm's own detach took out is re-attached by the tick that finds "
+        "retention no longer reaching it, in the transaction that idles the job. A run of the job that started "
+        "before that commit still carries the detach, and once the re-attach commits it takes the partition out "
+        "again: the mark is cleared, the log ends at retain_reattach, and the rows are out of the parent with "
+        "nothing counting them. One site, the release replaced by main's re-attach. tests/194 part B catches it.",
+        [("    perform pgpm._idle_detach_job(v_cmd_q);\n"
+          "    perform pgpm._disown_retirement(p_parent, r.child_name,\n"
+          "      format('retention no longer reaches %I.%I (horizon %s), but the detach pgpm dispatched for it had landed:",
+          "    perform pgpm._idle_detach_job(v_cmd_q);\n"
+          "    execute format('alter table %s attach partition %I.%I for values from (%L) to (%L)', p_parent::text, v_nsp, r.child_name,\n"
+          "      pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
+          "      pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));\n"
+          "    update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null\n"
+          "     where parent_table = p_parent and child_name = r.child_name;\n"
+          "    insert into pgpm.log (parent_table, action, lo, hi, method) values (p_parent, 'retain_reattach', r.lo, r.hi, 're-attached');\n"
+          "    continue;\n"
+          "    perform pgpm._disown_retirement(p_parent, r.child_name,\n"
+          "      format('retention no longer reaches %I.%I (horizon %s), but the detach pgpm dispatched for it had landed:", 1)],
+    ),
+    "recall_release_uncounted": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #1438: the release of a partition pgpm's own detach took out is logged under an action status() does "
+        "not count, so status() reads clean while the partition's rows are out of the parent until an operator "
+        "attaches it: #724's silence, with a log row nobody is pointed at. One site, the counted row's action. "
+        "tests/194 parts A, C and F catch it.",
+        [("      values (p_parent, 'fail_retain_reattach', r.lo, r.hi,\n"
+          "              format('retention no longer reaches %I.%I, which its dispatched detach took out of the parent; released",
+          "      values (p_parent, 'retain_release', r.lo, r.hi,\n"
+          "              format('retention no longer reaches %I.%I, which its dispatched detach took out of the parent; released", 1)],
+    ),
+    "recall_release_leaves_job_armed": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #1438: the release of a partition pgpm's own detach took out leaves the pgpm_detach job holding the "
+        "detach, so the operator's ATTACH from the retain_disown row is undone by the job's next run. One site, the "
+        "release's idle. tests/194 part A catches it.",
+        [("    -- #1438: pgpm's own detach landed. Released, never re-attached: a run of the job may still carry the detach\n"
+          "    perform pgpm._idle_detach_job(v_cmd_q);\n",
+          "    -- #1438: pgpm's own detach landed. Released, never re-attached: a run of the job may still carry the detach\n", 1)],
+    ),
+    "recall_crossing_unlogged": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #1438, V-02 of #1452's verification: a dispatched detach retention no longer reaches, refused for good "
+        "by a foreign key referencing its rows, is left armed with nothing logged, so its mark holds the database's "
+        "one detach slot and status() reads clean. One site, the crossing check in the recall's armed branch. "
+        "tests/194 part G catches it.",
+        [("          continue when coalesce(array_length(v_cross, 1), 0) = 0;\n",
+          "          continue;\n", 1)],
+    ),
+    "recall_crossing_takes_back": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #1438: the recall takes back a dispatched detach a foreign key refuses, idling the job itself, which "
+        "the maintainer ruled out (a reference removed while a run carries the detach lands it unrecorded). One site, "
+        "an idle added to the crossing branch. tests/194 part G catches it.",
+        [("        v_n := v_n + 1;\n        continue;\n      end if;\n",
+          "        v_n := v_n + 1;\n        perform pgpm._idle_detach_job(v_cmd_q);\n        continue;\n      end if;\n", 1)],
+    ),
+    "recall_default_unlogged": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1452 verification round 3 V-04: a dispatched detach retention no longer reaches, refused for good because "
+        "the parent has a DEFAULT partition (PostgreSQL detaches no partition concurrently while one exists), is left "
+        "armed with nothing logged, so its mark holds the database's one detach slot and status() reads clean. One "
+        "site, the DEFAULT check in the recall's armed branch. tests/194 part I catches it.",
+        [("          from pg_partitioned_table t where t.partrelid = p_parent and t.partdefid <> 0;\n",
+          "          from pg_partitioned_table t where t.partrelid = p_parent and false;\n", 1)],
+    ),
+    "recall_check_error_counted": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1452 verification round 3 P1-02: a reference check that could not run (a lock timeout behind a holder of "
+        "a referencing table) is logged as a detach that can never land, fail_retain_crossing, and counted in "
+        "status().retain_drop_failures, though nothing refuses the detach and it lands on the next run. One site, the "
+        "check's error handler. tests/194 part J catches it.",
+        [("              values (p_parent, 'skip_retain_crossing', r.lo, r.hi,\n",
+          "              values (p_parent, 'fail_retain_crossing', r.lo, r.hi,\n", 1)],
+    ),
+    "untransmute_keeps_detach_check": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1452 verification round 2 P1-02: untransmute hands back a monolith still carrying the CHECK a concurrent "
+        "detach left on it, so a monolith retention released and the operator put back refuses every row past its "
+        "old bound once restored. One site, the drop loop's match. tests/194 part H catches it.",
+        [("       and pg_get_constraintdef(c.oid) = format('CHECK (%s)', pg_get_partition_constraintdef(v_monreg))\n",
+          "       and false\n", 1)],
     ),
     "retain_recall_ignores_horizon": (
         "bench/retain_recall_armed_detach.sh",
@@ -5679,10 +5761,10 @@ $$;''',
         [("  select * into cfg from pgpm.config where parent_table = p_parent;\n"
           "  cfg := pgpm._control_followed(cfg);\n"
           "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
-          "  -- #724: first, take back",
+          "  -- #724: first, settle",
           "  select * into cfg from pgpm.config where parent_table = p_parent;\n"
           "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
-          "  -- #724: first, take back", 1)],
+          "  -- #724: first, settle", 1)],
     ),
     "control_followed_missing_at_for_loop_load": (
         "bench/control_column_rename.sh",
@@ -5696,10 +5778,10 @@ $$;''',
         [("  select * into cfg from pgpm.config where parent_table = p_parent;\n"
           "  cfg := pgpm._control_followed(cfg);\n"
           "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
-          "  -- #724: first, take back",
+          "  -- #724: first, settle",
           "  for cfg in select * from pgpm.config where parent_table = p_parent loop end loop;\n"
           "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
-          "  -- #724: first, take back", 1)],
+          "  -- #724: first, settle", 1)],
     ),
     "retain_recall_parent_schema": (
         "bench/retain_recall_moved_parent.sh",
@@ -12924,8 +13006,10 @@ MUTATIONS["retire_trusts_detached_mark"] = (
 MUTATIONS["retain_recall_trusts_detached_mark"] = (
     "bench/retire_pending_detach.sh",
     "#705 in _retain_recall: a partition detached under a retirement mark with no record of pgpm's dispatch is read as "
-    "the dispatched detach having landed, so when retention stops reaching it the recall attaches the operator's "
-    "table back into the parent. One site, the recall's record check. tests/327 part J catches it.",
+    "the dispatched detach having landed, so when retention stops reaching it the recall attached the operator's "
+    "table back into the parent; since #1438 it releases it as pgpm's own, logging fail_retain_reattach, so "
+    "status() counts the operator's detach as rows pgpm took out. One site, the recall's record check. tests/327 "
+    "part J catches it.",
     [("    if not pgpm._detach_dispatched(p_parent, r.child_name, v_now::oid) then\n",
       "    if false then\n", 1)],
 )
@@ -16210,16 +16294,6 @@ MUTATIONS["regrain_swap_attach_unlocked"] = (
     "tests/345 part C catches it.",
     [("    perform pgpm._lock_oid_or_raise(v_copy, 'access exclusive', true, format('regrain_step(%s), attaching its copies,', p_parent));\n",
       "", 1)],
-)
-MUTATIONS["retain_recall_attach_unchecked"] = (
-    "bench/retire_locks_by_oid.sh",
-    "Issue #1335 bullet 10, the recall's site: _retain_recall re-attaches a partition its retirement detached by "
-    "`%I.%I` and does not ask whether the relation the ATTACH reached is the one its identity check vouched for. "
-    "ATTACH PARTITION re-resolves the name once its lock is granted, so a table created under the name while it "
-    "waited is attached in the partition's place, logged retain_reattach, and the retirement's mark cleared. One "
-    "clause, the postcondition's test. tests/345 part D catches it.",
-    [("      if not exists (select 1 from pg_inherits i where i.inhrelid = v_now and i.inhparent = p_parent) then\n",
-      "      if false and not exists (select 1 from pg_inherits i where i.inhrelid = v_now and i.inhparent = p_parent) then\n", 1)],
 )
 MUTATIONS["lock_oid_vanished_name_null"] = (
     "bench/retire_locks_by_oid.sh",
