@@ -127,6 +127,24 @@ operator detaches the partition by hand (it stays pgpm's retirement, per `refere
 loosens; the recall re-attaches it; the launched run detaches it again. NoLostRow and ResolveByRecord both
 fail. Hypothesis H_C1 assumes the re-attach waits as the attached branch does.
 
+**Status (2026-11-17): closed.** Phase 2 reproduced C1 against PostgreSQL with real pg_cron and filed it as #1438
+(Tier 1). #1452 closed it, and not the way H_C1 assumed: the recall never takes a dispatched detach back. An armed
+detach is left to land, and a landed one is released to the operator with its rows, logged and counted, never
+attached back. #1457 brought the spec to that design. H_C1 and `CustodyFK-asis.cfg` are gone, and the mutation
+`M1438landed` puts the re-attach back and keeps C1's counterexample on record. The model still cannot see issue #1451
+reach the same consequence through the recall misreading an armed job as idle (known gap K9).
+
+Bringing the spec to #1452's design produced one new counterexample on `CustodyFK.cfg` (11 states), triaged as an
+**abstraction gap, closed**. pgpm's detach lands and pg_cron launches another run of the still-armed job; retention
+loosens and the recall releases the table and idles the job; the operator runs the ATTACH the release message gives;
+the run launched before all that detaches the table again, and NoLostRow fails. In the model a launched run could wait
+unresolved through any number of later steps. In PostgreSQL a run that has sent its statement is either resolved
+(the table was detached, so it errors) or waiting for the parent's SHARE UPDATE EXCLUSIVE, which the ATTACH needs
+too, and the lock queue grants the run first. Abstraction C5 now says so, and the operator's ATTACH waits behind a
+launched, unresolved run. What that leaves out is a run pg_cron sends after the release commits, with a command its
+cache has not yet dropped. That is known gap K9, and #1452's round-4 claims verifier judged the same window
+unreachable in practice without building it.
+
 ### Claim C2: a tracked rename turns recorded chunks into orphans, and retire drops rows nothing vouches for
 
 The archive step's orphan rule discards the coverage "an untracked name holds over a tracked partition's range"
