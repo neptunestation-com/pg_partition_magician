@@ -2,7 +2,6 @@
 name: pr-verify
 description: Adversarially verify ONE pull request before it lands, as the coordinator of docs/adversarial-review.md's per-PR verification mode. Re-runs the issue's reproduction on the base, the head and the PR's own mutant, has a finder review the touched units and their callers under the fresh-surface lens with a planted seed as the witness, verifies every candidate independently, and posts the comment that says whether the PR may land.
 argument-hint: "<pr> [issue-bullet ...] [lens]"
-disable-model-invocation: true
 allowed-tools: Bash Read Write Agent
 ---
 
