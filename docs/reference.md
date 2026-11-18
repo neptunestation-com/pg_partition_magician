@@ -1770,8 +1770,12 @@ can take the partition out after any recall commits, so pgpm lets it land and ha
   counted in `status().retain_drop_failures` since the last `retain_drop`, like every entry there, so the
   next drop on the table clears the count but not the release: the `retain_disown` row stays. The table keeps the
   `CHECK` the concurrent detach added, which spares that `ATTACH` its scan of the rows; `untransmute`
-  drops it when it hands the original table back. Check that the `pgpm_detach` job no longer holds the detach before
-  you do (`select command from cron.job where jobname = 'pgpm_detach'`).
+  drops it when it hands the original table back. Check as a superuser that no `pgpm_detach` job still holds the
+  detach before you do (`select username, command from cron.job where jobname = 'pgpm_detach'`): pg_cron shows
+  any other role only its own jobs. With pg_cron, only a tick that can read the job holding the detach (a
+  superuser, or the one role in `retiring_by`) releases the table, since it alone can return that job to idle. A
+  tick as any other role keeps the mark, the table out of the parent, and logs `fail_retain_recall`, counted,
+  naming the role to run as.
 - detached, and renamed by hand since: **a hand rename of a detached retirement makes the table the
   operator's.** The recall finds the relation by the oid pgpm recorded, sees that it stands under another
   name and is no partition of this parent, and releases it rather than
@@ -3762,8 +3766,8 @@ One row per managed table. Beyond the static config it surfaces:
   retirement retention no longer reaches, taken out of the parent by its detach and released to you, so
   its rows are missing from every read of the parent until you attach it back with the statement its
   `retain_disown` row gives. And it counts `fail_retain_recall`: a retirement retention no longer
-  reaches, kept rather than cleared because this tick's role could not read the job that would hold its
-  detach.
+  reaches, kept rather than cleared (or, its detach landed, rather than released) because this tick's
+  role could not read the job that would hold its detach.
   Like the others it counts since the last `retain_drop`.
 - `parent_missing` -- the managed relation itself is **gone**: dropped without
   [`untransmute`](#untransmute), leaving the `pgpm.config` row pointing at an oid that no longer
@@ -4221,7 +4225,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan, or either did not get its table's lock in time |
 | `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete, or a dispatched detach retention no longer reaches is refused for good by a foreign key referencing its rows or by a DEFAULT partition on the table (`method` gives the two ways out) / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which pgpm's dispatched detach had already taken out of the parent, was released to the operator rather than re-attached, since a pg_cron run may still carry the detach. The table and its rows are left whole; the `retain_disown` row logged with it gives the `ATTACH` that puts it back. Logged once. Counts in `status().retain_drop_failures` |
-| `fail_retain_recall` | a retirement retention no longer reaches was kept rather than cleared, because the tick's role cannot read the `pgpm_detach` job that would hold its detach (pg_cron keeps a job per role that ran `pgpm.schedule()` and shows a role only its own): it is neither a superuser nor the one role whose job holds the detach (`retiring_by`), or the mark is older than this release, or more than one role dispatched it. `method` names the tick's role and the role to run as. Logged every such tick; counts in `status().retain_drop_failures`. Run maintenance as that role, or as a superuser |
+| `fail_retain_recall` | a retirement retention no longer reaches was kept rather than cleared (or, its detach landed, rather than released), because the tick's role cannot read the `pgpm_detach` job that would hold its detach (pg_cron keeps a job per role that ran `pgpm.schedule()` and shows a role only its own): it is neither a superuser nor the one role whose job holds the detach (`retiring_by`), or the mark is older than this release, or more than one role dispatched it. `method` names the tick's role and the role to run as. Logged every such tick; counts in `status().retain_drop_failures`. Run maintenance as that role, or as a superuser |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
 | `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or its explicit-range stand-in is taken or over 63 bytes, or its own name is over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it, or for a name over 63 bytes gives the name, its length and the bytes to shorten the table name by. Repeats once per tick until the cell is built |
 | `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, not a native value, or on an `id` grid not a value of the control column's type, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |

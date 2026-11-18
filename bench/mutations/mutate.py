@@ -5781,8 +5781,8 @@ $$;''',
         "Issue #1451 path 2, the unreadable half: a role whose read of cron.job raises (no access to schema cron at "
         "all) is taken to have read the job idle (the pre-fix handler's 'nothing can be armed'). One site, the handler. "
         "tests/194 part L catches it.",
-        [("        v_read := false;   -- cron.job is there and this role cannot read it\n",
-          "        v_read := true;   -- cron.job is there and this role cannot read it\n", 1)],
+        [("        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;\n",
+          "        v_read := true;\n", 1)],
     ),
     "recall_reads_another_roles_job": (
         "bench/retain_recall_armed_detach.sh",
@@ -5836,6 +5836,28 @@ $$;''',
         "with the administrator's job still armed. One site, the comparison. tests/194 part S catches it.",
         [("             or (r.detach_dispatched_oid is not null and r.retiring_by is not distinct from current_user)   -- never null\n",
           "             or (r.detach_dispatched_oid is not null and r.retiring_by = current_user)\n", 1)],
+    ),
+    "recall_unreadable_cron_keeps_refused_mark": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1459 round 2 P1-01: a role whose read of cron.job raises (no access to schema cron) is refused the "
+        "reading outright, so a mark this release made whose dispatch was refused, held by no job, is kept for good "
+        "and counted with a message blaming an older pgpm, where any tick cleared it at once before #1451. One site, "
+        "the read's error handler. tests/194 part T catches it.",
+        [("        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;\n",
+          "        v_read := false;\n", 1)],
+    ),
+    "recall_release_unread_job": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1459 round 2 V-01: a tick that cannot read the job holding a landed detach releases the table anyway. It "
+        "idles only the job it can see, so the administrator's stays armed with no mark left for any tick to idle, the "
+        "check the release spells is filtered the same way, and the ATTACH it gives is taken out again by the job's next "
+        "run, nothing logged. One site, the release's reading test. tests/194 part U catches it.",
+        [("    -- the operator to run is filtered the same way: released, the table would be attached back into a job still armed\n"
+          "    -- with its detach. Kept marked, out of the parent, counted, until a tick that can read the job releases it\n"
+          "    if not v_read then\n",
+          "    -- the operator to run is filtered the same way: released, the table would be attached back into a job still armed\n"
+          "    -- with its detach. Kept marked, out of the parent, counted, until a tick that can read the job releases it\n"
+          "    if false then\n", 1)],
     ),
     "untransmute_keeps_detach_check": (
         "bench/retain_recall_armed_detach.sh",

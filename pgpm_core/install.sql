@@ -5102,7 +5102,8 @@ begin
              || ' where jobname = ''pgpm_detach'' and database = current_database()'
           into v_armed using v_cmd_q;
       exception when others then
-        v_read := false;   -- cron.job is there and this role cannot read it
+        -- cron.job is there and this role cannot read it: only a mark this release made and never dispatched is read
+        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;
       end;
     end if;
 
@@ -5211,10 +5212,23 @@ begin
         format('retention no longer reaches %I.%I, which is detached under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, r.child_name));
       continue;
     end if;
+    -- #1451: a tick that cannot read the job holding the detach cannot idle it either, and the check the release tells
+    -- the operator to run is filtered the same way: released, the table would be attached back into a job still armed
+    -- with its detach. Kept marked, out of the parent, counted, until a tick that can read the job releases it
+    if not v_read then
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'fail_retain_recall', r.lo, r.hi,
+                format('retention no longer reaches %I.%I, which the detach pgpm dispatched has taken out of the parent, but role %s cannot read every pgpm_detach job that may still hold that detach: pg_cron keeps a job per role that ran pgpm.schedule() and shows a role only its own, so this tick could not return such a job to idle, and a table released now and attached back would be taken out again by its next run. It stays marked and out of the parent. Run maintenance as %s, and its tick releases it to you',
+                       v_nsp, r.child_name, current_user,
+                       case when r.retiring_by is not null then format('role %s or a superuser', r.retiring_by)
+                            else 'a superuser' end));
+      v_n := v_n + 1;
+      continue;
+    end if;
     -- #1438: pgpm's own detach landed. Released, never re-attached: a run of the job may still carry the detach
     perform pgpm._idle_detach_job(v_cmd_q);
     perform pgpm._disown_retirement(p_parent, r.child_name,
-      format('retention no longer reaches %I.%I (horizon %s), but the detach pgpm dispatched for it had landed: pgpm does not re-attach a partition its own detach took out, since a pg_cron run may still carry the detach and take it out again (#1438). Before attaching it, check that the pgpm_detach job no longer holds the detach (select command from cron.job where jobname = ''pgpm_detach'')',
+      format('retention no longer reaches %I.%I (horizon %s), but the detach pgpm dispatched for it had landed: pgpm does not re-attach a partition its own detach took out, since a pg_cron run may still carry the detach and take it out again (#1438). Before attaching it, check as a superuser that no pgpm_detach job still holds the detach (select username, command from cron.job where jobname = ''pgpm_detach''): pg_cron shows any other role only its own jobs',
              v_nsp, r.child_name, coalesce(v_boundary, 'none')));
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_retain_reattach', r.lo, r.hi,

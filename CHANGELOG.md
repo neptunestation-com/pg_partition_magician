@@ -19,10 +19,15 @@
   `pgpm.part.retiring_by`) reads the job: any other keeps the mark and logs `fail_retain_recall`, counted
   in `status().retain_drop_failures`, naming the role to run maintenance as, as does a non-superuser's tick on a
   mark older than this release (an upgrade run by a role that could not read the job) or one that more than one
-  role dispatched. A mark this release made whose dispatch was refused is still cleared at once. tests/194 parts E
+  role dispatched. A mark this release made whose dispatch was refused is still cleared at once, even by a role
+  that cannot read `cron.job` at all. The same rule holds at the release of a landed detach: a tick that cannot
+  read the job holding it could not return that job to idle, so it keeps the mark, the table out of the parent,
+  counted, rather than hand over a table the job would take out again after its `ATTACH`; and the release's check
+  now says to run it as a superuser. tests/194 parts E
   and G walk the wait, K and L are #1451's two paths, M shows a re-dispatch resets the clock, N that the clock
   starts only after the idle's transaction, O and P the other role's job and the older mark, Q that the role that
-  dispatched reads its own job, R the refused dispatch, and S a superuser's re-dispatch of the owner's detach.
+  dispatched reads its own job, R the refused dispatch, S a superuser's re-dispatch of the owner's detach, T a
+  refused dispatch by a role with no access to `cron` at all, and U the release kept by the owner's tick.
 
 - **A detach pgpm has handed to pg_cron is never taken back; once it lands, the table is released with its rows**
   (#1438). When retention stopped reaching a partition whose detach was dispatched, the recall (#724) returned the
