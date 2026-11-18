@@ -10,13 +10,18 @@
   only after it commits, so a `pgpm.schedule()` re-run (which idles the job) in one transaction with `set_retain`
   and `retain()` left a run carrying the detach that landed once it committed. Second, pg_cron shows a job only to
   its owner and superusers, so a tick run as the table's owner, with the jobs scheduled by an administrator, read
-  no job at all as an idle one. Now a dispatched retirement whose job reads idle is cleared only after a later tick
-  has started a one-minute clock (new column `pgpm.part.recall_idle_at`) with still no run of the detach in sight;
-  a run that lands meanwhile finds the mark and the table is released and counted, as #1438's recall does. And a
-  tick whose role sees no `pgpm_detach` job keeps the mark and logs `fail_retain_recall`, counted in
-  `status().retain_drop_failures`, naming the role to run maintenance as. A retirement pgpm never dispatched is
-  still cleared at once. tests/194 parts E and G walk the wait, parts K and L are #1451's two paths, and part M
-  shows a re-dispatch resets the clock.
+  no job at all as an idle one (or, having run `pgpm.schedule()` itself, read its own idle job as the one that
+  held the detach). Now a dispatched retirement whose job reads idle is cleared only after a tick in a later
+  transaction than the one that first read the idle has started a one-minute clock (new columns
+  `pgpm.part.recall_idle_xact` and `recall_idle_at`) with still no run of the detach in sight; a run that lands
+  meanwhile finds the mark and the table is released and counted, as #1438's recall does. And with pg_cron, only a
+  superuser's tick or one by the non-superuser role that dispatched the detach (new column
+  `pgpm.part.detach_dispatched_by`) reads the job: any other keeps the mark and logs `fail_retain_recall`, counted
+  in `status().retain_drop_failures`, naming the role to run maintenance as, as does a non-superuser's tick on a
+  mark with no record of pgpm's dispatch (an upgrade run by a role that could not read the job). tests/194 parts E
+  and G walk the wait, K and L are #1451's two paths, M shows a re-dispatch resets the clock, N that the clock
+  starts only after the idle's transaction, O and P the other role's job and the unrecorded mark, and Q that the
+  role that dispatched reads its own job.
 
 - **A detach pgpm has handed to pg_cron is never taken back; once it lands, the table is released with its rows**
   (#1438). When retention stopped reaching a partition whose detach was dispatched, the recall (#724) returned the

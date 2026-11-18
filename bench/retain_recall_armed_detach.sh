@@ -12,7 +12,7 @@
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_detached_unreferenced.sh.
 #
-# SEVENTEEN mutations are required to fail against it (bench/mutations/mutate.py):
+# TWENTY-ONE mutations are required to fail against it (bench/mutations/mutate.py):
 #   retain_recall_never             -- nothing settles a retirement retention no longer reaches, the pre-#724
 #                                      shape. Parts A, B, C and F.
 #   retain_recall_ignores_horizon   -- every retirement is settled, reached or not, so a reached partition's
@@ -35,15 +35,22 @@
 #   untransmute_keeps_detach_check  -- untransmute hands back a released, re-attached monolith still carrying the
 #                                      CHECK the concurrent detach left, refusing rows past its old bound. Part H.
 #   recall_idle_clears_at_once      -- #1451 path 1: a dispatched mark cleared on the tick that first reads the job
-#                                      idle, which a run launched from pg_cron's cache outlasts. Parts E, K, M.
-#   recall_idle_clock_skipped       -- the minute dropped: the tick after the stamp clears at once. Part E.
-#   recall_idle_clock_starts_at_stamp -- two ticks where three are needed: the stamp, written in the idle's own
-#                                      transaction, starts the clock before the idle commits. Parts E and K.
+#                                      idle, which a run launched from pg_cron's cache outlasts. Parts E, K, M, N.
+#   recall_idle_clock_skipped       -- the minute dropped: the tick after the clock starts clears at once. Part E.
+#   recall_idle_clock_starts_at_stamp -- two ticks where three are needed: the first reading starts the clock in the
+#                                      idle's own transaction. Parts E and K.
+#   recall_idle_clock_in_stamping_xact -- a second tick in the idle's own transaction starts the clock (PR #1459
+#                                      round 1, P1-02). Part N.
 #   recall_idle_clock_survives_dispatch -- a re-dispatch keeps an earlier dispatch's expired clock. Part M.
-#   recall_unseen_job_read_idle     -- #1451 path 2: a role row security hides the job from reads it idle and
-#                                      clears the mark under an armed job. Part L.
-#   recall_unreadable_job_read_idle -- the same for a role with no access to schema cron, whose read raises.
-#                                      Part L.
+#   recall_dispatch_role_unrecorded -- the dispatch records no role, so the role that dispatched its own job's
+#                                      detach is refused. Part Q.
+#   recall_unseen_job_read_idle     -- #1451 path 2: a role that cannot read the job that holds the detach reads
+#                                      it idle. Parts L, O and P.
+#   recall_unreadable_job_read_idle -- the same for a role whose read of cron.job raises. Part L.
+#   recall_reads_another_roles_job  -- a non-superuser reads its own pgpm_detach job as the administrator's, which
+#                                      holds the detach (PR #1459 round 1, V-01). Part O.
+#   recall_unrecorded_mark_read     -- a non-superuser reads a mark with no record of pgpm's dispatch as one nothing
+#                                      holds (PR #1459 round 1, V-02). Part P.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree

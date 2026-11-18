@@ -5610,9 +5610,11 @@ $$;''',
         "frontier moves back), pg_cron detaches it, retire() is never called on it again and nothing "
         "re-attaches it, so its rows vanish from every read of the parent with nothing logged. One site, "
         "_retain_recall's loop, made to select nothing. tests/194 parts A, B, C and F catch it.",
-        [("  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, recall_idle_at from pgpm.part\n"
+        [("  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, detach_dispatched_by, recall_idle_xact,\n"
+          "                  recall_idle_at from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null\n",
-          "  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, recall_idle_at from pgpm.part\n"
+          "  for r in select child_name, lo, hi, retiring_oid, child_oid, detach_dispatched_oid, detach_dispatched_by, recall_idle_xact,\n"
+          "                  recall_idle_at from pgpm.part\n"
           "            where parent_table = p_parent and attached and retiring_at is not null and false\n", 1)],
     ),
     "recall_idles_armed_detach": (
@@ -5710,10 +5712,15 @@ $$;''',
         "pg_cron launches a run with the command its cache holds, and the cache drops an idled command only after the "
         "idle commits, so a pgpm.schedule() re-run in the transaction of the loosening leaves a run carrying the detach "
         "that lands on a partition with no mark: rows out of the parent, nothing logged, status() clean. One site, the "
-        "wait. tests/194 parts E, K and M catch it.",
-        [("        if r.recall_idle_at is null or r.recall_idle_at = '-infinity' then\n"
-          "          update pgpm.part set recall_idle_at = case when r.recall_idle_at is null then '-infinity'::timestamptz\n"
-          "                                                      else clock_timestamp() end\n"
+        "wait. tests/194 parts E, K, M and N catch it.",
+        [("        if r.recall_idle_xact is null then\n"
+          "          update pgpm.part set recall_idle_xact = pg_current_xact_id()\n"
+          "           where parent_table = p_parent and child_name = r.child_name;\n"
+          "          continue;\n"
+          "        end if;\n"
+          "        if r.recall_idle_at is null then\n"
+          "          continue when pg_xact_status(r.recall_idle_xact) = 'in progress';\n"
+          "          update pgpm.part set recall_idle_at = clock_timestamp()\n"
           "           where parent_table = p_parent and child_name = r.child_name;\n"
           "          continue;\n"
           "        end if;\n"
@@ -5721,8 +5728,8 @@ $$;''',
     ),
     "recall_idle_clock_skipped": (
         "bench/retain_recall_armed_detach.sh",
-        "Issue #1451 path 1, the minute dropped: the tick after the one that stamped the mark clears it at once, which "
-        "pg_cron's cache can still outlast. One site, the clock's test. tests/194 part E catches it.",
+        "Issue #1451 path 1, the minute dropped: the tick that starts the clock is followed by one that clears at once, "
+        "which pg_cron's cache can still outlast. One site, the clock's test. tests/194 part E catches it.",
         [("        continue when clock_timestamp() < r.recall_idle_at + interval '1 minute';\n", "", 1)],
     ),
     "recall_idle_clock_starts_at_stamp": (
@@ -5732,35 +5739,67 @@ $$;''',
         "times from before the idle committed, and a transaction that outlasts the minute leaves the very next tick "
         "free to clear the mark while pg_cron's cache still holds the detach. One site, the stamp. tests/194 parts E "
         "and K catch it.",
-        [("          update pgpm.part set recall_idle_at = case when r.recall_idle_at is null then '-infinity'::timestamptz\n"
-          "                                                      else clock_timestamp() end\n",
-          "          update pgpm.part set recall_idle_at = clock_timestamp()\n", 1),
-         ("        if r.recall_idle_at is null or r.recall_idle_at = '-infinity' then\n",
-          "        if r.recall_idle_at is null then\n", 1)],
+        [("          update pgpm.part set recall_idle_xact = pg_current_xact_id()\n",
+          "          update pgpm.part set recall_idle_xact = pg_current_xact_id(), recall_idle_at = clock_timestamp()\n", 1)],
+    ),
+    "recall_idle_clock_in_stamping_xact": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1459 round 1 P1-02: the clock is started by any later tick that reads the stamp, including one in the "
+        "idle's own transaction, so two retain() calls in a transaction held open past the minute leave the clock run "
+        "out at commit and the next tick clears the mark inside pg_cron's cache window. One site, the test that the "
+        "stamping transaction has ended. tests/194 part N catches it.",
+        [("          continue when pg_xact_status(r.recall_idle_xact) = 'in progress';\n", "", 1)],
     ),
     "recall_idle_clock_survives_dispatch": (
         "bench/retain_recall_armed_detach.sh",
         "Issue #1451: a re-dispatch keeps the idle clock an earlier dispatch's loosening started, so once retention "
         "reaches the partition again, is re-dispatched and loosens once more, an expired clock clears the mark on the "
         "first idle reading, path 1 again. One site, retire()'s record of the dispatch. tests/194 part M catches it.",
-        [("        update pgpm.part set detach_dispatched_oid = v_child::oid, recall_idle_at = null\n",
-          "        update pgpm.part set detach_dispatched_oid = v_child::oid\n", 1)],
+        [("        update pgpm.part set detach_dispatched_oid = v_child::oid, detach_dispatched_by = current_user,\n"
+          "                             recall_idle_xact = null, recall_idle_at = null\n",
+          "        update pgpm.part set detach_dispatched_oid = v_child::oid, detach_dispatched_by = current_user\n", 1)],
+    ),
+    "recall_dispatch_role_unrecorded": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1459 round 1, the other direction: the dispatch does not record its role, so the non-superuser role that "
+        "dispatched its own job's detach cannot read it either, and its ticks refuse (counted) a retirement they could "
+        "settle. One site, retire()'s record. tests/194 part Q catches it.",
+        [("        update pgpm.part set detach_dispatched_oid = v_child::oid, detach_dispatched_by = current_user,\n",
+          "        update pgpm.part set detach_dispatched_oid = v_child::oid, detach_dispatched_by = null,\n", 1)],
     ),
     "recall_unseen_job_read_idle": (
         "bench/retain_recall_armed_detach.sh",
-        "Issue #1451 path 2, the pre-fix shape: a role pg_cron does not show the pgpm_detach job to (the table's owner, "
-        "with the jobs scheduled by an administrator) reads no job as an idle one, so its tick clears the mark with the "
-        "job still armed and pg_cron's next run strands the rows unrecorded. One site, the refusal's test. tests/194 "
-        "part L catches it.",
-        [("        if not v_read then\n", "        if false then\n", 1)],
+        "Issue #1451 path 2, the pre-fix shape: a role pg_cron does not show the job that holds the detach to (the "
+        "table's owner, with the jobs scheduled by an administrator) reads it as idle, so its tick clears the mark with "
+        "the job still armed and pg_cron's next run strands the rows unrecorded. One site, the refusal's test. "
+        "tests/194 parts L, O and P catch it.",
+        [("      if not v_read then\n", "      if false then\n", 1)],
     ),
     "recall_unreadable_job_read_idle": (
         "bench/retain_recall_armed_detach.sh",
-        "Issue #1451 path 2, the unreadable half: a role with no access to schema cron at all, whose read of cron.job "
-        "raises, is taken to have read the job idle (the pre-fix handler's 'nothing can be armed'). One site, the "
-        "handler. tests/194 part L catches it.",
+        "Issue #1451 path 2, the unreadable half: a role whose read of cron.job raises (no access to schema cron at "
+        "all) is taken to have read the job idle (the pre-fix handler's 'nothing can be armed'). One site, the handler. "
+        "tests/194 part L catches it.",
         [("        v_read := false;   -- cron.job is there and this role cannot read it\n",
           "        v_read := true;   -- cron.job is there and this role cannot read it\n", 1)],
+    ),
+    "recall_reads_another_roles_job": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1459 round 1 V-01: any non-superuser that sees a pgpm_detach job reads it as the job, but pg_cron keeps one "
+        "per role that ran pgpm.schedule(), so a table owner who also ran it reads its own idle job while the "
+        "administrator's still holds the detach, clears the mark a minute on, and the administrator's run strands the "
+        "rows. One site, the role in the reading's test. tests/194 part O catches it.",
+        [("             or (r.detach_dispatched_oid is not null and r.detach_dispatched_by = current_user);\n",
+          "             or (r.detach_dispatched_oid is not null);\n", 1)],
+    ),
+    "recall_unrecorded_mark_read": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1459 round 1 V-02: a non-superuser reads a mark with no record of pgpm's dispatch as one nothing holds, so "
+        "after an upgrade from v0.6.0 run by a role that could not read the job (which left the record out), its tick "
+        "clears the mark at once and the still-armed job strands the rows. One site, the reading's test. tests/194 "
+        "part P catches it.",
+        [("             or (r.detach_dispatched_oid is not null and r.detach_dispatched_by = current_user);\n",
+          "             or (r.detach_dispatched_oid is null or r.detach_dispatched_by = current_user);\n", 1)],
     ),
     "untransmute_keeps_detach_check": (
         "bench/retain_recall_armed_detach.sh",
@@ -16545,7 +16584,7 @@ MUTATIONS["disown_namesake_mark_kept"] = (
     "row's, and disarms the job of its detach, but does not clear it, so the mark is honoured: every later retire() "
     "of an anchored cell refuses as fail_retain_identity, and an unanchored one detaches the operator's table. One "
     "statement, the clearing. tests/355 parts C, K, L, M and N catch it.",
-    [("  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, recall_idle_at = null\n   where parent_table = p_parent and child_name = p_child;\n",
+    [("  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, detach_dispatched_by = null,\n                       recall_idle_xact = null, recall_idle_at = null\n   where parent_table = p_parent and child_name = p_child;\n",
       "  v_other_q := case when v_rel is null then 'a relation that no longer exists' else format('%I.%I', v_nsp, v_rel) end;\n", 1)],
 )
 MUTATIONS["child_oid_backfill_by_relname"] = (
@@ -17195,9 +17234,8 @@ MUTATIONS["disown_unanchored"] = (
     "and retire an impostor attached under it, detached and dropped with its rows (#407's substitution). One site, "
     "_disown_retirement, which every path that clears such a mark goes through. tests/363 parts G (retire()'s "
     "release), I (the recall's), J (the install pass) and K (retire()'s no-dispatch-record branch) catch it.",
-    [("  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, recall_idle_at = null,\n"
-      "                       child_oid = coalesce(child_oid, retiring_oid)\n",
-      "  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null, recall_idle_at = null\n", 1)],
+    [("                       recall_idle_xact = null, recall_idle_at = null, child_oid = coalesce(child_oid, retiring_oid)\n",
+      "                       recall_idle_xact = null, recall_idle_at = null\n", 1)],
 )
 MUTATIONS["retire_release_attached_elsewhere"] = (
     "bench/retire_renamed_detached.sh",
