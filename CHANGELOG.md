@@ -30,7 +30,12 @@
   starts only after the idle's transaction, O and P the other role's job and the older mark, Q that the role that
   dispatched reads its own job, R the refused dispatch, S a superuser's re-dispatch of the owner's detach, T a
   refused dispatch by a role with no access to `cron` at all, U the release kept by the owner's tick, and V a
-  superuser's tick waiting out the idle on an older mark.
+  superuser's tick waiting out the idle on an older mark. The same holds wherever a mark with no record of
+  pgpm's dispatch is disowned: with pg_cron, a mark older than this release is released only by a superuser, who
+  can idle every role's job, so `retire()` (pending or detached, `fail_retain_drop`, counted), the recall
+  (`fail_retain_recall`), `_detach_reap` and the install's pass keep it for any other role, rather than hand over a
+  table another role's job would take out again after its `ATTACH`. Without pg_cron an older mark is cleared at
+  once, and a stamp from a younger cluster's restore is read as no live transaction. Parts W to Z.
 
 - **A detach pgpm has handed to pg_cron is never taken back; once it lands, the table is released with its rows**
   (#1438). When retention stopped reaching a partition whose detach was dispatched, the recall (#724) returned the

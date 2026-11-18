@@ -2392,6 +2392,23 @@ begin
 end;
 $$;
 
+-- _unrecorded_mark_unread (#1451): whether this role cannot tell that no pgpm_detach job holds the detach of p_child's
+-- mark, asked where a mark with no record of pgpm's dispatch would be disowned. A mark this release made (retiring_by)
+-- with no record was never dispatched, and no job holds it. One older than this release an older pgpm may have
+-- dispatched unrecorded, and with pg_cron only a superuser reads every role's job: anyone else's disown would idle only
+-- its own, and the job's next run would take the released table out again after the ATTACH the release spells.
+create or replace function pgpm._unrecorded_mark_unread(p_parent regclass, p_child name)
+returns boolean language plpgsql stable as $$
+begin
+  return exists (select 1 from pgpm.part p
+                  where p.parent_table = p_parent and p.child_name = p_child
+                    and p.retiring_at is not null and p.retiring_by is null)
+     and exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where n.nspname = 'cron' and c.relname = 'job')
+     and not exists (select 1 from pg_roles where rolname = current_user and rolsuper);
+end;
+$$;
+
 -- _retirement_vouched: whether a retirement mark on the pgpm.part row of p_parent anchored at p_child_oid stands for
 -- a retirement of pgpm's own, by the one rule retire(), _detach_reap, _retain_recall and the install's pass apply
 -- (_detach_dispatched, #705): the mark (p_retiring_at, the row's own retiring_at as its caller read it) AND the
@@ -4250,7 +4267,8 @@ begin
       end if;
       continue;
     end if;
-    continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);
+    continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel)
+      or pgpm._unrecorded_mark_unread(r.parent_table, r.child_name);   -- #1451: left to a tick that can read the job
     perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent_table, r.nspname, r.child_name));
     v_why_q := format('%I.%I is %s under a retirement mark for which pgpm recorded no dispatch of its own (a dispatch that failed, or a pgpm older than that record, which stamped the mark on an operator''s detach as on its own)',
                       r.nspname, r.child_name,
@@ -4686,7 +4704,19 @@ begin
   -- detach then lands, the partition is detached under the mark; on either path below that used to read as the
   -- dispatched detach having landed, and the table was dropped. So the mark is first asked for its record
   -- (pgpm.part.detach_dispatched_oid, _detach_dispatched); without one it is disowned (retain_disown) and the
-  -- partition is the operator's, refused as one detached by hand.
+  -- partition is the operator's, refused as one detached by hand. #1451: not by a role that cannot read every job that
+  -- may hold an older pgpm's unrecorded detach (_unrecorded_mark_unread): it keeps the mark, detached or pending,
+  -- refused and counted, until a superuser's tick.
+  if r.retiring_at is not null and v_rel is not null and not v_attached
+     and not pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)
+     and pgpm._unrecorded_mark_unread(p_parent, p_child) then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+              format('%I.%I is %s under a retirement mark a pgpm older than this release may have dispatched unrecorded, and role %s cannot read every pgpm_detach job that may hold it (pg_cron shows a role only its own); kept, not dropped. Run maintenance as a superuser, and its tick releases it to you',
+                     v_nsp, p_child, case when v_pending then 'pending a concurrent detach' else 'detached from the parent' end,
+                     current_user));
+    return false;
+  end if;
   if r.retiring_at is not null and v_rel is not null and not v_attached and not v_pending
      and not pgpm._detach_dispatched(p_parent, p_child, v_rel::oid) then
     perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));   -- only if it still holds this detach
@@ -5034,7 +5064,7 @@ create or replace function pgpm._retain_recall(p_parent regclass, p_reattach boo
 returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_boundary text; v_nsp name; r record; v_now regclass; v_cmd_q text; v_rec oid;
-  v_armed boolean; v_read boolean; v_pending boolean; v_n int := 0; v_cross text[]; v_why text; v_out text;
+  v_armed boolean; v_read boolean; v_cron boolean; v_pending boolean; v_n int := 0; v_cross text[]; v_why text; v_out text;
   v_db oid := (select oid from pg_database where datname = current_database());
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
@@ -5094,8 +5124,9 @@ begin
     -- nothing of the job that holds the detach; for a mark older than this release, only a superuser does.
     v_armed := false;
     v_read := true;
-    if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-                where n.nspname = 'cron' and c.relname = 'job') then
+    v_cron := exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                       where n.nspname = 'cron' and c.relname = 'job');
+    if v_cron then
       v_read := exists (select 1 from pg_roles where rolname = current_user and rolsuper)
              or (r.detach_dispatched_oid is not null and r.retiring_by is not distinct from current_user)   -- never null
              or (r.detach_dispatched_oid is null and r.retiring_by is not null);   -- this release's, never dispatched
@@ -5171,10 +5202,10 @@ begin
         v_n := v_n + 1;
         continue;
       end if;
-      if r.detach_dispatched_oid is not null or r.retiring_by is null then
+      if r.detach_dispatched_oid is not null or (r.retiring_by is null and v_cron) then
         -- read idle: pg_cron may still launch the detach its cache held. The first tick records its transaction; a
         -- tick for which that transaction is no longer in progress (the idle it read has committed) starts the
-        -- clock; the mark is cleared a minute on. A mark older than this release waits too, its dispatch unrecorded
+        -- clock; the mark is cleared a minute on. A mark older than this release waits too, with pg_cron, its dispatch unrecorded
         -- (an upgrade by a role that could not read the job): only this release's undispatched mark is held by no job
         if r.recall_idle_xact is null then
           update pgpm.part set recall_idle_xact = pg_current_xact_id()
@@ -5182,7 +5213,9 @@ begin
           continue;
         end if;
         if r.recall_idle_at is null then
-          continue when pg_xact_status(r.recall_idle_xact) = 'in progress';
+          -- a stamp past this cluster's xid counter (pgpm.part restored into a younger cluster) is of no live transaction
+          continue when case when r.recall_idle_xact <= pg_current_xact_id()
+                             then pg_xact_status(r.recall_idle_xact) = 'in progress' else false end;
           update pgpm.part set recall_idle_at = clock_timestamp()
            where parent_table = p_parent and child_name = r.child_name;
           continue;
@@ -5209,23 +5242,27 @@ begin
                                            'the recall, as retention no longer reaches its range,');
       continue;
     end if;
+    -- #1451: a tick that cannot read the job holding the detach cannot idle it either, and the check the release tells
+    -- the operator to run is filtered the same way: released, the table would be attached back into a job still armed
+    -- with its detach. Kept marked, out of the parent, counted, until a tick that can read the job releases it. Asked
+    -- before a mark with no record is disowned too: one older than this release an older pgpm may have dispatched
+    if not v_read then
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'fail_retain_recall', r.lo, r.hi,
+                format('retention no longer reaches %I.%I, which %s has taken out of the parent, but role %s cannot read every pgpm_detach job that may still hold that detach: pg_cron keeps a job per role that ran pgpm.schedule() and shows a role only its own, so this tick could not return such a job to idle, and a table released now and attached back would be taken out again by its next run. It stays marked and out of the parent. Run maintenance as %s, and its tick releases it to you',
+                       v_nsp, r.child_name,
+                       case when r.detach_dispatched_oid is null then 'a detach a pgpm older than this release may have dispatched'
+                            else 'the detach pgpm dispatched' end,
+                       current_user,
+                       case when r.retiring_by is not null then format('role %s or a superuser', r.retiring_by)
+                            else 'a superuser' end));
+      v_n := v_n + 1;
+      continue;
+    end if;
     if not pgpm._detach_dispatched(p_parent, r.child_name, v_now::oid) then
       perform pgpm._idle_detach_job(v_cmd_q);
       perform pgpm._disown_retirement(p_parent, r.child_name,
         format('retention no longer reaches %I.%I, which is detached under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, r.child_name));
-      continue;
-    end if;
-    -- #1451: a tick that cannot read the job holding the detach cannot idle it either, and the check the release tells
-    -- the operator to run is filtered the same way: released, the table would be attached back into a job still armed
-    -- with its detach. Kept marked, out of the parent, counted, until a tick that can read the job releases it
-    if not v_read then
-      insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (p_parent, 'fail_retain_recall', r.lo, r.hi,
-                format('retention no longer reaches %I.%I, which the detach pgpm dispatched has taken out of the parent, but role %s cannot read every pgpm_detach job that may still hold that detach: pg_cron keeps a job per role that ran pgpm.schedule() and shows a role only its own, so this tick could not return such a job to idle, and a table released now and attached back would be taken out again by its next run. It stays marked and out of the parent. Run maintenance as %s, and its tick releases it to you',
-                       v_nsp, r.child_name, current_user,
-                       case when r.retiring_by is not null then format('role %s or a superuser', r.retiring_by)
-                            else 'a superuser' end));
-      v_n := v_n + 1;
       continue;
     end if;
     -- #1438: pgpm's own detach landed. Released, never re-attached: a run of the job may still carry the detach
@@ -14174,7 +14211,8 @@ begin
     if exists (select 1 from pgpm.part p
                 where p.parent_table = r.parent and p.retiring_at is not null
                   and (p.child_oid = r.child_oid or (p.child_oid is null and p.child_name = r.crel)))
-       and not pgpm._detach_dispatched(r.parent, r.crel, r.child_oid) then
+       and not pgpm._detach_dispatched(r.parent, r.crel, r.child_oid)
+       and not pgpm._unrecorded_mark_unread(r.parent, r.crel) then   -- #1451: kept for retire(), which refuses it
       perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent, r.cnsp, r.crel));
       perform pgpm._disown_retirement(r.parent, r.crel,
         format('_detach_reap found %I.%I pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch of its own', r.cnsp, r.crel));

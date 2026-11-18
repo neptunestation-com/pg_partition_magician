@@ -957,7 +957,9 @@ Three things follow, and none of them are optional:
   detach it had cached. pg_cron keeps a
   `pgpm_detach` job for each role that ran `pgpm.schedule()` and shows a role only its own. So if maintenance
   runs as a role other than the one whose job holds the detach, and not as a superuser, the mark is kept and
-  `fail_retain_recall` is counted until a tick runs as the role it names or as a superuser.
+  `fail_retain_recall` is counted until a tick runs as the role it names or as a superuser. A retirement mark
+  left by a pgpm older than this release is released only by a superuser's tick, since only a superuser can
+  return every role's job to idle; any other role's tick keeps it, counted.
 - **Writes to the *referencing* table are blocked while the detach runs**, once per retirement, for a
   duration set by that table's size. Reads of it, and your managed table entirely, are unaffected. This is
   irreducible: it is PostgreSQL proving the foreign key still holds. An index on the referencing column is

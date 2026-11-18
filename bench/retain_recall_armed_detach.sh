@@ -12,7 +12,7 @@
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_detached_unreferenced.sh.
 #
-# TWENTY-EIGHT mutations are required to fail against it (bench/mutations/mutate.py):
+# THIRTY-FIVE mutations are required to fail against it (bench/mutations/mutate.py):
 #   retain_recall_never             -- nothing settles a retirement retention no longer reaches, the pre-#724
 #                                      shape. Parts A, B, C and F.
 #   retain_recall_ignores_horizon   -- every retirement is settled, reached or not, so a reached partition's
@@ -66,6 +66,15 @@
 #   recall_unrecorded_mark_cleared_at_once -- the idle wait skips a mark older than this release, so a superuser's
 #                                      tick clears it at once on an idle its own transaction wrote (PR #1459
 #                                      round 3, V-01). Part V.
+#   recall_release_unrecorded_unread -- the release's reading test is asked only after a mark's record is found, so
+#                                      the owner's tick releases an older mark's landed detach (round 4, V-01). Part W.
+#   upgrade_pass_disowns_unread_mark -- the owner's install pass disowns that older mark. Part W.
+#   retire_disowns_unread_mark      -- the owner's retire() disowns it, pending or detached. Part X.
+#   reap_disowns_unread_mark        -- the owner's reap disowns it as it finishes the pending detach. Part X.
+#   unrecorded_mark_unread_by_superuser -- a superuser cannot release it either. Part X.
+#   recall_future_stamp_raises      -- a stamp past the xid counter fails every tick's retain() (round 4, P1-01).
+#                                      Part Y.
+#   recall_older_mark_waits_without_cron -- an older mark waits out the minute with no pg_cron (round 4, P1-02). Part Z.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree
