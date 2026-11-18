@@ -449,10 +449,10 @@ WITNESSES = [('WitTwoChunks', 'Custody.cfg', PGPM_ONLY), ('WitArchivedDrop', 'Cu
 
 # What each must-be-clean config checks, and a floor under how much of the world it explores. A clean result is
 # evidence only about what was checked: a config cut to TypeOK, or to EnvBudget 0, still says "No error has been
-# found". The floors sit about 5% under the counts (5,250,812 / 12,230,621 / 5,064,825 distinct states; the last two
-# grew with #1424's release, which also put renames back into CustodyLive.cfg; the second is #1457's, the recall
-# as #1452 ships it plus the hand idle "IJ") so a change to the model that shrinks the explored world has to lower
-# them in the same commit, on purpose.
+# found". The floors sit about 4 to 5% under the counts (5,250,812 / 12,230,621 / 5,006,487 distinct states, all
+# three #1457's: the recall as #1452 ships it, plus the hand idle "IJ" in CustodyFK.cfg; the last one fell from
+# 5,064,825 with the re-attach gone) so a change to the model that shrinks the explored world has to lower them in
+# the same commit, on purpose.
 SCOPE = {
     'Custody.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
                     5_000_000),
