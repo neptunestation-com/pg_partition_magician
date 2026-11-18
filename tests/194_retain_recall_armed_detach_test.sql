@@ -64,6 +64,10 @@
 --           job) is kept, counted, by a non-superuser's tick, never cleared at once (PR #1459 round 1, V-02).
 --   PART Q: the role that dispatched its own job's detach reads it: its ticks wait out the idle and clear the mark,
 --           with nothing refused.
+--   PART R: a mark this release made whose dispatch was refused (the owner has no job of its own) is held by no job,
+--           and the owner's tick clears it at once, as before #1451.
+--   PART S: a superuser's re-dispatch of the owner's detach arms the administrator's job too, so the owner's own idle
+--           job is no reading any more: its ticks keep the mark, counted, past the minute.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
@@ -79,7 +83,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(160);
+select plan(176);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -723,8 +727,17 @@ select format('alter table %s owner to pgpm_test194_owner', r) from (
 select ok(not pgpm.retire('public.rr194p', :'p_doomed'), 'fixture: (P) the administrator''s tick dispatches the detach');
 select pgpm_test194.armed() as p_cmd \gset
 -- what an upgrade from v0.6.0 leaves when the role running it cannot read the job: the mark with no record
-update pgpm.part set detach_dispatched_oid = null, detach_dispatched_by = null
+update pgpm.part set detach_dispatched_oid = null, retiring_by = null
  where parent_table = 'public.rr194p'::regclass and lo = '0';
+-- the owner's tick retries the dispatch while retention still reaches it, and sees no job to arm
+set role pgpm_test194_owner;
+select set_config('t194.p_retry', (pgpm.retire('public.rr194p', :'p_doomed'))::text, false);
+reset role;
+select ok(current_setting('t194.p_retry') = 'false'
+          and (select action from pgpm.log where parent_table = 'public.rr194p'::regclass and lo = '0' order by id desc limit 1) = 'fail_retain_detach',
+  'LIVENESS: (P) the owner''s retry ran and its dispatch was refused');
+select is((select coalesce(retiring_by::text, 'null') from pgpm.part where parent_table = 'public.rr194p'::regclass and lo = '0'), 'null',
+  'P: the retry does not claim the older mark for its role');
 select pgpm.set_retain('public.rr194p', '45000');
 set role pgpm_test194_owner;
 select pgpm.retain('public.rr194p');
@@ -756,7 +769,7 @@ reset role;
 select is(current_setting('t194.q_retire'), 'false', 'fixture: (Q) the owner''s own tick dispatches the detach');
 select ok((select command from cron.job where jobid = 3) ~ 'detach partition' and pgpm_test194.armed() = 'select 1',
   'LIVENESS: (Q) the owner''s job holds the detach, the administrator''s does not');
-select is((select detach_dispatched_by::text from pgpm.part where parent_table = 'public.rr194q'::regclass and lo = '0'),
+select is((select retiring_by::text from pgpm.part where parent_table = 'public.rr194q'::regclass and lo = '0'),
   'pgpm_test194_owner', 'Q: the dispatch records its role');
 update cron.job set command = 'select 1' where jobid = 3;   -- the owner idles its own job
 select pgpm.set_retain('public.rr194q', '45000');
@@ -777,6 +790,77 @@ select is((select count(*) from pgpm.log where parent_table = 'public.rr194q'::r
 select ok(pgpm_test194.attached('public.rr194q', :'q_doomed') and pgpm_test194.ids('public.rr194q', 20000) = array(select generate_series(161, 170)::bigint),
   'Q: the partition never left the parent: ids 161 to 170 are served');
 delete from cron.job where jobid = 3;
+
+-- ====== PART R: a mark whose dispatch this release refused is cleared at once ======
+set role pgpm_test194_owner;
+create table public.rr194r (id bigint primary key, payload text);
+insert into public.rr194r select g, 'r' from generate_series(171, 181) g;
+call pgpm.transmute('public.rr194r', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194r', '60000');
+insert into public.rr194r values (50005, 'frontier');
+create table public.rr194r_ref (id bigint primary key, p_id bigint references public.rr194r(id));
+insert into public.rr194r_ref values (1, 50005);
+select child_name as r_doomed from pgpm.part where parent_table = 'public.rr194r'::regclass and lo = '0' \gset
+select set_config('t194.r_retire', (pgpm.retire('public.rr194r', :'r_doomed'))::text, false);
+reset role;
+select ok(current_setting('t194.r_retire') = 'false'
+          and (select action from pgpm.log where parent_table = 'public.rr194r'::regclass and lo = '0' order by id desc limit 1) = 'fail_retain_detach'
+          and pgpm_test194.mark('public.rr194r', '0') = 'retiring_at set, dispatched null',
+  'LIVENESS: (R) the owner''s tick marked the partition and its dispatch was refused: it has no job of its own');
+select is(pgpm_test194.armed(), 'select 1', 'LIVENESS: (R) and no job holds the detach');
+select pgpm.set_retain('public.rr194r', '45000');
+set role pgpm_test194_owner;
+select pgpm.retain('public.rr194r');
+reset role;
+select is(pgpm_test194.mark('public.rr194r', '0'), 'retiring_at null, dispatched null', 'R: the owner''s tick clears the mark at once');
+select is((select count(*) from pgpm.log where parent_table = 'public.rr194r'::regclass and action = 'fail_retain_recall'), 0::bigint,
+  'R: with nothing refused');
+select ok(pgpm_test194.attached('public.rr194r', :'r_doomed') and pgpm_test194.ids('public.rr194r', 20000) = array(select generate_series(171, 181)::bigint),
+  'R: the partition never left the parent: ids 171 to 181 are served');
+
+-- ====== PART S: a superuser's re-dispatch of the owner's detach is no longer the owner's to read ======
+insert into cron.job values (4, 'pgpm_detach', current_database(), 'select 1', 'pgpm_test194_owner');
+set role pgpm_test194_owner;
+create table public.rr194s (id bigint primary key, payload text);
+insert into public.rr194s select g, 's' from generate_series(191, 202) g;
+call pgpm.transmute('public.rr194s', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194s', '60000');
+insert into public.rr194s values (50005, 'frontier');
+create table public.rr194s_ref (id bigint primary key, p_id bigint references public.rr194s(id));
+insert into public.rr194s_ref values (1, 50005);
+select child_name as s_doomed from pgpm.part where parent_table = 'public.rr194s'::regclass and lo = '0' \gset
+select set_config('t194.s_retire', (pgpm.retire('public.rr194s', :'s_doomed'))::text, false);
+reset role;
+select ok(current_setting('t194.s_retire') = 'false', 'fixture: (S) the owner''s tick dispatches through its own job');
+select ok(not pgpm.retire('public.rr194s', :'s_doomed'), 'fixture: (S) the administrator''s tick dispatches it again');
+select pgpm_test194.armed() as s_cmd \gset
+select ok(:'s_cmd' ~ 'detach partition' and (select command from cron.job where jobid = 4) = :'s_cmd',
+  'LIVENESS: (S) both jobs hold the detach');
+select is((select coalesce(retiring_by::text, 'null') from pgpm.part where parent_table = 'public.rr194s'::regclass and lo = '0'), 'null',
+  'S: the record no longer names one role');
+update cron.job set command = 'select 1' where jobid = 4;   -- the owner idles its own job
+select pgpm.set_retain('public.rr194s', '45000');
+set role pgpm_test194_owner;
+select pgpm.retain('public.rr194s');
+select pgpm.retain('public.rr194s');
+reset role;
+update pgpm.part set recall_idle_at = clock_timestamp() - interval '61 seconds'   -- the minute, had a clock started
+ where parent_table = 'public.rr194s'::regclass and lo = '0' and recall_idle_at is not null;
+set role pgpm_test194_owner;
+select pgpm.retain('public.rr194s');
+reset role;
+select is(pgpm_test194.mark('public.rr194s', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194s'::regclass and lo = '0')),
+  'S: the owner''s ticks keep the mark while the administrator''s job holds the detach');
+select ok((select count(*) from pgpm.log where parent_table = 'public.rr194s'::regclass and lo = '0' and action = 'fail_retain_recall') = 3
+          and (select method from pgpm.log where parent_table = 'public.rr194s'::regclass and lo = '0' and action = 'fail_retain_recall'
+                order by id desc limit 1) ~ 'Run maintenance as a superuser',
+  'S: each logs fail_retain_recall, naming a superuser as the way out');
+select ok(pgpm_test194.cron_run(:'s_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194s', :'s_doomed'),
+  'LIVENESS: (S) the administrator''s job lands the detach');
+call pgpm.maintain('public.rr194s');
+select ok(pgpm_test194.accounted('public.rr194s', :'s_doomed', '0'), 'S: the invariant holds: pgpm logged the partition out of the parent');
+select is(pgpm_test194.ids(format('public.%I', :'s_doomed')), array(select generate_series(191, 202)::bigint), 'S: and released it with ids 191 to 202');
+delete from cron.job where jobid = 4;
 alter table cron.job disable row level security;
 
 select * from finish();

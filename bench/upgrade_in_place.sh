@@ -152,7 +152,7 @@ pgpm.part:retiring_at
 pgpm.part:retiring_oid
 pgpm.part:child_oid
 pgpm.part:detach_dispatched_oid
-pgpm.part:detach_dispatched_by
+pgpm.part:retiring_by
 pgpm.part:recall_idle_xact
 pgpm.part:recall_idle_at
 pgpm.transmute_inflight:owner_pid

@@ -12,7 +12,7 @@
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_detached_unreferenced.sh.
 #
-# TWENTY-ONE mutations are required to fail against it (bench/mutations/mutate.py):
+# TWENTY-FIVE mutations are required to fail against it (bench/mutations/mutate.py):
 #   retain_recall_never             -- nothing settles a retirement retention no longer reaches, the pre-#724
 #                                      shape. Parts A, B, C and F.
 #   retain_recall_ignores_horizon   -- every retirement is settled, reached or not, so a reached partition's
@@ -49,8 +49,16 @@
 #   recall_unreadable_job_read_idle -- the same for a role whose read of cron.job raises. Part L.
 #   recall_reads_another_roles_job  -- a non-superuser reads its own pgpm_detach job as the administrator's, which
 #                                      holds the detach (PR #1459 round 1, V-01). Part O.
-#   recall_unrecorded_mark_read     -- a non-superuser reads a mark with no record of pgpm's dispatch as one nothing
-#                                      holds (PR #1459 round 1, V-02). Part P.
+#   recall_unrecorded_mark_read     -- a non-superuser reads a mark older than this release as one nothing holds
+#                                      (PR #1459 round 1, V-02). Part P.
+#   retiring_by_claimed_on_retry    -- retire()'s retry records its role on an older mark, which then reads as this
+#                                      release's own, never dispatched. Part P.
+#   recall_refused_dispatch_kept    -- a mark this release made whose dispatch was refused is kept for good by a
+#                                      non-superuser, though nothing holds it. Part R.
+#   retiring_by_kept_on_other_roles_dispatch -- a superuser's re-dispatch keeps the owner's name, so the owner reads
+#                                      its own idle job while the administrator's holds the detach. Part S.
+#   recall_role_reading_null_unsafe -- the role test is a plain equality, null on a record naming no role, which
+#                                      skips the refusal and clears the mark silently. Part S.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree
