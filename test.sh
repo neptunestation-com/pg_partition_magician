@@ -1666,12 +1666,14 @@ run_lockview() {
 #      A mutation that kills the archive is run too, and the progress witnesses must go unreachable under it.
 #   1. The default configs check CLEAN: the design, as the documented contracts state it, keeps every
 #      invariant over every behaviour in scope. Custody.cfg is the one-step retire path, CustodyFK.cfg the
-#      detach path. Both assume hypotheses H_C1 and H_C2 (guards the shipped code lacks; the spec's header).
-#   2. CustodyLive.cfg checks NoLostRowLive under fairness: a retirement retention stops reaching is taken
-#      back, so the custody exemption NoLostRow grants is never a place rows stay for good.
-#   3. The as-shipped configs are VIOLATED: CustodyFK-asis.cfg keeps claim C1 (NoLostRow) and
-#      Custody-asisC2.cfg claim C2 (DropOnlyCovered) on record. The day one checks clean, either the model
-#      lost the path or the code was fixed and its hypothesis should go; either way somebody has to look.
+#      detach path. They assume hypotheses H_C2 and H_C3 (guards the shipped code lacks; the spec's header).
+#   2. CustodyLive.cfg checks NoLostRowLive under fairness: a retirement retention stops reaching is
+#      released to the operator, so the custody exemption NoLostRow grants is never a place rows stay for good.
+#   3. The as-shipped configs are VIOLATED: Custody-asisC2.cfg keeps claim C2 (DropOnlyCovered) on record and
+#      CustodyFK-asisC3.cfg claim C3 (NoLostRow). The
+#      day it checks clean, either the model lost the path or the code was fixed and its hypothesis should
+#      go; either way somebody has to look. Claim C1 went that way: #1452 closed it, and its record is now the
+#      mutation M1438landed.
 #   4. Retrodiction: formal/mutations/mutate.py puts each historical Tier 1/2 custody defect's mechanism
 #      back and requires the outcome recorded for it (caught, by the invariant that defect broke, with the
 #      unmutated spec clean under the same config). This is the model's discriminate track: a spec that
@@ -1695,7 +1697,9 @@ run_formal() {
     grep -E 'Finished in' "$out/$c.out" | tail -1
     python3 formal/mutations/mutate.py scope "$c.cfg" "$out/$c.out"
   done
-  for c in CustodyFK-asis:NoLostRow Custody-asisC2:DropOnlyCovered; do
+  # config:invariant for every claim still on record (C1 closed by #1452)
+  local asis="Custody-asisC2:DropOnlyCovered CustodyFK-asisC3:NoLostRow"
+  for c in $asis; do
     want=${c#*:}; c=${c%%:*}
     echo ">>> formal: $c.cfg must keep its claim's violation of $want"
     formal/tlc.sh "$f" Custody.tla "$c.cfg" > "$out/$c.out" 2>&1 || true

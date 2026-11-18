@@ -40,10 +40,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SPECS = os.path.join(HERE, '..', 'specs')
 TLC = os.path.join(HERE, '..', 'tlc.sh')
 
-ALL_GROUPS = ['W', 'OD', 'RN', 'CR', 'OC', 'SG', 'T', 'RG', 'PD', 'SB']
+ALL_GROUPS = ['W', 'OD', 'RN', 'CR', 'OC', 'SG', 'T', 'RG', 'PD', 'SB', 'IJ']
 
 
-DEFAULT_HYP = ('H_C1', 'H_C2')
+DEFAULT_HYP = ('H_C2', 'H_C3')
 
 
 def cfg_text(groups, shapes, fk=False, budget=2, hyp=DEFAULT_HYP, check='NoLostRow', live=False):
@@ -126,6 +126,8 @@ G = {
     'G1160': 'AttributesChunk(o) == rel[o].trig \\in {"always", "origin", "none"}  \\* @guard G1160',
     'G511': 'SwapLedger(s, o) == ResetCoverage(s, o)  \\* @guard G511',
     'G893': 'ForgetIdlesJob == TRUE  \\* @guard G893',
+    'G1438armed': 'RecallArmed(o) == JobHolds(rel[o].nsp, rel[o].name)  \\* @guard G1438',
+    'G1438landed': 'RecallReleasesLanded == TRUE  \\* @guard G1438',
     'G1260': 'ClaimHeld(k, sp) == k \\in claimed  \\* @guard G1260',
     'G822': '    /\\ IF ClaimHeld(k, sp)  \\* @guard G822',
     'G1259r4': 'ArcRecheck(o) == Attached(o, 1)  \\* @guard G1259r4',
@@ -166,6 +168,8 @@ M = {
     'G822': e('G822', '    /\\ IF FALSE'),
     'G1260': e('G1260', 'ClaimHeld(k, sp) == k \\in claimed /\\ sp = "plain"'),
     'G893': e('G893', 'ForgetIdlesJob == FALSE'),
+    'G1438armed': e('G1438armed', 'RecallArmed(o) == FALSE'),
+    'G1438landed': e('G1438landed', 'RecallReleasesLanded == FALSE'),
     'G977': e('G977', 'Recorded(c, z) == [w |-> c + z, off |-> FALSE, rz |-> z]'),
     'G1336b8': e('G1336b8', 'ChunkHi(l, z) == ParseIn(led[l].hi, z)'),
     'G1336b8r': e('G1336b8r', 'OffsetlessLive(s, o) == FALSE'),
@@ -244,9 +248,23 @@ MUTATIONS = {
     'M705': dict(rcs=['B11-705'], inv='NoLostRow', guards=['G705'],
                  cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, budget=1),
                  note='a partition pending an operator\'s concurrent detach counts as attached'),
+    # since #1438 the recall leaves an armed detach alone, so the job is idle under a launched run only when
+    # someone else idled it: the operator, by hand ("IJ")
     'M724': dict(rcs=['#724'], inv='NoLostRow', guards=['G724'],
-                 cfg=dict(groups=['T'], shapes=FRESH, fk=True, budget=1),
+                 cfg=dict(groups=['T', 'IJ'], shapes=FRESH, fk=True, budget=2),
                  note='the recall clears the mark while a launched detach run is in flight'),
+    # #1438 (claim C1, docs/formal/record.md): the landed detach attached back while a launched run still
+    # carries it; this mutation replaces CustodyFK-asis.cfg, which kept C1's counterexample on record
+    'M1438landed': dict(rcs=['C1-1438'], inv='NoLostRow', guards=['G1438landed'], extra=True,
+                        cfg=dict(groups=['T'], shapes=FRESH, fk=True, budget=1),
+                        note='the recall attaches back a partition its own landed detach took out; a run pg_cron '
+                             'launched before the idle takes it out again with no retirement vouching for it'),
+    # not a historical mechanism: #1451's misreading (an armed job read as idle) put in by hand, to show the
+    # model sees that consequence although it cannot produce the misreading itself (known gap K9)
+    'M1438armed': dict(rcs=['#1451'], inv='NoLostRow', guards=['G1438armed'], extra=True,
+                       cfg=dict(groups=['T'], shapes=FRESH, fk=True, budget=1),
+                       note='the recall reads an armed detach as idle and clears its mark; pg_cron\'s next run '
+                            'detaches the partition with no retirement vouching for it'),
     'M727': dict(rcs=['#727'], inv='NoWedge', guards=['G727'],
                  cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, budget=1),
                  note='every step resolves a partition in the parent\'s schema'),
@@ -306,10 +324,10 @@ MUTATIONS = {
     'M1030b3': dict(rcs=['B9-1030b3'], inv='DropOnlyCovered', guards=['G1030b3'],
                     cfg=dict(groups=['OC', 'T'], shapes=FRESH, budget=1),
                     note='the operator script records covered_hi with no contract check'),
-    # as shipped, without H_C2: its path is the tracked rename that makes the script's chunk an orphan, which
-    # hypothesis H_C2 (claim C2) spares
+    # as shipped for C2, without H_C2: its path is the tracked rename that makes the script's chunk an orphan,
+    # which hypothesis H_C2 (claim C2) spares
     'M1054b2': dict(rcs=['B9-1054b2'], inv='NoWedge', guards=['G1054b2'],
-                    cfg=dict(groups=['OC', 'OD', 'RN', 'SG', 'T'], shapes=FRESH, budget=2, hyp=('H_C1',)),
+                    cfg=dict(groups=['OC', 'OD', 'RN', 'SG', 'T'], shapes=FRESH, budget=2, hyp=('H_C3',)),
                     note='the operator script writes a session-rendered watermark as a ledger lo'),
     'M1141b1': dict(rcs=['B10-1141b1'], inv='ArchiveNoClobber', guards=['G1141b1'],
                     cfg=dict(groups=['OD', 'RN', 'T'], shapes=['ogone'], budget=1),
@@ -431,9 +449,10 @@ WITNESSES = [('WitTwoChunks', 'Custody.cfg', PGPM_ONLY), ('WitArchivedDrop', 'Cu
 
 # What each must-be-clean config checks, and a floor under how much of the world it explores. A clean result is
 # evidence only about what was checked: a config cut to TypeOK, or to EnvBudget 0, still says "No error has been
-# found". The floors sit about 5% under the counts (5,250,812 / 12,204,879 / 5,064,825 distinct states; the last two
-# grew with #1424's release, which also put renames back into CustodyLive.cfg) so a change to the model that shrinks
-# the explored world has to lower them in the same commit, on purpose.
+# found". The floors sit about 4 to 5% under the counts (5,250,812 / 12,230,621 / 5,006,487 distinct states, all
+# three #1457's: the recall as #1452 ships it, plus the hand idle "IJ" in CustodyFK.cfg; the last one fell from
+# 5,064,825 with the re-attach gone) so a change to the model that shrinks the explored world has to lower them in
+# the same commit, on purpose.
 SCOPE = {
     'Custody.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
                     5_000_000),

@@ -12,12 +12,12 @@ session's actions break an invariant pgpm promises? The program behind it is
 | Path | What it is |
 | --- | --- |
 | `specs/Base.tla` | The shared world: relations with an identity separate from their name, rows, attachment states, session rendering of stored bounds, the non-transactional object store, and the environment's hand actions. Abstractions A1 to A9. |
-| `specs/Custody.tla` | The archive-then-retain chain: the write block, the archive step, the ledger, the object store's key claims, `retire()` on both paths, the `pgpm_detach` dispatch, the recall, `_detach_reap`, and `scripts/archive_partition_whole.sql`. Abstractions C1 to C9, hypotheses H_C1 and H_C2, known gaps K1 to K8. |
+| `specs/Custody.tla` | The archive-then-retain chain: the write block, the archive step, the ledger, the object store's key claims, `retire()` on both paths, the `pgpm_detach` dispatch, the recall, `_detach_reap`, and `scripts/archive_partition_whole.sql`. Abstractions C1 to C9, hypotheses H_C2 and H_C3, known gaps K1 to K9. |
 | `specs/Custody.cfg` | The one-step retire path. Must check clean. |
 | `specs/CustodyFK.cfg` | The detach path (a foreign key references the parent). Must check clean. |
-| `specs/CustodyLive.cfg` | `NoLostRowLive` under fairness, on the detach path: a retirement retention stops reaching is taken back. Must check clean. |
-| `specs/CustodyFK-asis.cfg` | The detach path without hypothesis H_C1. Must be **violated** (NoLostRow): it keeps claim C1 on record. |
+| `specs/CustodyLive.cfg` | `NoLostRowLive` under fairness, on the detach path: a retirement retention stops reaching is released to the operator. Must check clean. |
 | `specs/Custody-asisC2.cfg` | The one-step path without hypothesis H_C2. Must be **violated** (DropOnlyCovered): it keeps claim C2 on record. |
+| `specs/CustodyFK-asisC3.cfg` | The detach path without hypothesis H_C3. Must be **violated** (NoLostRow): it keeps claim C3 on record. |
 | `mutations/mutate.py` | Retrodiction: puts each historical Tier 1/2 custody defect's mechanism back and requires TLC to catch it. |
 | `tlc.sh` | Runs TLC from a pinned jar (by sha256) on a pinned JRE image (by digest). |
 | `../scripts/formal/trace_diff.py` | Compacts a TLC counterexample to the actions taken and what each one changed. |
@@ -72,11 +72,12 @@ The spec headers list every abstraction, and a missing one would be a defect in 
 
 A counterexample from the unmutated spec that reads as a real defect becomes a **claim**. Claims are listed
 in `docs/formal/record.md` and reproduced against PostgreSQL in Phase 2, never by the author of the spec. While a
-claim stands, the default configs assume the guard that would close it (`Hypotheses = {"H_C1", "H_C2"}`), so the
+claim stands, the default configs assume the guard that would close it (`Hypotheses = {"H_C2", "H_C3"}`), so the
 rest of the design is still checked. Each claim has an as-shipped config that leaves its hypothesis out, and the
-track requires it to keep failing.
+track requires it to keep failing. When the code closes a claim, its hypothesis goes and its counterexample
+becomes a mutation: claim C1 (#1438) was closed by #1452, and `M1438landed` now keeps it on record.
 
-The spec header also lists **known gaps** (K1 to K8): places where the independent fidelity read found the spec
+The spec header also lists **known gaps** (K1 to K9): places where the independent fidelity read found the spec
 narrower than the contracts, not yet closed. A clean check says nothing about them.
 
 ## Retrodiction: the model's discriminate track

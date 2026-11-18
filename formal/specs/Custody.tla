@@ -44,7 +44,11 @@
 (*     relation; pg_cron runs it as three steps: the run starts and        *)
 (*     resolves the name, the first transaction commits (pending), the     *)
 (*     second finalizes. Another parent's retirement is reduced to one     *)
-(*     mark (otherMark) on a paused parent that can never progress.        *)
+(*     mark (otherMark) on a paused parent that can never progress. A run *)
+(*     launched with a command is not yet in the parent's lock queue: an   *)
+(*     operator's ATTACH can land before it (claim C3, hypothesis H_C3).   *)
+(*     A run sent with a command the job no longer holds (pg_cron's cache) *)
+(*     is K9.                                                              *)
 (*  C6 maintain's per-table steps are separate actions in any order; the   *)
 (*     order inside one tick is not relied on by any contract modelled.    *)
 (*  C7 One retire() is in flight at a time; it is two steps (resolve, then *)
@@ -74,13 +78,9 @@ CONSTANTS
 (* defect is a claim for Phase 2, recorded in docs/formal/record.md. While *)
 (* it stands, a config may assume the guard that would close it, so the    *)
 (* rest of the design is still checked; the as-shipped config keeps the    *)
-(* counterexample.                                                          *)
-(*  H_C1  _retain_recall's re-attach branch waits, as its attached branch   *)
-(*        does, until no launched run of the pgpm_detach command is in      *)
-(*        flight. As shipped it idles the job, attaches and clears the mark *)
-(*        in one transaction, and a run pg_cron launched before the idle    *)
-(*        (queued behind the ATTACH's lock on the parent) detaches the      *)
-(*        partition again with nothing vouching for it.                     *)
+(* counterexample. H_C1 (claim C1, the recall's re-attach racing a         *)
+(* launched detach run) is retired: #1452 removed the re-attach, and the   *)
+(* recall now never takes a dispatched detach back (G1438).                *)
 (*  H_C2  The archive step's orphan rule spares a chunk whose child_oid is  *)
 (*        a tracked partition's, whatever name the chunk carries. As        *)
 (*        shipped it discards by name, so a tracked rename (the old guide's *)
@@ -89,6 +89,12 @@ CONSTANTS
 (*        the rest under the new name, the discard leaves a gap below a     *)
 (*        max(hi) that still reads as fully covered, and retire drops rows  *)
 (*        no live chunk vouches for (their object survives, unrecorded).    *)
+(*  H_C3  An operator's ATTACH waits behind a launched detach run that has  *)
+(*        not resolved its name. As shipped nothing makes it: the release   *)
+(*        of a landed retirement idles the job and spells the ATTACH, and a *)
+(*        run pg_cron launched before the idle, its worker not yet queued   *)
+(*        on the parent's lock, detaches the table again once the operator  *)
+(*        has put it back, with nothing recording it.                       *)
 (*                                                                         *)
 (* KNOWN GAPS. The independent fidelity read (docs/formal/record.md) found  *)
 (* these places where the spec is narrower than the contracts. Each one     *)
@@ -104,16 +110,25 @@ CONSTANTS
 (*  K4 One retire() at a time (C7), where the contract allows several with  *)
 (*     a per-partition claim; FKIn is a constant, so a foreign key dropped  *)
 (*     mid-retirement is unreachable.                                       *)
-(*  K5 Absent operator actions: schedule()/unschedule(), set_archive_fn(    *)
-(*     null), hand edits of the ledger and pgpm.part, an operator FINALIZE  *)
-(*     of an abandoned detach, UPDATE, and writes straight into a partition.*)
+(*  K5 Absent operator actions: unschedule(), set_archive_fn(null), hand    *)
+(*     edits of the ledger and pgpm.part, an operator FINALIZE of an        *)
+(*     abandoned detach, UPDATE, and writes straight into a partition. The  *)
+(*     job's return to idle by hand (alter_job, or schedule() re-run) is    *)
+(*     modelled, as group "IJ" (OpIdleJob).                                 *)
 (*  K6 ResolveByRecord covers the DROP and the job's DETACH only, not the   *)
-(*     recall's re-attach or the reap's FINALIZE; no invariant says the     *)
-(*     reap never finalizes a live detach (why M453 is a miss).             *)
+(*     reap's FINALIZE; no invariant says the reap never finalizes a live   *)
+(*     detach (why M453 is a miss).                                         *)
 (*  K7 Regrain starts only on an unretired partition (C8 leaves it out).    *)
 (*  K8 At EnvBudget 2 with both slots full, the documented substitute race  *)
 (*     needs about four environment steps: reachable only from the ogone    *)
 (*     and oret shapes.                                                     *)
+(*  K9 The recall reads the job exactly: whether cron.job holds the detach *)
+(*     is never misread, and a launched run is visible to its in-flight    *)
+(*     check (G724) from launch. pg_cron's command cache (a run launched   *)
+(*     after an uncommitted or unrefreshed idle still carries the detach)  *)
+(*     and a caller that cannot read the job (pg_cron shows it only to its *)
+(*     owner) are not modelled. Both are how #1451 clears a mark under an  *)
+(*     armed detach, so a clean check says nothing about it.               *)
 (*                                                                         *)
 (***************************************************************************)
 
@@ -705,7 +720,8 @@ JobLaunch ==
 \* retirement, the operator's. Two landings have no such cover: a run whose
 \* command no live retirement owned when it launched (#893), and a run that
 \* lands on the very relation it was dispatched for after pgpm took that
-\* retirement back (claim C1).
+\* retirement back (claim C1, closed by #1452: the recall no longer takes a
+\* dispatched detach back, G1438).
 JobPhase1 ==
     /\ jobRun # NoRun /\ jobOid = 0
     /\ LET x == Resolve(jobRun.n, jobRun.nm) IN
@@ -762,6 +778,13 @@ DetachReap(x) ==
 (* by set_retain or the next tick's retain(); reference.md `retire`, "A    *)
 (* retirement belongs to the retention policy that started it").           *)
 
+\* #1438: a detach the job still holds is left to land, whatever a run's timing:
+\* "armed", read as the shipped code reads it, the job's command naming the partition
+RecallArmed(o) == JobHolds(rel[o].nsp, rel[o].name)  \* @guard G1438
+\* #1438: pgpm's own landed detach is released to the operator with its rows, never
+\* attached back (a launched run may still carry the detach and take it out again)
+RecallReleasesLanded == TRUE  \* @guard G1438
+
 Recall(s, z) ==
     /\ upgraded /\ parentEx /\ part[s].pr /\ part[s].ret /\ ~Eligible(s, z)
     /\ LET o == Resolve(RecallNsp(s), part[s].name) IN
@@ -771,29 +794,27 @@ Recall(s, z) ==
           /\ opOwned' = opOwned \cup {RecOid(s)}
           /\ IdleIfHolds(RecallNsp(s), part[s].name)
           /\ UNCHANGED rel
-       \/ /\ o # 0 /\ Attached(o, 1)
-          \* the job back to idle; the mark is cleared only once no detach of it is running (#724)
-          /\ IdleIfHolds(rel[o].nsp, rel[o].name)
+       \* still attached and armed: no step, the detach lands (#1438; a foreign key or
+       \* a DEFAULT partition that refuses it is logged, not modelled). Not armed: the
+       \* mark is cleared once no detach of it is running (#724)
+       \/ /\ o # 0 /\ Attached(o, 1) /\ ~RecallArmed(o)
           /\ IF jobRun # [n |-> rel[o].nsp, nm |-> rel[o].name] /\ o \notin liveDet  \* @guard G724
              THEN part' = [part EXCEPT ![s].ret = FALSE, ![s].rOid = 0, ![s].disp = 0]
              ELSE UNCHANGED part
-          /\ UNCHANGED <<rel, opOwned>>
-       \* H_C1, as the attached branch does it: with a run of the command in
-       \* flight, idle the job and come back; attach once no run is in flight
-       \* (a wait that only blocks would leave the armed job relaunching for ever)
-       \/ /\ "H_C1" \in Hypotheses
-          /\ o # 0 /\ rel[o].ex /\ rel[o].par = 0 /\ PgpmHolds(s, o)
-          /\ jobRun = [n |-> rel[o].nsp, nm |-> rel[o].name]
-          /\ IdleIfHolds(rel[o].nsp, rel[o].name)
-          /\ UNCHANGED <<rel, part, opOwned>>
+          /\ UNCHANGED <<rel, opOwned, job>>
+       \* pgpm's own detach landed: the job back to idle, after the fact, and the table
+       \* released to the operator with its rows (retain_disown, and fail_retain_reattach
+       \* counted), never attached back by pgpm
        \/ /\ o # 0 /\ rel[o].ex /\ rel[o].par = 0 /\ PgpmHolds(s, o)
-          /\ ("H_C1" \in Hypotheses => jobRun # [n |-> rel[o].nsp, nm |-> rel[o].name])
-          \* already detached by that detach: attach it back on its own bounds (retain_reattach)
-          /\ ~\E q \in Oids : rel[q].ex /\ rel[q].par = 1 /\ rel[q].slot = s
-          /\ rel' = [rel EXCEPT ![o].par = 1, ![o].slot = s]
           /\ part' = [part EXCEPT ![s].ret = FALSE, ![s].rOid = 0, ![s].disp = 0]
           /\ IdleIfHolds(rel[o].nsp, rel[o].name)
-          /\ UNCHANGED opOwned
+          /\ IF RecallReleasesLanded
+             THEN /\ opOwned' = opOwned \cup {o}
+                  /\ UNCHANGED rel
+             \* as before #1438: attached back on its own bounds (retain_reattach)
+             ELSE /\ ~\E q \in Oids : rel[q].ex /\ rel[q].par = 1 /\ rel[q].slot = s
+                  /\ rel' = [rel EXCEPT ![o].par = 1, ![o].slot = s]
+                  /\ UNCHANGED opOwned
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft>>
     /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
@@ -850,6 +871,18 @@ SetArchiveFn ==
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
     /\ UNCHANGED <<part, led, obj, claimed, horizon, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED ghostVars
+
+-----------------------------------------------------------------------------
+(* The job returned to idle by hand ("IJ"): fail_retain_crossing's way out *)
+(* (cron.alter_job to select 1), or pgpm.schedule() re-run, which upserts  *)
+(* the job's command. A run already launched keeps its command (C5).       *)
+
+OpIdleJob ==
+    /\ Env("IJ") /\ cronOK /\ job # NoJob /\ job' = NoJob
+    /\ Spend
+    /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
+    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -1039,7 +1072,9 @@ EnvNext ==
     \/ Idle /\ \E o \in Oids : OpDetach(o, Custody(o)) /\ KeepCust
     \/ \E o \in Oids : OpDetachConc(o, Custody(o)) /\ KeepCust
     \/ Idle /\ \E o \in Oids : o # jobOid /\ OpFinalize(o) /\ KeepCust
-    \/ Idle /\ \E o \in Oids, s \in Slots : OpAttach(o, s) /\ KeepCust
+    \* H_C3 (claim C3): behind a launched run that has not resolved its name
+    \/ Idle /\ ("H_C3" \notin Hypotheses \/ jobRun = NoRun \/ jobOid # 0)
+       /\ \E o \in Oids, s \in Slots : OpAttach(o, s) /\ KeepCust
     \/ Idle /\ \E o \in Oids, nm \in Names : OpRename(o, nm) /\ KeepCust
     \/ Idle /\ \E s \in Slots, nm \in Names : OpRenameTracked(s, nm)
     \/ \E n \in Nsps, nm \in Names, r \in Rows \cup {"none"} : OpCreate(n, nm, r) /\ KeepCust
@@ -1048,6 +1083,7 @@ EnvNext ==
     \/ Idle /\ \E n \in Nsps : ParentSetSchema(n) /\ KeepCust
     \/ \E o \in Oids : CrashDetacher(o) /\ KeepCust
     \/ Age \/ Loosen
+    \/ OpIdleJob
     \/ \E z \in SessZ : ScriptArchive(z)
     \/ \E lo \in Pos, hi \in 1..4 : DirectStrategy(lo, hi)
     \/ SetArchiveFn
@@ -1115,7 +1151,8 @@ ResolveByRecord == ~wrongTgt
 \* operator detached is left alone). A row retention does not reach is
 \* visible through its parent, or in a relation the operator owns, or in
 \* custody: a partition pgpm's own vouched retirement holds, which the
-\* recall attaches back (NoLostRowLive says it does).
+\* recall releases to the operator once retention stops reaching it
+\* (NoLostRowLive says it does).
 Unaged(r) == repoch[r] = 2 \/ rpos[r] >= horizon
 Stranded(r) ==
     /\ rst[r] = "live" /\ Unaged(r)
@@ -1123,9 +1160,10 @@ Stranded(r) ==
 NoLostRow ==
     /\ lostDrop = {}
     /\ \A r \in Rows : Stranded(r) => Custody(rloc[r])
-\* The recall attaches back into the parent, so the promise lasts while the parent
-\* does: a dropped parent's leftover tables are the operator's (forget_missing's
-\* orphan_tables), their rows still in them.
+\* The recall releases a landed retirement to the operator (#1438) rather than
+\* attaching it back, so a row leaves Stranded by entering opOwned. The promise
+\* lasts while the parent does: a dropped parent's leftover tables are the
+\* operator's too (forget_missing's orphan_tables), their rows still in them.
 NoLostRowLive == \A r \in Rows : [](Stranded(r) /\ parentEx => <>(~Stranded(r) \/ ~parentEx))
 
 \* NoWedge, as safety (pack 4.3 states it as liveness; each conjunct is a
