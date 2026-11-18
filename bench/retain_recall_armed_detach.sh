@@ -6,11 +6,13 @@
 # loosening retention (set_retain, or an id frontier moving back) after a referenced partition's concurrent detach
 # was dispatched left its rows out of the parent with nothing in pgpm saying so, first because nothing looked at
 # the armed command again (#724), then because #724's recall idled the job and re-attached the partition in a
-# transaction a pg_cron run already carrying the detach could outlast (#1438). The file is the acceptance test; this
+# transaction a pg_cron run already carrying the detach could outlast (#1438), then because the recall cleared a
+# dispatched mark on a reading of the job as idle that pg_cron's command cache or row security made wrong (#1451).
+# The file is the acceptance test; this
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_detached_unreferenced.sh.
 #
-# ELEVEN mutations are required to fail against it (bench/mutations/mutate.py):
+# THIRTY-FIVE mutations are required to fail against it (bench/mutations/mutate.py):
 #   retain_recall_never             -- nothing settles a retirement retention no longer reaches, the pre-#724
 #                                      shape. Parts A, B, C and F.
 #   retain_recall_ignores_horizon   -- every retirement is settled, reached or not, so a reached partition's
@@ -32,6 +34,47 @@
 #                                      as a detach that can never land. Part J.
 #   untransmute_keeps_detach_check  -- untransmute hands back a released, re-attached monolith still carrying the
 #                                      CHECK the concurrent detach left, refusing rows past its old bound. Part H.
+#   recall_idle_clears_at_once      -- #1451 path 1: a dispatched mark cleared on the tick that first reads the job
+#                                      idle, which a run launched from pg_cron's cache outlasts. Parts E, K, M, N.
+#   recall_idle_clock_skipped       -- the minute dropped: the tick after the clock starts clears at once. Part E.
+#   recall_idle_clock_starts_at_stamp -- two ticks where three are needed: the first reading starts the clock in the
+#                                      idle's own transaction. Parts E and K.
+#   recall_idle_clock_in_stamping_xact -- a second tick in the idle's own transaction starts the clock (PR #1459
+#                                      round 1, P1-02). Part N.
+#   recall_idle_clock_survives_dispatch -- a re-dispatch keeps an earlier dispatch's expired clock. Part M.
+#   recall_dispatch_role_unrecorded -- the dispatch records no role, so the role that dispatched its own job's
+#                                      detach is refused. Part Q.
+#   recall_unseen_job_read_idle     -- #1451 path 2: a role that cannot read the job that holds the detach reads
+#                                      it idle. Parts L, O and P.
+#   recall_unreadable_job_read_idle -- the same for a role whose read of cron.job raises. Part L.
+#   recall_reads_another_roles_job  -- a non-superuser reads its own pgpm_detach job as the administrator's, which
+#                                      holds the detach (PR #1459 round 1, V-01). Part O.
+#   recall_unrecorded_mark_read     -- a non-superuser reads a mark older than this release as one nothing holds
+#                                      (PR #1459 round 1, V-02). Part P.
+#   retiring_by_claimed_on_retry    -- retire()'s retry records its role on an older mark, which then reads as this
+#                                      release's own, never dispatched. Part P.
+#   recall_refused_dispatch_kept    -- a mark this release made whose dispatch was refused is kept for good by a
+#                                      non-superuser, though nothing holds it. Part R.
+#   retiring_by_kept_on_other_roles_dispatch -- a superuser's re-dispatch keeps the owner's name, so the owner reads
+#                                      its own idle job while the administrator's holds the detach. Part S.
+#   recall_role_reading_null_unsafe -- the role test is a plain equality, null on a record naming no role, which
+#                                      skips the refusal and clears the mark silently. Part S.
+#   recall_unreadable_cron_keeps_refused_mark -- a role that cannot read schema cron keeps, counted, a mark whose
+#                                      dispatch was refused, which nothing holds (PR #1459 round 2, P1-01). Part T.
+#   recall_release_unread_job       -- a tick that cannot read the job holding a landed detach releases it into a job
+#                                      still armed (PR #1459 round 2, V-01). Part U.
+#   recall_unrecorded_mark_cleared_at_once -- the idle wait skips a mark older than this release, so a superuser's
+#                                      tick clears it at once on an idle its own transaction wrote (PR #1459
+#                                      round 3, V-01). Part V.
+#   recall_release_unrecorded_unread -- the release's reading test is asked only after a mark's record is found, so
+#                                      the owner's tick releases an older mark's landed detach (round 4, V-01). Part W.
+#   upgrade_pass_disowns_unread_mark -- the owner's install pass disowns that older mark. Part W.
+#   retire_disowns_unread_mark      -- the owner's retire() disowns it, pending or detached. Part X.
+#   reap_disowns_unread_mark        -- the owner's reap disowns it as it finishes the pending detach. Part X.
+#   unrecorded_mark_unread_by_superuser -- a superuser cannot release it either. Part X.
+#   recall_future_stamp_raises      -- a stamp past the xid counter fails every tick's retain() (round 4, P1-01).
+#                                      Part Y.
+#   recall_older_mark_waits_without_cron -- an older mark waits out the minute with no pg_cron (round 4, P1-02). Part Z.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree

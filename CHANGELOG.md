@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+- **A retirement whose detach pgpm dispatched is no longer cleared on a reading of the job that cannot be trusted**
+  (#1451). When retention stopped reaching a still-attached partition whose `pgpm_detach` job no longer held its
+  detach, the recall cleared the retirement's mark at once. Two readings of "no longer held" were wrong, and the
+  job then ran the detach after the mark was gone: the rows out of the parent, `pgpm.part` saying attached with no
+  mark, `status()` clean. First, pg_cron starts a run with the command it has cached, and an idle reaches that cache
+  only after it commits, so a `pgpm.schedule()` re-run (which idles the job) in one transaction with `set_retain`
+  and `retain()` left a run carrying the detach that landed once it committed. Second, pg_cron shows a job only to
+  its owner and superusers, so a tick run as the table's owner, with the jobs scheduled by an administrator, read
+  no job at all as an idle one (or, having run `pgpm.schedule()` itself, read its own idle job as the one that
+  held the detach). Now a dispatched retirement whose job reads idle is cleared only after a tick in a later
+  transaction than the one that first read the idle has started a one-minute clock (new columns
+  `pgpm.part.recall_idle_xact` and `recall_idle_at`) with still no run of the detach in sight; a run that lands
+  meanwhile finds the mark and the table is released and counted, as #1438's recall does. And with pg_cron, only a
+  superuser's tick or one by the one non-superuser role whose job holds the detach (new column
+  `pgpm.part.retiring_by`) reads the job: any other keeps the mark and logs `fail_retain_recall`, counted
+  in `status().retain_drop_failures`, naming the role to run maintenance as, as does a non-superuser's tick on a
+  mark older than this release (an upgrade run by a role that could not read the job) or one that more than one
+  role dispatched. A mark older than this release waits out the idle like a dispatched one, under a superuser's
+  tick too, since an older pgpm may have dispatched it without a record. A mark this release made whose dispatch
+  was refused is still cleared at once, even by a role
+  that cannot read `cron.job` at all. The same rule holds at the release of a landed detach: a tick that cannot
+  read the job holding it could not return that job to idle, so it keeps the mark, the table out of the parent,
+  counted, rather than hand over a table the job would take out again after its `ATTACH`; and the release's check
+  now says to run it as a superuser. tests/194 parts E
+  and G walk the wait, K and L are #1451's two paths, M shows a re-dispatch resets the clock, N that the clock
+  starts only after the idle's transaction, O and P the other role's job and the older mark, Q that the role that
+  dispatched reads its own job, R the refused dispatch, S a superuser's re-dispatch of the owner's detach, T a
+  refused dispatch by a role with no access to `cron` at all, U the release kept by the owner's tick, and V a
+  superuser's tick waiting out the idle on an older mark. The same holds wherever a mark with no record of
+  pgpm's dispatch is disowned: with pg_cron, a mark older than this release is released only by a superuser, who
+  can idle every role's job, so `retire()` (pending or detached, `fail_retain_drop`, counted), the recall
+  (`fail_retain_recall`), `_detach_reap` and the install's pass keep it for any other role, rather than hand over a
+  table another role's job would take out again after its `ATTACH`. Without pg_cron an older mark is cleared at
+  once, and a stamp from a younger cluster's restore is read as no live transaction. Parts W to Z.
+
 - **A detach pgpm has handed to pg_cron is never taken back; once it lands, the table is released with its rows**
   (#1438). When retention stopped reaching a partition whose detach was dispatched, the recall (#724) returned the
   `pgpm_detach` job to idle and, if the detach had already landed, re-attached the partition, in one transaction.
