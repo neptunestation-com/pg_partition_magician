@@ -545,7 +545,8 @@ create table if not exists pgpm.part (
   -- WHEN THE RECALL'S CLOCK STARTED ON THIS DISPATCHED RETIREMENT'S IDLE JOB (#1451), and the transaction that first
   -- read the job idle (recall_idle_xact). pg_cron launches a run with the command its cache holds, and the cache
   -- drops an idled command only after the idle commits, so a "not armed" reading of a detach pgpm dispatched does
-  -- not yet mean no run will carry it. The first tick that reads it idle records its transaction; a tick for which
+  -- not yet mean no run will carry it (nor of a mark older than this release, which an older pgpm may have dispatched
+  -- unrecorded). The first tick that reads it idle records its transaction; a tick for which
   -- that transaction is no longer in progress (so the idle it read has committed) starts the clock; the mark is
   -- cleared a minute after that with still no run of the detach to be seen. Null otherwise, and cleared with
   -- retiring_at and by every dispatch.
@@ -5007,7 +5008,8 @@ $$;
 --   fail_retain_recall, counted, naming the role to run as; so does a non-superuser on a mark older than
 --   this release, which an older pgpm may have dispatched. A mark this release made and never dispatched is
 --   held by no job and cleared at once, as before. And an idle the session can read
---   may be younger than pg_cron's cache, which can still launch the detach pgpm dispatched: the first tick
+--   may be younger than pg_cron's cache, which can still launch the detach pgpm dispatched (or, on a mark older
+--   than this release, may have, under a superuser's tick too): the first tick
 --   that reads it idle records its transaction (recall_idle_xact), a tick for which that transaction has
 --   ended starts the clock (recall_idle_at), and the mark is cleared a minute on with still no run of the
 --   detach in sight.
@@ -5169,10 +5171,11 @@ begin
         v_n := v_n + 1;
         continue;
       end if;
-      if r.detach_dispatched_oid is not null then
+      if r.detach_dispatched_oid is not null or r.retiring_by is null then
         -- read idle: pg_cron may still launch the detach its cache held. The first tick records its transaction; a
         -- tick for which that transaction is no longer in progress (the idle it read has committed) starts the
-        -- clock; the mark is cleared a minute on
+        -- clock; the mark is cleared a minute on. A mark older than this release waits too, its dispatch unrecorded
+        -- (an upgrade by a role that could not read the job): only this release's undispatched mark is held by no job
         if r.recall_idle_xact is null then
           update pgpm.part set recall_idle_xact = pg_current_xact_id()
            where parent_table = p_parent and child_name = r.child_name;

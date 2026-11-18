@@ -73,6 +73,10 @@
 --   PART U: the administrator's job lands the detach; the owner's tick, which cannot read that job and so could not
 --           idle it, keeps the mark and the table out of the parent, counted, rather than release it into a job still
 --           armed; a superuser's tick then releases it and idles the job (PR #1459 round 2, V-01).
+--   PART V: a mark with no record of pgpm's dispatch (an upgrade from v0.6.0 run by a role that could not read the
+--           job) waits out the idle under a superuser's tick too: the recall in the idle's own transaction only
+--           stamps it, and the run that lands after the commit is logged out of the parent (PR #1459 round 3,
+--           V-01).
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
@@ -88,7 +92,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(188);
+select plan(199);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -928,5 +932,44 @@ select ok('retain_disown' = any(pgpm_test194.actions('public.rr194u', '0')) and 
   'U: and releases the table, logged out of the parent');
 select is(pgpm_test194.ids(format('public.%I', :'u_doomed')), array(select generate_series(231, 244)::bigint), 'U: with ids 231 to 244');
 alter table cron.job disable row level security;
+
+-- ====== PART V: a superuser's tick waits out the idle on a mark with no record of pgpm's dispatch ======
+create table public.rr194v (id bigint primary key, payload text);
+insert into public.rr194v select g, 'v' from generate_series(251, 257) g;
+call pgpm.transmute('public.rr194v', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194v', '60000');
+insert into public.rr194v values (50005, 'frontier');
+create table public.rr194v_ref (id bigint primary key, p_id bigint references public.rr194v(id));
+insert into public.rr194v_ref values (1, 50005);
+select child_name as v_doomed, hi as v_hi from pgpm.part where parent_table = 'public.rr194v'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('public.rr194v', :'v_doomed'), 'fixture: (V) the administrator''s tick dispatches the detach');
+select pgpm_test194.armed() as v_cmd \gset
+-- what an upgrade from v0.6.0 leaves when the role running it cannot read the job: the mark with no record
+update pgpm.part set detach_dispatched_oid = null, retiring_by = null
+ where parent_table = 'public.rr194v'::regclass and lo = '0';
+select ok(pgpm_test194.mark('public.rr194v', '0') = 'retiring_at set, dispatched null'
+          and (select retiring_by from pgpm.part where parent_table = 'public.rr194v'::regclass and lo = '0') is null,
+  'LIVENESS: (V) the mark records no dispatch and no role');
+begin;
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';   -- pgpm.schedule() re-run: the job idled
+select pgpm.set_retain('public.rr194v', '45000');
+select ok(not pgpm_test194.reached('public.rr194v', :'v_hi'), 'LIVENESS: (V) retention no longer reaches the partition');
+select is(pgpm_test194.armed(), 'select 1', 'LIVENESS: (V) the superuser''s recall will read the job idle');
+select pgpm.retain('public.rr194v');
+select is(pgpm_test194.mark('public.rr194v', '0'), 'retiring_at set, dispatched null',
+  'V: the superuser''s recall that reads the idle in its own transaction keeps the unrecorded mark');
+select is(pgpm_test194.idle_at('public.rr194v', '0'), 'stamped', 'V: and only stamps it');
+select pgpm_test194.minute_passes('public.rr194v', '0');
+commit;
+call pgpm.maintain('public.rr194v');   -- the tick right after the commit, pg_cron's cache still holding the detach
+select is(pgpm_test194.idle_at('public.rr194v', '0'), 'started', 'V: the tick right after the commit only starts the clock');
+select is(pgpm_test194.mark('public.rr194v', '0'), 'retiring_at set, dispatched null', 'V: and keeps the mark');
+select ok(pgpm_test194.cron_run(:'v_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194v', :'v_doomed'),
+  'LIVENESS: (V) the run that carried the detach lands once the idle has committed');
+call pgpm.maintain('public.rr194v');
+select ok('retain_disown' = any(pgpm_test194.actions('public.rr194v', '0'))
+          and pgpm_test194.mark('public.rr194v', '0') = 'retiring_at null, dispatched null',
+  'V: the landed detach is logged out of the parent (retain_disown), never left behind a cleared mark unlogged');
+select is(pgpm_test194.ids(format('public.%I', :'v_doomed')), array(select generate_series(251, 257)::bigint), 'V: with ids 251 to 257');
 
 select * from finish();

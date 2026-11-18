@@ -12,7 +12,7 @@
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_detached_unreferenced.sh.
 #
-# TWENTY-SEVEN mutations are required to fail against it (bench/mutations/mutate.py):
+# TWENTY-EIGHT mutations are required to fail against it (bench/mutations/mutate.py):
 #   retain_recall_never             -- nothing settles a retirement retention no longer reaches, the pre-#724
 #                                      shape. Parts A, B, C and F.
 #   retain_recall_ignores_horizon   -- every retirement is settled, reached or not, so a reached partition's
@@ -63,6 +63,9 @@
 #                                      dispatch was refused, which nothing holds (PR #1459 round 2, P1-01). Part T.
 #   recall_release_unread_job       -- a tick that cannot read the job holding a landed detach releases it into a job
 #                                      still armed (PR #1459 round 2, V-01). Part U.
+#   recall_unrecorded_mark_cleared_at_once -- the idle wait skips a mark older than this release, so a superuser's
+#                                      tick clears it at once on an idle its own transaction wrote (PR #1459
+#                                      round 3, V-01). Part V.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree

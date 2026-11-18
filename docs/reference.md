@@ -1758,7 +1758,8 @@ can take the partition out after any recall commits, so pgpm lets it land and ha
   than this release, which an older pgpm may have dispatched, and on one that more than one role
   dispatched. Run maintenance as the role it names, or as a superuser, and its tick settles it. A mark this
   release made whose dispatch was refused is held by no job, and any tick clears it at once. Second,
-  for a detach pgpm did hand to pg_cron, the clear waits. pg_cron starts a run with the command it has
+  for a detach pgpm did hand to pg_cron, or may have (a mark older than this release, even under a
+  superuser's tick), the clear waits. pg_cron starts a run with the command it has
   cached, and an idle reaches that cache only after it commits. So the first tick that reads the job idle
   only notes its transaction, a tick in a later transaction starts a one-minute clock, and the mark is
   cleared once the minute has passed with still no run of the detach in sight. A run that lands meanwhile

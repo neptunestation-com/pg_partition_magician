@@ -5859,6 +5859,16 @@ $$;''',
           "    -- with its detach. Kept marked, out of the parent, counted, until a tick that can read the job releases it\n"
           "    if false then\n", 1)],
     ),
+    "recall_unrecorded_mark_cleared_at_once": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1459 round 3 V-01: the idle wait covers only a mark with a record of pgpm's dispatch, so a mark older than "
+        "this release whose dispatch the upgrade could not record (the owner's install pass cannot read the "
+        "administrator's job) is cleared at once by a superuser's tick that reads the job idle, even inside the "
+        "transaction that idled it, and the run pg_cron sent with its cached detach strands the rows. One site, the "
+        "wait's test. tests/194 part V catches it.",
+        [("      if r.detach_dispatched_oid is not null or r.retiring_by is null then\n",
+          "      if r.detach_dispatched_oid is not null then\n", 1)],
+    ),
     "untransmute_keeps_detach_check": (
         "bench/retain_recall_armed_detach.sh",
         "PR #1452 verification round 2 P1-02: untransmute hands back a monolith still carrying the CHECK a concurrent "
