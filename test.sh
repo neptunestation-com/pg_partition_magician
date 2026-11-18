@@ -1666,10 +1666,11 @@ run_lockview() {
 #      A mutation that kills the archive is run too, and the progress witnesses must go unreachable under it.
 #   1. The default configs check CLEAN: the design, as the documented contracts state it, keeps every
 #      invariant over every behaviour in scope. Custody.cfg is the one-step retire path, CustodyFK.cfg the
-#      detach path. Both assume hypothesis H_C2 (a guard the shipped code lacks; the spec's header).
+#      detach path. They assume hypotheses H_C2 and H_C3 (guards the shipped code lacks; the spec's header).
 #   2. CustodyLive.cfg checks NoLostRowLive under fairness: a retirement retention stops reaching is
 #      released to the operator, so the custody exemption NoLostRow grants is never a place rows stay for good.
-#   3. The as-shipped config is VIOLATED: Custody-asisC2.cfg keeps claim C2 (DropOnlyCovered) on record. The
+#   3. The as-shipped configs are VIOLATED: Custody-asisC2.cfg keeps claim C2 (DropOnlyCovered) on record and
+#      CustodyFK-asisC3.cfg claim C3 (NoLostRow). The
 #      day it checks clean, either the model lost the path or the code was fixed and its hypothesis should
 #      go; either way somebody has to look. Claim C1 went that way: #1452 closed it, and its record is now the
 #      mutation M1438landed.
@@ -1696,8 +1697,8 @@ run_formal() {
     grep -E 'Finished in' "$out/$c.out" | tail -1
     python3 formal/mutations/mutate.py scope "$c.cfg" "$out/$c.out"
   done
-  # config:invariant for every claim still on record (one since #1452 closed C1); a list, so the next claim is a word
-  local asis="Custody-asisC2:DropOnlyCovered"
+  # config:invariant for every claim still on record (C1 closed by #1452)
+  local asis="Custody-asisC2:DropOnlyCovered CustodyFK-asisC3:NoLostRow"
   for c in $asis; do
     want=${c#*:}; c=${c%%:*}
     echo ">>> formal: $c.cfg must keep its claim's violation of $want"

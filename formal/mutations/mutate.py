@@ -43,7 +43,7 @@ TLC = os.path.join(HERE, '..', 'tlc.sh')
 ALL_GROUPS = ['W', 'OD', 'RN', 'CR', 'OC', 'SG', 'T', 'RG', 'PD', 'SB', 'IJ']
 
 
-DEFAULT_HYP = ('H_C2',)
+DEFAULT_HYP = ('H_C2', 'H_C3')
 
 
 def cfg_text(groups, shapes, fk=False, budget=2, hyp=DEFAULT_HYP, check='NoLostRow', live=False):
@@ -324,10 +324,10 @@ MUTATIONS = {
     'M1030b3': dict(rcs=['B9-1030b3'], inv='DropOnlyCovered', guards=['G1030b3'],
                     cfg=dict(groups=['OC', 'T'], shapes=FRESH, budget=1),
                     note='the operator script records covered_hi with no contract check'),
-    # as shipped, without H_C2: its path is the tracked rename that makes the script's chunk an orphan, which
-    # hypothesis H_C2 (claim C2) spares
+    # as shipped for C2, without H_C2: its path is the tracked rename that makes the script's chunk an orphan,
+    # which hypothesis H_C2 (claim C2) spares
     'M1054b2': dict(rcs=['B9-1054b2'], inv='NoWedge', guards=['G1054b2'],
-                    cfg=dict(groups=['OC', 'OD', 'RN', 'SG', 'T'], shapes=FRESH, budget=2, hyp=()),
+                    cfg=dict(groups=['OC', 'OD', 'RN', 'SG', 'T'], shapes=FRESH, budget=2, hyp=('H_C3',)),
                     note='the operator script writes a session-rendered watermark as a ledger lo'),
     'M1141b1': dict(rcs=['B10-1141b1'], inv='ArchiveNoClobber', guards=['G1141b1'],
                     cfg=dict(groups=['OD', 'RN', 'T'], shapes=['ogone'], budget=1),

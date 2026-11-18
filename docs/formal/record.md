@@ -112,7 +112,7 @@ by the spec's author). Most were the model being wrong:
 | Fairness artefact, closed | 2 | H_C1 as a pure block; an operator's concurrent detach unable to finish |
 | Documented limitation | 1 | the substitute detach `reference.md` "What retire checks" describes |
 | Question for the maintainer | 1 | Q1, below, decided as #1424 |
-| **Claim** for Phase 2 | 2 | C1 and C2, below |
+| **Claim** for Phase 2 | 3 | C1 and C2, below; C3, found bringing the spec to #1452 (#1457) |
 
 ### Claim C1: the recall's re-attach races a launched detach run
 
@@ -134,17 +134,6 @@ attached back. #1457 brought the spec to that design. H_C1 and `CustodyFK-asis.c
 `M1438landed` puts the re-attach back and keeps C1's counterexample on record. The model still cannot see issue #1451
 reach the same consequence through the recall misreading an armed job as idle (known gap K9).
 
-Bringing the spec to #1452's design produced one new counterexample on `CustodyFK.cfg` (11 states), triaged as an
-**abstraction gap, closed**. pgpm's detach lands and pg_cron launches another run of the still-armed job; retention
-loosens and the recall releases the table and idles the job; the operator runs the ATTACH the release message gives;
-the run launched before all that detaches the table again, and NoLostRow fails. In the model a launched run could wait
-unresolved through any number of later steps. In PostgreSQL a run that has sent its statement is either resolved
-(the table was detached, so it errors) or waiting for the parent's SHARE UPDATE EXCLUSIVE, which the ATTACH needs
-too, and the lock queue grants the run first. Abstraction C5 now says so, and the operator's ATTACH waits behind a
-launched, unresolved run. What that leaves out is a run pg_cron sends after the release commits, with a command its
-cache has not yet dropped. That is known gap K9, and #1452's round-4 claims verifier judged the same window
-unreachable in practice without building it.
-
 ### Claim C2: a tracked rename turns recorded chunks into orphans, and retire drops rows nothing vouches for
 
 The archive step's orphan rule discards the coverage "an untracked name holds over a tracked partition's range"
@@ -165,6 +154,25 @@ is tracked.
 C2 appeared as a full counterexample only once DropOnlyCovered was stated as the pack states it (rows in objects
 attributed to the dropped relation's identity), on the fidelity read's advice. Under the looser "rows in some
 object" the same path checked clean.
+
+### Claim C3: an operator's ATTACH of a released retirement races a launched detach run
+
+Filed as #1460.
+
+Found bringing the spec to #1452's design (#1457), on `CustodyFK.cfg`, 11 states. pgpm's detach lands, and pg_cron
+launches another run of the still-armed job. Retention loosens, and the recall releases the table: it idles the job,
+clears the mark and logs the `ATTACH` that puts the table back, after checking the job no longer holds the detach.
+The operator runs that `ATTACH`. The run launched before the idle, whose worker had not yet queued on the parent's
+lock, then detaches the table again. NoLostRow fails: the rows are out of the parent, the table is not pgpm's, and
+nothing records the second detach.
+
+It was first triaged as an abstraction gap and closed by having the `ATTACH` wait behind any launched, unresolved run
+(on the argument that a sent run is either resolved or queued for the parent's SHARE UPDATE EXCLUSIVE ahead of the
+`ATTACH`). Review of #1458 refuted that: launching a run copies the command, it does not put the worker in the lock
+queue, so the lock queue's order says nothing about an `ATTACH` that lands while the worker is still starting. The
+window needs no stale cache (the run read the command before the idle); its width is a worker's start, against an
+operator reading the release. Hypothesis H_C3 assumes the wait; `CustodyFK-asisC3.cfg` drops it and keeps the trace.
+It is the release-path sibling of #1451's stale-cache window.
 
 ### Question Q1, decided: a renamed retirement is released, by oid (#1424)
 

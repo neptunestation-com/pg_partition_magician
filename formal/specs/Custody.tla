@@ -44,12 +44,11 @@
 (*     relation; pg_cron runs it as three steps: the run starts and        *)
 (*     resolves the name, the first transaction commits (pending), the     *)
 (*     second finalizes. Another parent's retirement is reduced to one     *)
-(*     mark (otherMark) on a paused parent that can never progress. An     *)
-(*     operator's ATTACH waits behind a launched run that has not yet      *)
-(*     resolved its name: a sent run is either resolved or waiting for     *)
-(*     the parent's SHARE UPDATE EXCLUSIVE, which the ATTACH needs too,    *)
-(*     and the lock queue grants it first. A run sent with a command the   *)
-(*     job no longer holds (pg_cron's cache) is K9.                        *)
+(*     mark (otherMark) on a paused parent that can never progress. A run *)
+(*     launched with a command is not yet in the parent's lock queue: an   *)
+(*     operator's ATTACH can land before it (claim C3, hypothesis H_C3).   *)
+(*     A run sent with a command the job no longer holds (pg_cron's cache) *)
+(*     is K9.                                                              *)
 (*  C6 maintain's per-table steps are separate actions in any order; the   *)
 (*     order inside one tick is not relied on by any contract modelled.    *)
 (*  C7 One retire() is in flight at a time; it is two steps (resolve, then *)
@@ -90,6 +89,12 @@ CONSTANTS
 (*        the rest under the new name, the discard leaves a gap below a     *)
 (*        max(hi) that still reads as fully covered, and retire drops rows  *)
 (*        no live chunk vouches for (their object survives, unrecorded).    *)
+(*  H_C3  An operator's ATTACH waits behind a launched detach run that has  *)
+(*        not resolved its name. As shipped nothing makes it: the release   *)
+(*        of a landed retirement idles the job and spells the ATTACH, and a *)
+(*        run pg_cron launched before the idle, its worker not yet queued   *)
+(*        on the parent's lock, detaches the table again once the operator  *)
+(*        has put it back, with nothing recording it.                       *)
 (*                                                                         *)
 (* KNOWN GAPS. The independent fidelity read (docs/formal/record.md) found  *)
 (* these places where the spec is narrower than the contracts. Each one     *)
@@ -1067,8 +1072,9 @@ EnvNext ==
     \/ Idle /\ \E o \in Oids : OpDetach(o, Custody(o)) /\ KeepCust
     \/ \E o \in Oids : OpDetachConc(o, Custody(o)) /\ KeepCust
     \/ Idle /\ \E o \in Oids : o # jobOid /\ OpFinalize(o) /\ KeepCust
-    \* C5: behind a launched run that has not resolved its name
-    \/ Idle /\ (jobRun = NoRun \/ jobOid # 0) /\ \E o \in Oids, s \in Slots : OpAttach(o, s) /\ KeepCust
+    \* H_C3 (claim C3): behind a launched run that has not resolved its name
+    \/ Idle /\ ("H_C3" \notin Hypotheses \/ jobRun = NoRun \/ jobOid # 0)
+       /\ \E o \in Oids, s \in Slots : OpAttach(o, s) /\ KeepCust
     \/ Idle /\ \E o \in Oids, nm \in Names : OpRename(o, nm) /\ KeepCust
     \/ Idle /\ \E s \in Slots, nm \in Names : OpRenameTracked(s, nm)
     \/ \E n \in Nsps, nm \in Names, r \in Rows \cup {"none"} : OpCreate(n, nm, r) /\ KeepCust
