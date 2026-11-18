@@ -1696,7 +1696,9 @@ run_formal() {
     grep -E 'Finished in' "$out/$c.out" | tail -1
     python3 formal/mutations/mutate.py scope "$c.cfg" "$out/$c.out"
   done
-  for c in Custody-asisC2:DropOnlyCovered; do
+  # config:invariant for every claim still on record (one since #1452 closed C1); a list, so the next claim is a word
+  local asis="Custody-asisC2:DropOnlyCovered"
+  for c in $asis; do
     want=${c#*:}; c=${c%%:*}
     echo ">>> formal: $c.cfg must keep its claim's violation of $want"
     formal/tlc.sh "$f" Custody.tla "$c.cfg" > "$out/$c.out" 2>&1 || true
