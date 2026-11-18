@@ -952,6 +952,10 @@ Three things follow, and none of them are optional:
   like every failure there, and running the `ATTACH` does not clear it: the `retain_disown` row is the
   lasting record. If a foreign key references the partition's rows, or you have given the table a DEFAULT
   partition, the detach can never land; each tick then logs `fail_retain_crossing`, saying how to unblock it.
+  A retirement whose detach was handed to pg_cron but which pg_cron no longer holds is kept a minute
+  longer before its mark is cleared, since pg_cron may still start the detach it had cached. If maintenance
+  runs as a role that cannot see the `pgpm_detach` job at all, the mark is kept and `fail_retain_recall` is
+  counted until a tick runs as the role that ran `pgpm.schedule()`.
 - **Writes to the *referencing* table are blocked while the detach runs**, once per retirement, for a
   duration set by that table's size. Reads of it, and your managed table entirely, are unaffected. This is
   irreducible: it is PostgreSQL proving the foreign key still holds. An index on the referencing column is

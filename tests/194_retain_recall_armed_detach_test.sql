@@ -23,8 +23,10 @@
 --   PART C: the frontier moving back, with no set_retain at all, is settled by the tick the same way.
 --   PART D: one-directional. A loosening that still reaches the partition changes nothing: the retirement
 --           completes with a DROP.
---   PART E: a mark whose job no longer holds its detach (idled or unscheduled under it) is cleared by the tick,
---           and the partition never leaves the parent: the one state a loosening still saves it from.
+--   PART E: a mark whose job no longer holds its detach (idled or unscheduled under it) is cleared, and the
+--           partition never leaves the parent: the one state a loosening still saves it from. Not at once (#1451):
+--           pg_cron can still launch a detach its cache held after the idle, so the first tick that reads the job
+--           idle stamps the mark, a later one starts the clock, and the mark is cleared only a minute on.
 --   PART F: a run pg_cron had already started when retention loosened, landing after the tick that saw the
 --           loosening, is still recorded: the tick after it releases the table and counts it.
 --   PART G: a dispatched detach a foreign key refuses for good (a reference added once retention stopped
@@ -40,6 +42,18 @@
 --   PART J: a reference check that could not run (a lock timeout behind a second session holding the referencing
 --           table) proves no refusal: logged skip_retain_crossing, uncounted, never fail_retain_crossing, and the
 --           detach lands on pg_cron's next run.
+--   PART K: #1451 path 1. The job idled (a pgpm.schedule() re-run) in the transaction of set_retain and retain(),
+--           while a pg_cron run sent before it still carries the detach. The recall only stamps the mark, and the
+--           run that lands once the transaction commits is released and counted, never stranded unrecorded. The
+--           transaction outlasts the minute, and the tick right after the commit (pg_cron's cache still holding the
+--           detach) only starts the clock: a clock started by the stamp itself would already have run out.
+--   PART L: #1451 path 2. A role pg_cron does not show the job to (the table's owner, the jobs scheduled by an
+--           administrator) keeps the mark and logs fail_retain_recall, counted, naming itself: once with no access to
+--           schema cron at all, once with access and the job hidden by row security. The detach then lands and a
+--           superuser's tick releases the table.
+--   PART M: the idle clock belongs to one dispatch. A retirement whose clock ran out while retention was loose,
+--           reached again and re-dispatched, then loosened again with the job idled in that transaction, keeps
+--           its mark: the re-dispatch reset the clock.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
@@ -55,7 +69,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(91);
+select plan(130);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text);
@@ -105,6 +119,16 @@ $$;
 create function pgpm_test194.accounted(p_parent regclass, p_child name, p_lo text) returns boolean language sql as $$
   select pgpm_test194.attached(p_parent, p_child)
       or exists (select 1 from pgpm.log where parent_table = p_parent and lo = p_lo and action = 'fail_retain_reattach')
+$$;
+create function pgpm_test194.idle_at(p_parent regclass, p_lo text) returns text language sql as $$
+  select case when recall_idle_at is null then 'null' when recall_idle_at = '-infinity' then '-infinity'
+              when isfinite(recall_idle_at) then 'started' else recall_idle_at::text end
+    from pgpm.part where parent_table = p_parent and lo = p_lo
+$$;
+-- the minute the recall waits after reading the job idle, passed (#1451)
+create function pgpm_test194.minute_passes(p_parent regclass, p_lo text) returns void language sql as $$
+  update pgpm.part set recall_idle_at = recall_idle_at - interval '61 seconds'
+   where parent_table = p_parent and lo = p_lo and isfinite(recall_idle_at)
 $$;
 create function pgpm_test194.mark(p_parent regclass, p_lo text) returns text language sql as $$
   select format('retiring_at %s, dispatched %s', case when retiring_at is null then 'null' else 'set' end,
@@ -262,7 +286,16 @@ select ok(not pgpm_test194.reached('public.rr194e', :'e_hi'), 'LIVENESS: (E) ret
 select is(pgpm_test194.mark('public.rr194e', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194e'::regclass and lo = '0')),
   'LIVENESS: (E) the mark and pgpm''s dispatch record are still there before the tick');
 call pgpm.maintain('public.rr194e');
-select is(pgpm_test194.mark('public.rr194e', '0'), 'retiring_at null, dispatched null', 'E: the tick clears the mark nothing will detach');
+select is(pgpm_test194.idle_at('public.rr194e', '0'), '-infinity',
+  'E: the first tick that reads the job idle keeps the mark and stamps it (#1451)');
+call pgpm.maintain('public.rr194e');
+select is(pgpm_test194.idle_at('public.rr194e', '0'), 'started', 'E: a later tick, seeing the stamp, starts the clock');
+call pgpm.maintain('public.rr194e');
+select is(pgpm_test194.mark('public.rr194e', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194e'::regclass and lo = '0')),
+  'E: within the minute the mark stands: pg_cron may still launch the detach its cache held');
+select pgpm_test194.minute_passes('public.rr194e', '0');
+call pgpm.maintain('public.rr194e');
+select is(pgpm_test194.mark('public.rr194e', '0'), 'retiring_at null, dispatched null', 'E: a minute on, the tick clears the mark nothing will detach');
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 call pgpm.maintain('public.rr194e');
 select ok(pgpm_test194.attached('public.rr194e', :'e_doomed'), 'E: the partition never left the parent');
@@ -335,7 +368,10 @@ select substring(method from $re$select cron\.alter_job\(jobid, command => 'sele
  order by id desc limit 1 \gexec
 select is(pgpm_test194.armed(), 'select 1', 'LIVENESS: (G) the statement the row spells idled the job');
 call pgpm.maintain('public.rr194g');
-select is(pgpm_test194.mark('public.rr194g', '0'), 'retiring_at null, dispatched null', 'G: the next tick clears the mark');
+call pgpm.maintain('public.rr194g');
+select pgpm_test194.minute_passes('public.rr194g', '0');
+call pgpm.maintain('public.rr194g');
+select is(pgpm_test194.mark('public.rr194g', '0'), 'retiring_at null, dispatched null', 'G: a minute after the idle, a tick clears the mark');
 select is(pgpm_test194.ids('public.rr194g', 20000), array[61, 62, 63]::bigint[], 'G: and ids 61, 62, 63 are served by the parent');
 
 -- ====== PART H: a released monolith put back by hand comes out of untransmute without the detach's CHECK ======
@@ -446,5 +482,144 @@ select ok(pgpm_test194.cron_run(:'j_cmd') <> 'ERROR' and not pgpm_test194.attach
   'J: pg_cron''s next run lands the detach');
 call pgpm.maintain('public.rr194j');
 select is(pgpm_test194.ids(format('public.%I', :'j_doomed')), array[91, 92, 93]::bigint[], 'J: and the next tick releases the table with ids 91, 92, 93');
+
+-- ====== PART K: #1451 path 1, the job idled in the recall's own transaction while a run carries the detach ======
+create table public.rr194k (id bigint primary key, payload text);
+insert into public.rr194k values (101, 'a'), (102, 'b'), (103, 'c'), (104, 'd');
+call pgpm.transmute('public.rr194k', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194k', '60000');
+insert into public.rr194k values (50005, 'frontier');
+create table public.rr194k_ref (id bigint primary key, p_id bigint references public.rr194k(id));
+insert into public.rr194k_ref values (1, 50005);
+select child_name as k_doomed, hi as k_hi from pgpm.part where parent_table = 'public.rr194k'::regclass and lo = '0' \gset
+
+select ok(not pgpm.retire('public.rr194k', :'k_doomed'), 'fixture: (K) retire() dispatches the detach');
+-- the run pg_cron sent before the idle: the command it carries is the one its cache held, the armed one
+select pgpm_test194.armed() as k_cmd \gset
+begin;
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';   -- pgpm.schedule() re-run: the job idled
+select pgpm.set_retain('public.rr194k', '45000');
+select ok(not pgpm_test194.reached('public.rr194k', :'k_hi'), 'LIVENESS: (K) retention no longer reaches the partition');
+select is(pgpm_test194.armed(), 'select 1', 'LIVENESS: (K) the recall will read the job idle');
+select pgpm.retain('public.rr194k');
+select is(pgpm_test194.mark('public.rr194k', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194k'::regclass and lo = '0')),
+  'K: the recall that reads the idle in its own transaction keeps the mark');
+select is(pgpm_test194.idle_at('public.rr194k', '0'), '-infinity', 'K: and only stamps it');
+select pgpm_test194.minute_passes('public.rr194k', '0');   -- the transaction outlasts the minute
+commit;
+call pgpm.maintain('public.rr194k');   -- the tick right after the commit, pg_cron's cache still holding the detach
+select is(pgpm_test194.idle_at('public.rr194k', '0'), 'started', 'K: the tick right after the commit only starts the clock');
+select is(pgpm_test194.mark('public.rr194k', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194k'::regclass and lo = '0')),
+  'K: and keeps the mark, however long the idle''s transaction ran');
+select ok(pgpm_test194.cron_run(:'k_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194k', :'k_doomed'),
+  'LIVENESS: (K) the run that carried the detach lands once the idle has committed');
+call pgpm.maintain('public.rr194k');
+select ok(pgpm_test194.accounted('public.rr194k', :'k_doomed', '0'), 'K: the invariant holds: pgpm logged the partition out of the parent');
+select is(pgpm_test194.actions('public.rr194k', '0'), array['retain_detach', 'retain_disown', 'fail_retain_reattach'],
+  'K: the tick released the table it found detached');
+select is(pgpm_test194.ids(format('public.%I', :'k_doomed')), array[101, 102, 103, 104]::bigint[], 'K: with ids 101, 102, 103, 104');
+select ok((select retain_drop_failures from pgpm.status() where parent = 'public.rr194k'::regclass) > 0, 'K: and status() counts it');
+
+-- ====== PART L: #1451 path 2, a role that cannot see the job keeps the mark, counted ======
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'pgpm_test194_owner') then
+    create role pgpm_test194_owner nosuperuser nobypassrls;
+  end if;
+end $$;
+grant create, usage on schema public to pgpm_test194_owner;
+grant usage on schema pgpm to pgpm_test194_owner;
+grant all on all tables in schema pgpm to pgpm_test194_owner;
+grant all on all sequences in schema pgpm to pgpm_test194_owner;
+create table public.rr194l (id bigint primary key, payload text);
+insert into public.rr194l values (111, 'e'), (112, 'f'), (113, 'g'), (114, 'h'), (115, 'i');
+call pgpm.transmute('public.rr194l', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194l', '60000');
+insert into public.rr194l values (50005, 'frontier');
+create table public.rr194l_ref (id bigint primary key, p_id bigint references public.rr194l(id));
+insert into public.rr194l_ref values (1, 50005);
+select child_name as l_doomed, hi as l_hi from pgpm.part where parent_table = 'public.rr194l'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('public.rr194l', :'l_doomed'), 'fixture: (L) retire() dispatches the detach');
+select pgpm_test194.armed() as l_cmd \gset
+-- the table is the role's: the administrator scheduled the jobs, the owner runs its own table's maintenance
+select format('alter table %s owner to pgpm_test194_owner', r) from (
+  select 'public.rr194l'::regclass r union all select 'public.rr194l_ref'::regclass
+  union all select inhrelid::regclass from pg_inherits where inhparent = 'public.rr194l'::regclass) t \gexec
+select pgpm.set_retain('public.rr194l', '45000');
+select ok(not pgpm_test194.reached('public.rr194l', :'l_hi'), 'LIVENESS: (L) retention no longer reaches the partition');
+select ok(not rolsuper and not rolbypassrls, 'LIVENESS: (L) the role is neither a superuser nor exempt from row security')
+  from pg_roles where rolname = 'pgpm_test194_owner';
+-- pgTAP's bookkeeping is this session's temp objects, which the role cannot touch: observations go through
+-- set_config and are asserted after reset role
+set role pgpm_test194_owner;
+select set_config('t194.l1_read', (select case when has_schema_privilege('cron', 'usage') then 'readable' else 'denied' end), false);
+select pgpm.retain('public.rr194l');
+reset role;
+select is(current_setting('t194.l1_read'), 'denied', 'LIVENESS: (L) the role has no access to schema cron at all');
+select is(pgpm_test194.armed(), :'l_cmd', 'LIVENESS: (L) the job still holds the detach, as the role cannot see');
+select is(pgpm_test194.mark('public.rr194l', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194l'::regclass and lo = '0')),
+  'L: a role that cannot read cron.job keeps the mark');
+-- the role reads cron.job, and row security shows it nothing: pg_cron's own policy hides another role's job
+grant usage on schema cron to pgpm_test194_owner;
+grant select on cron.job to pgpm_test194_owner;
+alter table cron.job enable row level security;
+set role pgpm_test194_owner;
+select set_config('t194.l2_seen', (select count(*)::text from cron.job), false);
+select pgpm.retain('public.rr194l');
+reset role;
+select is(current_setting('t194.l2_seen'), '0', 'LIVENESS: (L) the role reads cron.job and sees no job in it');
+select is(pgpm_test194.mark('public.rr194l', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194l'::regclass and lo = '0')),
+  'L: a role row security hides the job from keeps the mark too');
+select is(pgpm_test194.idle_at('public.rr194l', '0'), 'null', 'L: and starts no idle clock: it read nothing');
+select is((select count(*) from pgpm.log where parent_table = 'public.rr194l'::regclass and lo = '0' and action = 'fail_retain_recall'),
+  2::bigint, 'L: each of the two ticks logs fail_retain_recall');
+select ok((select method from pgpm.log where parent_table = 'public.rr194l'::regclass and lo = '0' and action = 'fail_retain_recall'
+            order by id desc limit 1) ~ 'role pgpm_test194_owner sees no pgpm_detach job.*pgpm\.schedule\(\)',
+  'L: its method names the role and the way out');
+select ok((select retain_drop_failures from pgpm.status() where parent = 'public.rr194l'::regclass) > 0, 'L: and status() counts it');
+alter table cron.job disable row level security;
+select ok(pgpm_test194.cron_run(:'l_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194l', :'l_doomed'),
+  'LIVENESS: (L) pg_cron''s run lands the detach the role could not see');
+call pgpm.maintain('public.rr194l');
+select ok(pgpm_test194.accounted('public.rr194l', :'l_doomed', '0'), 'L: the invariant holds: pgpm logged the partition out of the parent');
+select is(pgpm_test194.ids(format('public.%I', :'l_doomed')), array[111, 112, 113, 114, 115]::bigint[], 'L: and released it with ids 111 to 115');
+
+-- ====== PART M: the idle clock belongs to one dispatch: a re-dispatch resets it ======
+create table public.rr194m (id bigint primary key, payload text);
+insert into public.rr194m values (121, 'j'), (122, 'k'), (123, 'l'), (124, 'm'), (125, 'n'), (126, 'o');
+call pgpm.transmute('public.rr194m', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194m', '60000');
+insert into public.rr194m values (50005, 'frontier');
+create table public.rr194m_ref (id bigint primary key, p_id bigint references public.rr194m(id));
+insert into public.rr194m_ref values (1, 50005);
+select child_name as m_doomed, hi as m_hi from pgpm.part where parent_table = 'public.rr194m'::regclass and lo = '0' \gset
+select ok(not pgpm.retire('public.rr194m', :'m_doomed'), 'fixture: (M) retire() dispatches the detach');
+select pgpm_test194.armed() as m_cmd \gset
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
+select pgpm.set_retain('public.rr194m', '45000');
+select pgpm.retain('public.rr194m');
+select pgpm.retain('public.rr194m');
+select pgpm_test194.minute_passes('public.rr194m', '0');
+select is(pgpm_test194.idle_at('public.rr194m', '0'), 'started', 'LIVENESS: (M) the first dispatch''s idle clock started, and ran out');
+-- retention reaches the partition again before a tick clears it (a newer row moves the frontier on): retire()
+-- re-dispatches
+insert into public.rr194m values (55005, 'newer');
+select ok(pgpm_test194.reached('public.rr194m', :'m_hi'), 'LIVENESS: (M) retention reaches the partition again');
+call pgpm.maintain('public.rr194m');
+select is(pgpm_test194.armed(), :'m_cmd', 'LIVENESS: (M) the tick re-dispatched the detach');
+select is(pgpm_test194.idle_at('public.rr194m', '0'), 'null', 'M: and the re-dispatch reset the idle clock');
+-- loosened again, the job idled in the same transaction while a run carries the detach
+begin;
+update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
+delete from public.rr194m where id = 55005;   -- the frontier moves back
+select pgpm.retain('public.rr194m');
+select is(pgpm_test194.mark('public.rr194m', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194m'::regclass and lo = '0')),
+  'M: the second loosening keeps the mark: the first dispatch''s clock does not carry over');
+commit;
+select ok(pgpm_test194.cron_run(:'m_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194m', :'m_doomed'),
+  'LIVENESS: (M) the run that carried the detach lands');
+call pgpm.maintain('public.rr194m');
+select ok(pgpm_test194.accounted('public.rr194m', :'m_doomed', '0'), 'M: the invariant holds: pgpm logged the partition out of the parent');
+select is(pgpm_test194.ids(format('public.%I', :'m_doomed')), array[121, 122, 123, 124, 125, 126]::bigint[], 'M: and released it with ids 121 to 126');
 
 select * from finish();
