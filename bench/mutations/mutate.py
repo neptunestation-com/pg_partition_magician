@@ -8626,7 +8626,7 @@ select ok(
         "Pre-#705 maintain(): the auto-regrain candidate scan trusts pgpm.part.attached, so a coarse child the "
         "operator detached by hand is picked first, its table gets the capture and TRUNCATE-guard triggers and "
         "its rows are copied, and every swap after fails on it. One site, the scan. tests/307 part E catches it.",
-        [("        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705\n",
+        [("        || ' and pgpm._part_built(p.parent_table, p.child_oid, p.retiring_at)'   -- #705, #1478\n",
           "", 1)],
     ),
     "progress_coarse_counts_hand_detached": (
@@ -18355,6 +18355,16 @@ MUTATIONS["archive_config_references_pgpm"] = (
       "create table if not exists archive.config (\n  parent_table    regclass    primary key references pgpm.config (parent_table),\n", 1)],
 )
 MUTATION_SRC["archive_config_references_pgpm"] = "pgpm_archive/install.sql"
+
+MUTATIONS["autoregrain_picks_dropped"] = (
+    "bench/autoregrain_skips_dropped.sh",
+    "Issue #1478's defect: maintain()'s auto-regrain candidate scan leaves out only a coarse child detached by hand, "
+    "not one dropped by hand, whose pgpm.part row stays attached: the scan picks it as the oldest on every tick, "
+    "regrain_step refuses it as gone (skip_regrain), and the coarse children behind it are never regrained. The "
+    "scan's _part_built clause put back as the pre-fix _part_detached_by_hand one. tests/394 catches it.",
+    [("        || ' and pgpm._part_built(p.parent_table, p.child_oid, p.retiring_at)'   -- #705, #1478\n",
+      "        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705\n", 1)],
+)
 
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two
 # lines of an anchor. See main().
