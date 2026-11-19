@@ -11,15 +11,17 @@
   `lo` (it covers no row), logged `archive_coverage_reset` once per partition; a `hi` that is not a value of the
   column is left as it is, and the install goes on. And an operator who swapped two partitions' names, tables and
   `pgpm.part` rows, leaving the ledger behind, left rows under names still tracked, which #511's discard by an
-  untracked name never found: the archive step now also discards rows whose recorded oid is not the oid
-  `pgpm.part` records under their name, logged `archive_coverage_reset` naming that oid, and each partition
-  archives from its own `lo`. A `skip_archive` that recurs every tick (stale credentials, a deleted bucket, a
-  strategy's refusal) moved no counter of `status()`: the new column `status().archive_skips` counts the longest
-  run of `skip_archive` rows since a recorded chunk, per partition, so a sibling's chunks do not hide a partition
-  refused every tick, and the row's `method` keeps up to 1000 characters of the error, where 200 cut a refusal
-  before its remedy. The guide's rename recipe updates the rows before the `ALTER`, in the order a waiting
-  `retire` takes its locks, so it cannot deadlock against it, and its in-flight rename note now includes the
-  ledger. Guard `bench/archive_ledger_wedges.sh` runs `tests/367`, with ten mutations.
+  untracked name never found: the archive step now also discards rows whose recorded oid is not the oid `pgpm.part`
+  records under their name, logged `archive_coverage_reset` naming that oid, and each partition archives from its
+  own `lo`. A `skip_archive` that recurs every tick (stale credentials, a deleted bucket, a strategy's refusal)
+  moved no counter of `status()`: the new column `status().archive_skips` counts the longest run of `skip_archive`
+  rows since a recorded chunk, per partition, so a sibling's chunks do not hide a partition refused every tick, and
+  the row's `method` keeps up to 1000 characters of the error at every writer (the whole-partition script's
+  included), where 200 cut a refusal before its remedy. The guide's rename recipe updates the rows before the
+  `ALTER`, in the order a waiting `retire` takes its locks, so it cannot deadlock against it, and its in-flight
+  rename note now includes the ledger. Guard `bench/archive_ledger_wedges.sh` runs `tests/367`, with eleven
+  mutations, and `bench/archive_skips_scans.sh` holds a `status()` call to one read of the ledger however many skips
+  the log keeps.
 - **A retirement whose detach pgpm dispatched is no longer cleared on a reading of the job that cannot be trusted**
   (#1451). When retention stopped reaching a still-attached partition whose `pgpm_detach` job no longer held its
   detach, the recall cleared the retirement's mark at once. Two readings of "no longer held" were wrong, and the

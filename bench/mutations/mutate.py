@@ -10806,6 +10806,15 @@ MUTATIONS["archive_whole_contract_unchecked"] = (
 """, "", 1)],
 )
 MUTATION_SRC["archive_whole_contract_unchecked"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_whole_skip_method_truncated"] = (
+    "bench/archive_partition_whole_contract.sh",
+    "scripts/archive_partition_whole.sql's row-level-security refusal keeps 200 characters of the error in its "
+    "skip_archive row again, where _archive_step's handler keeps 1000 (#1439), cutting the reason before its remedy "
+    "(run it as a role with BYPASSRLS). tests/286 part E catches it.",
+    [("      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));   -- #1439, as _archive_step's handler",
+      "      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));", 1)],
+)
+MUTATION_SRC["archive_whole_skip_method_truncated"] = "scripts/archive_partition_whole.sql"
 MUTATIONS["archive_whole_partial_compared_as_text"] = (
     "bench/archive_partition_whole_contract.sh",
     "Pre-#1030 scripts/archive_partition_whole.sql: partial or whole is decided by text inequality between "
@@ -10842,7 +10851,7 @@ MUTATIONS["archive_whole_rls_unrefused"] = (
       'the partition would be archived from those rows alone, and retention would drop the others with the partition');
   exception when raise_exception then
     insert into pgpm.log (parent_table, action, lo, hi, method)
-      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));   -- #1439, as _archive_step's handler
     return format('%s: REFUSING to archive it: %s', r.child_name, sqlerrm);
   end;
 
@@ -17825,18 +17834,42 @@ MUTATIONS["archive_skips_never_reset"] = (
     "bench/archive_ledger_wedges.sh",
     "archive_skips counts every skip_archive a partition ever logged, so a stall that cleared still reads as one. The "
     "window since the partition's last recorded chunk removed. tests/367 part C catches it.",
-    [("                   and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l\n"
-      "                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),\n"
-      "                                       '-infinity'::timestamptz)\n",
-      "", 1)],
+    [("                   and g.at > coalesce(m.mark, '-infinity'::timestamptz)\n", "", 1)],
 )
 MUTATIONS["archive_skips_parent_wide"] = (
     "bench/archive_ledger_wedges.sh",
     "archive_skips counts a partition's skips since ANY chunk of the parent, as #1466's first head did, so at "
     "archive_batch above 1 a partition refused every tick reads 0 for as long as a sibling records chunks. One clause. "
     "tests/367 part D catches it.",
-    [("                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),\n",
-      "                                         where l.parent_table = p.parent_table),\n", 1)],
+    [("                            on l.parent_table = p.parent_table and l.child_name = p.child_name\n",
+      "                            on l.parent_table = p.parent_table\n", 1)],
+)
+MUTATIONS["archive_skips_mark_per_log_row"] = (
+    "bench/archive_skips_scans.sh",
+    "archive_skips reads each skip_archive row's mark with a subquery of its own, as #1466's second head did, so one "
+    "status() call scans pgpm.archive_ledger once per skip pgpm.log keeps: seconds per call during the very stall it "
+    "reports. The once-per-call marks put back as a per-row subquery.",
+    [("                  join (select p.lo, max(l.archived_at) as mark\n"
+      "                          from pgpm.part p\n"
+      "                          left join pgpm.archive_ledger l\n"
+      "                            on l.parent_table = p.parent_table and l.child_name = p.child_name\n"
+      "                         where p.parent_table = r.parent_table\n"
+      "                         group by p.lo) m on m.lo = g.lo\n"
+      "                 where g.parent_table = r.parent_table and g.action = 'skip_archive'\n"
+      "                   and g.at > coalesce(m.mark, '-infinity'::timestamptz)\n",
+      "                  join pgpm.part p on p.parent_table = g.parent_table and p.lo = g.lo\n"
+      "                 where g.parent_table = r.parent_table and g.action = 'skip_archive'\n"
+      "                   and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l\n"
+      "                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),\n"
+      "                                       '-infinity'::timestamptz)\n", 1)],
+)
+MUTATIONS["archive_skips_mark_per_child"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips reads a partition's mark per pgpm.part row rather than per lo, as #1466's second head did, so a "
+    "regrain's unattached copy, which shares its source's lo and has no chunk, counts every skip of that lo ever "
+    "logged: starting a regrain makes archive_skips climb with no new skip. tests/367 part E catches it.",
+    [("                         group by p.lo) m on m.lo = g.lo\n",
+      "                         group by p.lo, p.child_name) m on m.lo = g.lo\n", 1)],
 )
 MUTATIONS["archive_skips_whole_step_dropped"] = (
     "bench/archive_ledger_wedges.sh",

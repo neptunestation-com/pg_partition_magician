@@ -16886,9 +16886,11 @@ begin
     -- The run is counted PER PARTITION: a row the archive step logs for a partition carries the partition's own lo,
     -- and is counted since that partition's last chunk, because at archive_batch above 1 a sibling records chunks
     -- every tick while one partition is refused every tick, and a parent-wide mark read that stall as 0 for as long
-    -- as the sibling had chunks left. A row with no lo is maintain()'s, for the archive step as a whole, and is
-    -- counted since the parent's last chunk. Exact action value: skip_archive_retired_range is logged once, and is
-    -- not a retry.
+    -- as the sibling had chunks left. The mark is per lo, the latest chunk of any pgpm.part row at it, because a
+    -- regrain's unattached copy shares its source's lo and has no chunk of its own, and read per child it counted
+    -- every skip of that lo ever logged. The marks are computed once, not once per log row: pgpm.log keeps every
+    -- skip. A row with no lo is maintain()'s, for the archive step as a whole, and is counted since the parent's
+    -- last chunk. Exact action value: skip_archive_retired_range is logged once, and is not a retry.
     select greatest(
              (select count(*) from pgpm.log g
                where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null
@@ -16896,12 +16898,15 @@ begin
                                        where l.parent_table = r.parent_table), '-infinity'::timestamptz)),
              (select max(k.n) from (
                 select count(*) as n from pgpm.log g
-                  join pgpm.part p on p.parent_table = g.parent_table and p.lo = g.lo
+                  join (select p.lo, max(l.archived_at) as mark
+                          from pgpm.part p
+                          left join pgpm.archive_ledger l
+                            on l.parent_table = p.parent_table and l.child_name = p.child_name
+                         where p.parent_table = r.parent_table
+                         group by p.lo) m on m.lo = g.lo
                  where g.parent_table = r.parent_table and g.action = 'skip_archive'
-                   and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l
-                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),
-                                       '-infinity'::timestamptz)
-                 group by p.child_name) k))
+                   and g.at > coalesce(m.mark, '-infinity'::timestamptz)
+                 group by g.lo) k))
       into v_skips;
     v_retain_backlog := case when v_missing then null else 0 end;
     -- #451: _retain_boundary refuses a hand-edited negative retain (see there). status() is what an

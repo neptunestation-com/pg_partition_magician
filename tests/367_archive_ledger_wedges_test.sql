@@ -23,6 +23,8 @@
 --           counts since the parent's last chunk. method keeps the whole reason.
 --   PART D  the count is per partition: one refused every tick while a sibling records a chunk every tick (archive_batch
 --           2) still climbs.
+--   PART E  and per lo: a regrain's unattached copy shares its source's lo and has no chunk, and starting a regrain
+--           does not bring back a skip older than the source's chunk.
 --
 -- ONE TRANSACTION HAS ONE now(), so a skip and a chunk this file writes would share an instant and a "since the last
 -- chunk" assertion would pass on the tie. Every tick that precedes another is moved back a minute before the next.
@@ -39,7 +41,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(32);
+select plan(36);
 
 create schema pgpm_t367;
 create table pgpm_t367.calls (parent regclass, p_child name, p_lo text, p_hi text);
@@ -246,5 +248,27 @@ select is((select array_agg(lo order by lo::numeric) from pgpm.archive_ledger
   array['1000', '1100', '1200'], 'D: LIVENESS: the sibling recorded a chunk on every tick, and has chunks left');
 select is((select archive_skips from pgpm.status() where parent = 'public.ac367d'::regclass), 3::bigint,
   'D: archive_skips counts the refused partition''s three skips, whatever its sibling records');
+
+-- ============ PART E: a regrain's copy at the same lo ============
+create table public.ac367e (id bigint primary key, payload text);
+insert into public.ac367e select g, 'p' || g from generate_series(61, 1661) g;
+call pgpm.transmute('public.ac367e', 'id', 1000::bigint, p_retain => 15000, p_paused => false);
+insert into public.ac367e values (20000, 'frontier');
+select child_name as e0 from pgpm.part where parent_table = 'public.ac367e'::regclass and lo = '0' and attached \gset
+select pgpm._enforce_write_blocks('public.ac367e');
+select pgpm.set_archive_fn('public.ac367e', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
+-- one transient skip of the partition, ticks ago
+insert into pgpm.log (parent_table, action, lo, hi, method, at)
+  values ('public.ac367e', 'skip_archive', '0', '1000', 'a lock race, long cleared', now() - interval '2 hours');
+select is(pgpm._archive_step('public.ac367e'), 1, 'E: LIVENESS: the partition then recorded its chunk');
+-- a regrain begins: its first copy sub-range is minted unattached at the source's own lo
+select pgpm.regrain_step('public.ac367e', :'e0', '500', 100);
+select pgpm.regrain_step('public.ac367e', :'e0', '500', 100);
+select is((select count(*) from pgpm.part where parent_table = 'public.ac367e'::regclass and lo = '0' and not attached),
+  1::bigint, 'E: LIVENESS: an unattached copy now shares lo 0 with its source');
+select is((select count(*) from pgpm.log where parent_table = 'public.ac367e'::regclass and action = 'skip_archive'), 1::bigint,
+  'E: LIVENESS: still the one skip, older than the chunk');
+select is((select archive_skips from pgpm.status() where parent = 'public.ac367e'::regclass), 0::bigint,
+  'E: archive_skips stays 0: nothing was refused since the chunk at that lo');
 
 select * from finish();

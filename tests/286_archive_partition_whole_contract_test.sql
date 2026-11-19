@@ -56,7 +56,7 @@ set client_min_messages = warning;
 \endif
 \i :archive_whole_script
 
-select plan(44);
+select plan(45);
 
 create schema t286;
 create table t286.calls (strategy text, p_child name, p_lo text, p_hi text);
@@ -289,6 +289,9 @@ select results_eq(
       where parent_table = 'public.t286_rls'::regclass and action = 'skip_archive' $$,
   $$ values ('0'::text, '1000'::text, true) $$,
   'E: the refusal is logged skip_archive over [0, 1000), as _archive_step logs it');
+select ok((select method from pgpm.log where parent_table = 'public.t286_rls'::regclass and action = 'skip_archive')
+            ~ 'BYPASSRLS',
+  'E: its method keeps the remedy at the end of the reason, as _archive_step''s does (#1439: 1000 characters, not 200)');
 select ok(not pgpm.retire('public.t286_rls', :'ch_rls'), 'E: retire() refuses the drop');
 select results_eq($$ select id from public.t286_rls where id < 1000 order by id $$,
   $$ values (1::bigint), (2), (3), (4), (5), (6), (7) $$,

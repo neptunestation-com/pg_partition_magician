@@ -1398,6 +1398,7 @@ run_perf() {
     "bench/write_block_reads_mark.sh pgpm_perf446"
     "bench/unrecorded_mark_refused.sh pgpm_perf447"
     "bench/archive_ledger_wedges.sh pgpm_perf449"
+    "bench/archive_skips_scans.sh pgpm_perf450"
   )
   local selected=()
   local n=${#guards[@]} idx
