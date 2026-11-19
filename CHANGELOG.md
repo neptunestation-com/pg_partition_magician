@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`obtain` builds around a partition attached by hand instead of failing on it every tick** (#1119). Whether a
+  forward cell was built was judged from `pgpm.part` alone, which records pgpm's partitions and nobody else's, so a
+  table the operator attached with `ALTER TABLE ... ATTACH PARTITION` over a cell's range was invisible: `obtain`'s
+  `CREATE ... PARTITION OF` for that cell raised "would overlap", which unwound the whole call on every tick
+  (`skip_obtain`), no other missing cell was built, and the forward grid stopped growing until writes were refused.
+  `extend_to` was refused the same way, and `maintain_obtain`'s back-off walk read the cell as a hole. Now a
+  partition of the table that no `pgpm.part` row records counts as covering every cell it overlaps, compared as
+  values of the control column's type under the partition key's collation (`MINVALUE` and `MAXVALUE` unbounded):
+  the cell is left to it and the cells around it are built, as the reference promised. Guard
+  `bench/obtain_builds_around_hand_attached.sh` runs `tests/368`, with three mutations.
 - **The formal track no longer starts on every `test.sh` edit, and its liveness runs expected to pass check their
   property once, at the end** (#1444, #1470). The track's body moved from `test.sh` to `formal/run.sh` (`./test.sh
   formal` still runs it), so `.github/workflows/formal.yml` watches `formal/` alone: a harness edit, lint-only ones

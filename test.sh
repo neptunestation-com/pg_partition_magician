@@ -1400,6 +1400,7 @@ run_perf() {
     "bench/retire_default_partition.sh pgpm_perf448"
     "bench/archive_ledger_wedges.sh pgpm_perf449"
     "bench/archive_skips_scans.sh pgpm_perf450"
+    "bench/obtain_builds_around_hand_attached.sh pgpm_perf452"
   )
   local selected=()
   local n=${#guards[@]} idx

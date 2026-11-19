@@ -2488,6 +2488,51 @@ returns boolean language sql stable as $$
      and exists (select 1 from pg_class c where c.oid = p_child_oid);
 $$;
 
+-- _foreign_overlaps: whether a partition of p_parent that no pgpm.part row of it records by oid overlaps the cell
+-- [p_lo, p_hi). pgpm.part holds pgpm's partitions and nobody else's, so a table the operator attached by hand over
+-- a forward cell's range was invisible to _cell_attached, and the CREATE ... PARTITION OF over it raised "would
+-- overlap", which unwound the whole obtain call on every tick (skip_obtain): no other missing cell was built and
+-- the forward grid stopped growing until writes were refused (#1119). The bounds are compared as values of the
+-- control column's type under the partition key's collation, as PostgreSQL compares them when it refuses the
+-- CREATE, against the cell's encoded the way _create_partition writes them (as _part_bound_is compares a bound);
+-- MINVALUE and MAXVALUE are unbounded. A DEFAULT partition has no range and is not asked here. Read only for a
+-- cell no row covers, so a walk over pgpm's own built cells pays nothing for it, and a table with no such
+-- partition pays one read of its partitions.
+create or replace function pgpm._foreign_overlaps(p_parent regclass, cfg pgpm.config, p_lo text, p_hi text)
+returns boolean language plpgsql stable set datestyle = 'ISO, YMD' as $$
+declare v_los text[]; v_his text[]; v_coltype text; v_coll_q text; v_hit boolean;
+begin
+  -- each bound quoted, bare (a non-negative number, see _part_bound_raw) or MINVALUE / MAXVALUE, read as null
+  select array_agg(coalesce(replace(b.m[1], '''''', ''''), b.m[2])), array_agg(coalesce(replace(b.m[4], '''''', ''''), b.m[5]))
+    into v_los, v_his
+    from (select regexp_match(pg_get_expr(c.relpartbound, c.oid),
+                   '^FOR VALUES FROM \((?:''((?:[^'']|'''')*)''|(-?[0-9][0-9.eE+-]*)|(MINVALUE|MAXVALUE))\) TO \((?:''((?:[^'']|'''')*)''|(-?[0-9][0-9.eE+-]*)|(MINVALUE|MAXVALUE))\)$') as m
+            from pg_inherits i join pg_class c on c.oid = i.inhrelid
+           where i.inhparent = p_parent and c.relispartition
+             and not exists (select 1 from pgpm.part a where a.parent_table = p_parent and a.child_oid = i.inhrelid)) b
+   where b.m is not null;
+  if v_los is null then return false; end if;
+  select format_type(a.atttypid, a.atttypmod) into v_coltype
+    from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;
+  select format('collate %I.%I', n.nspname, co.collname) into v_coll_q
+    from pg_partitioned_table t join pg_collation co on co.oid = t.partcollation[0]
+    join pg_namespace n on n.oid = co.collnamespace
+   where t.partrelid = p_parent;
+  execute format('select exists (select 1 from unnest($1, $2) s(lo, hi)
+                   where (s.hi is null or s.hi::%1$s %2$s > $3::%1$s %2$s)
+                     and (s.lo is null or $4::%1$s %2$s > s.lo::%1$s %2$s))', v_coltype, coalesce(v_coll_q, ''))
+    into v_hit
+    using v_los, v_his,
+          pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                       cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits,
+                       cfg.text_time_epoch, cfg.partition_tz),
+          pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                       cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits,
+                       cfg.text_time_epoch, cfg.partition_tz);
+  return v_hit;
+end;
+$$;
+
 -- _cell_attached: whether an attached partition of p_parent overlaps the cell [p_lo, p_hi), the question
 -- obtain and extend_to (its dry count and its walk) ask of every cell before building it. Half-open
 -- [p_lo, p_hi) overlaps [p.lo, p.hi) iff p.hi > p_lo and p_hi > p.lo.
@@ -2508,6 +2553,8 @@ $$;
 --                              is the operator's now, rows and all, and is left exactly as it is; the cell
 --                              is built afresh beside it, under its explicit-range name while the detached
 --                              table holds the plain one (see _obtain_name).
+-- And a partition of the table that no row records at all (attached by hand, or restored and attached, outside
+-- pgpm) counts as well, through _foreign_overlaps (#1119): the cell is left to it and the cells around it are built.
 create or replace function pgpm._cell_attached(p_parent regclass, cfg pgpm.config, p_lo text, p_hi text)
 returns boolean language plpgsql as $$
 begin
@@ -2541,11 +2588,15 @@ begin
                             g.child_name, g.child_oid) end
       from gone g left join pg_class k on k.oid = g.child_oid;
   end if;
-  return exists (
+  if exists (
     select 1 from pgpm.part p
      where p.parent_table = p_parent and p.attached
        and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
-       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo));
+       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)) then
+    return true;
+  end if;
+  -- #1119: a partition no row records (attached by hand) covers the cell too, see _foreign_overlaps
+  return pgpm._foreign_overlaps(p_parent, cfg, p_lo, p_hi);
 end;
 $$;
 
