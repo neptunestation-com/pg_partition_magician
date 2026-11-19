@@ -43,7 +43,7 @@ TLC = os.path.join(HERE, '..', 'tlc.sh')
 ALL_GROUPS = ['W', 'OD', 'RN', 'CR', 'OC', 'SG', 'T', 'RG', 'PD', 'SB', 'IJ']
 
 
-DEFAULT_HYP = ('H_C2', 'H_C3')
+DEFAULT_HYP = ('H_C2', 'H_C3', 'H_C4')
 
 
 def cfg_text(groups, shapes, fk=False, budget=2, hyp=DEFAULT_HYP, check='NoLostRow', live=False):
@@ -128,6 +128,7 @@ G = {
     'G893': 'ForgetIdlesJob == TRUE  \\* @guard G893',
     'G1438armed': 'RecallArmed(o) == JobHolds(rel[o].nsp, rel[o].name)  \\* @guard G1438',
     'G1438landed': 'RecallReleasesLanded == TRUE  \\* @guard G1438',
+    'G1451': 'RecallWaited(o) == ~CacheHolds(rel[o].nsp, rel[o].name)  \\* @guard G1451',
     'G1260': 'ClaimHeld(k, sp) == k \\in claimed  \\* @guard G1260',
     'G822': '    /\\ IF ClaimHeld(k, sp)  \\* @guard G822',
     'G1259r4': 'ArcRecheck(o) == Attached(o, 1)  \\* @guard G1259r4',
@@ -170,6 +171,7 @@ M = {
     'G893': e('G893', 'ForgetIdlesJob == FALSE'),
     'G1438armed': e('G1438armed', 'RecallArmed(o) == FALSE'),
     'G1438landed': e('G1438landed', 'RecallReleasesLanded == FALSE'),
+    'G1451': e('G1451', 'RecallWaited(o) == TRUE'),
     'G977': e('G977', 'Recorded(c, z) == [w |-> c + z, off |-> FALSE, rz |-> z]'),
     'G1336b8': e('G1336b8', 'ChunkHi(l, z) == ParseIn(led[l].hi, z)'),
     'G1336b8r': e('G1336b8r', 'OffsetlessLive(s, o) == FALSE'),
@@ -259,12 +261,20 @@ MUTATIONS = {
                         cfg=dict(groups=['T'], shapes=FRESH, fk=True, budget=1),
                         note='the recall attaches back a partition its own landed detach took out; a run pg_cron '
                              'launched before the idle takes it out again with no retirement vouching for it'),
-    # not a historical mechanism: #1451's misreading (an armed job read as idle) put in by hand, to show the
-    # model sees that consequence although it cannot produce the misreading itself (known gap K9)
+    # not a historical mechanism: an armed job read as idle, put in by hand. The model produces that reading
+    # through the launcher's cache (M1451) but not through #1451's path 2, a caller who cannot read the job
+    # (known gap K9), so this keeps the consequence in view for that one
     'M1438armed': dict(rcs=['#1451'], inv='NoLostRow', guards=['G1438armed'], extra=True,
                        cfg=dict(groups=['T'], shapes=FRESH, fk=True, budget=1),
                        note='the recall reads an armed detach as idle and clears its mark; pg_cron\'s next run '
                             'detaches the partition with no retirement vouching for it'),
+    # #1451 path 1: the job reads idle (the operator idled it, "IJ") while pg_cron's launcher still holds the
+    # detach; the recall as #1452 shipped it cleared the mark at once, and the launcher's next run detaches the
+    # partition with no retirement vouching for it
+    'M1451': dict(rcs=['#1451'], inv='NoLostRow', guards=['G1451'], extra=True,
+                  cfg=dict(groups=['T', 'IJ'], shapes=FRESH, fk=True, budget=2),
+                  note='the recall clears a mark whose job reads idle while the launcher\'s cache still holds the '
+                       'detach'),
     'M727': dict(rcs=['#727'], inv='NoWedge', guards=['G727'],
                  cfg=dict(groups=['OD', 'RN', 'T'], shapes=FRESH, budget=1),
                  note='every step resolves a partition in the parent\'s schema'),
@@ -327,7 +337,7 @@ MUTATIONS = {
     # as shipped for C2, without H_C2: its path is the tracked rename that makes the script's chunk an orphan,
     # which hypothesis H_C2 (claim C2) spares
     'M1054b2': dict(rcs=['B9-1054b2'], inv='NoWedge', guards=['G1054b2'],
-                    cfg=dict(groups=['OC', 'OD', 'RN', 'SG', 'T'], shapes=FRESH, budget=2, hyp=('H_C3',)),
+                    cfg=dict(groups=['OC', 'OD', 'RN', 'SG', 'T'], shapes=FRESH, budget=2, hyp=('H_C3', 'H_C4')),
                     note='the operator script writes a session-rendered watermark as a ledger lo'),
     'M1141b1': dict(rcs=['B10-1141b1'], inv='ArchiveNoClobber', guards=['G1141b1'],
                     cfg=dict(groups=['OD', 'RN', 'T'], shapes=['ogone'], budget=1),
@@ -449,16 +459,17 @@ WITNESSES = [('WitTwoChunks', 'Custody.cfg', PGPM_ONLY), ('WitArchivedDrop', 'Cu
 
 # What each must-be-clean config checks, and a floor under how much of the world it explores. A clean result is
 # evidence only about what was checked: a config cut to TypeOK, or to EnvBudget 0, still says "No error has been
-# found". The floors sit about 4 to 5% under the counts (5,250,812 / 12,230,621 / 5,006,487 distinct states, all
-# three #1457's: the recall as #1452 ships it, plus the hand idle "IJ" in CustodyFK.cfg; the last one fell from
-# 5,064,825 with the re-attach gone) so a change to the model that shrinks the explored world has to lower them in
-# the same commit, on purpose.
+# found". The floors sit about 4 to 5% under the counts (5,250,812 / 19,821,680 / 1,556,162 distinct states, with
+# pg_cron's command cache modelled for #1451: Custody.cfg never arms the job and kept #1457's count, CustodyFK.cfg grew
+# from 12,230,621, and CustodyLive.cfg left out the archive-side groups SG, OC and SB, from 5,006,487, rather than
+# grow past CI's budget) so a change to the model that shrinks the explored world has to lower them in the same
+# commit, on purpose.
 SCOPE = {
     'Custody.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
                     5_000_000),
     'CustodyFK.cfg': (('TypeOK', 'NoLostRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge'), (),
-                      11_600_000),
-    'CustodyLive.cfg': ((), ('NoLostRowLive',), 4_800_000),
+                      19_000_000),
+    'CustodyLive.cfg': ((), ('NoLostRowLive',), 1_490_000),
 }
 
 

@@ -112,7 +112,7 @@ by the spec's author). Most were the model being wrong:
 | Fairness artefact, closed | 2 | H_C1 as a pure block; an operator's concurrent detach unable to finish |
 | Documented limitation | 1 | the substitute detach `reference.md` "What retire checks" describes |
 | Question for the maintainer | 1 | Q1, below, decided as #1424 |
-| **Claim** for Phase 2 | 3 | C1 and C2, below; C3, found bringing the spec to #1452 (#1457) |
+| **Claim** for Phase 2 | 4 | C1 and C2, below; C3, found bringing the spec to #1452 (#1457); C4, found modelling pg_cron's command cache (#1451) |
 
 ### Claim C1: the recall's re-attach races a launched detach run
 
@@ -131,8 +131,23 @@ fail. Hypothesis H_C1 assumes the re-attach waits as the attached branch does.
 (Tier 1). #1452 closed it, and not the way H_C1 assumed: the recall never takes a dispatched detach back. An armed
 detach is left to land, and a landed one is released to the operator with its rows, logged and counted, never
 attached back. #1457 brought the spec to that design. H_C1 and `CustodyFK-asis.cfg` are gone, and the mutation
-`M1438landed` puts the re-attach back and keeps C1's counterexample on record. The model still cannot see issue #1451
-reach the same consequence through the recall misreading an armed job as idle (known gap K9).
+`M1438landed` puts the re-attach back and keeps C1's counterexample on record.
+
+**#1451's path 1, modelled (2026-11-18).** The recall could still reach C1's consequence by reading an armed job as
+idle, and until #1451 the model could not produce that reading (known gap K9). pg_cron launches from its launcher's
+cache of the job, which it re-reads about a second after a change to `cron.job` commits, so a run launched in that
+second carries a detach the job no longer holds. The spec now has that cache (`jobCache`, refreshed by its own step
+`CacheRefresh`, with launches made from it). The recall as #1452 shipped it cleared the mark of a partition whose job
+read idle at once. #1459 waits a minute after a confirmed idle reading, which the model reads as the cache no longer
+holding the detach (guard `G1451`). `M1451` puts the old recall back, and TLC finds #1451 from the model alone
+(`T`, `IJ`, FK on, 11 states). retire dispatches, the launcher reads the job, the operator idles it, retention
+loosens, the recall clears the mark, and the launcher's next run detaches the partition with nothing vouching for it.
+`M1438armed` stays, for path 2: a caller who cannot read the job (pg_cron shows a job only to its owner) is still not
+modelled, nor is an idle not yet committed, and the minute is taken to outlast the refresh rather than checked.
+The cache grew `CustodyFK.cfg` from 12.2M distinct states to 19.8M. It would have taken `CustodyLive.cfg` from 5.0M to
+about 8M, past what one CI job can check, so that config now leaves out the archive-side groups (`SG`, `OC`, `SB`),
+which move archive coverage and not custody, and checks 1.56M. The safety configs keep them, and CI runs the liveness
+check as a job of its own beside the rest (`./test.sh formal --part=core|live`).
 
 ### Claim C2: a tracked rename turns recorded chunks into orphans, and retire drops rows nothing vouches for
 
@@ -171,8 +186,41 @@ It was first triaged as an abstraction gap and closed by having the `ATTACH` wai
 `ATTACH`). Review of #1458 refuted that: launching a run copies the command, it does not put the worker in the lock
 queue, so the lock queue's order says nothing about an `ATTACH` that lands while the worker is still starting. The
 window needs no stale cache (the run read the command before the idle); its width is a worker's start, against an
-operator reading the release. Hypothesis H_C3 assumes the wait; `CustodyFK-asisC3.cfg` drops it and keeps the trace.
+operator reading the release. With pg_cron's cache modelled (#1451) the window widens to the launcher's refresh: a run
+launched after the `ATTACH` by a launcher that has not re-read the job detaches the table again too (`CustodyFK.cfg`,
+11 states), and H_C3 waits that out as well. Hypothesis H_C3 assumes the wait; `CustodyFK-asisC3.cfg` drops it and keeps the trace.
 It is the release-path sibling of #1451's stale-cache window.
+
+### Claim C4: a stale launcher run detaches a namesake after pgpm idles the job
+
+Filed as #1462.
+
+Found modelling pg_cron's command cache for #1451, on `CustodyFK.cfg`. pgpm returns the job to idle with
+`cron.alter_job`, but pg_cron's launcher goes on launching the command it read last until it re-reads the job, about a
+second after the change commits. The detach command names its partition by name (#407 accepts that it can land on a
+substitute, and the model accepts it while a live retirement owns the command, as `jobFor`). Every idle site has the
+window, and two traces reach it with no retirement left to own the command.
+
+- **forget_missing** (`CustodyFK-asisC4.cfg`, 9 states): retire dispatches the detach of `c1`, and the launcher reads
+  it. The operator drops the parent and runs `pgpm.forget_missing()`, which idles the job (#893's guard). They
+  re-create the parent with a partition named `c1`. In the second before the refresh, a run launches with the old
+  command and detaches the new `c1`. Its rows leave the parent, and nothing records the detach.
+- **retire's DROP** (10 states): retire dispatches the detach of `c1`, and the launcher reads it. The operator
+  detaches `c1` by hand (still pgpm's retirement), retire drops it and idles the job, and the operator renames `c2` to
+  `c1`. The stale run detaches the operator's partition. The rename can also come after the refresh, while a run the
+  stale launcher already started has not yet resolved its name.
+- **retire's release** (12 states): pgpm's detach of `c1` lands and the job stays armed. The operator renames the
+  detached `c1` away and `c2` to `c1`, both legitimate while the job is armed. retire then releases the renamed
+  retirement (#1427) and idles the job, and the stale run detaches the operator's `c1`. The namesake was in place
+  before the idle, so no wait on the operator's side describes the claim.
+
+ResolveByRecord fails on all three: the run detaches a relation no record names. NoLostRow fails on the first. The
+default cadence is every minute and the window about a second, so a script that drops, forgets and re-creates in one
+go can meet it. Hypothesis H_C4 states the claim at the run: a run launched with a command the job no longer held,
+which no live retirement owned, detaches only the relation that command was dispatched for (`jobStale` records it at
+launch). That leaves #1451's own stale run (it detaches the partition it was dispatched for, so M1451 is still
+caught), #893's (the job still held its command), and C3 (the same table, attached back) in view.
+`CustodyFK-asisC4.cfg` drops H_C4 and keeps the trace. C3's config keeps H_C4, so its trace stays C3's.
 
 ### Question Q1, decided: a renamed retirement is released, by oid (#1424)
 

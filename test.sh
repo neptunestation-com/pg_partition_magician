@@ -71,6 +71,10 @@ TRACK="matrix"
 SHARD_I=1
 SHARD_N=1
 LIST_ONLY=""
+# --part=core|live splits the formal track for CI's two parallel jobs: `live` is CustodyLive.cfg alone (the
+# liveness check, most of the track's time since pg_cron's cache came into the model, #1451), `core` is
+# everything else. With no --part the track runs both, as it always has.
+FORMAL_PART="all"
 for arg in "$@"; do
   case "$arg" in
     --channel=*) CHANNEL="${arg#--channel=}" ;;
@@ -80,6 +84,7 @@ for arg in "$@"; do
         echo "usage: --shard=I/N with 1 <= I <= N (got ${arg#--shard=})"; exit 2
       fi ;;
     --list) LIST_ONLY=1 ;;
+    --part=core|--part=live) FORMAL_PART="${arg#--part=}" ;;
     15|16|17|18|all) VERSION="$arg" ;;
     timescale) TRACK="timescale" ;;
     observe) TRACK="observe" ;;
@@ -91,7 +96,7 @@ for arg in "$@"; do
     lint) TRACK="lint" ;;
     formal) TRACK="formal" ;;
     ci) TRACK="ci" ;;
-    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | formal | lint | ci"; exit 1 ;;
+    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | formal [--part=core|live] | lint | ci"; exit 1 ;;
   esac
 done
 
@@ -1666,11 +1671,11 @@ run_lockview() {
 #      A mutation that kills the archive is run too, and the progress witnesses must go unreachable under it.
 #   1. The default configs check CLEAN: the design, as the documented contracts state it, keeps every
 #      invariant over every behaviour in scope. Custody.cfg is the one-step retire path, CustodyFK.cfg the
-#      detach path. They assume hypotheses H_C2 and H_C3 (guards the shipped code lacks; the spec's header).
+#      detach path. They assume hypotheses H_C2, H_C3 and H_C4 (guards the shipped code lacks; the spec's header).
 #   2. CustodyLive.cfg checks NoLostRowLive under fairness: a retirement retention stops reaching is
 #      released to the operator, so the custody exemption NoLostRow grants is never a place rows stay for good.
-#   3. The as-shipped configs are VIOLATED: Custody-asisC2.cfg keeps claim C2 (DropOnlyCovered) on record and
-#      CustodyFK-asisC3.cfg claim C3 (NoLostRow). The
+#   3. The as-shipped configs are VIOLATED: Custody-asisC2.cfg keeps claim C2 (DropOnlyCovered) on record,
+#      CustodyFK-asisC3.cfg claim C3 (NoLostRow) and CustodyFK-asisC4.cfg claim C4 (ResolveByRecord). The
 #      day it checks clean, either the model lost the path or the code was fixed and its hypothesis should
 #      go; either way somebody has to look. Claim C1 went that way: #1452 closed it, and its record is now the
 #      mutation M1438landed.
@@ -1680,15 +1685,19 @@ run_lockview() {
 #      checks clean is evidence only while it can still be shown to catch the defects it claims to.
 #
 # The jar and the JRE are pinned by checksum and digest (formal/tlc.sh), so the track needs Docker and
-# nothing the database tracks build.
+# nothing the database tracks build. CI runs it as two jobs: --part=live is part 2 alone, --part=core the rest.
 run_formal() {
   local f=formal/specs out c want
+  local clean="Custody CustodyFK CustodyLive"
   out=$(mktemp -d "${TMPDIR:-/tmp}/pgpm_formal.XXXXXX")
-  echo ">>> formal: the harness's own checks discriminate"
-  python3 formal/mutations/mutate.py selftest
-  echo ">>> formal: liveness witnesses (archive, drop, dispatch, overtaken read, custody all reachable)"
-  python3 formal/mutations/mutate.py witness
-  for c in Custody CustodyFK CustodyLive; do
+  case "$FORMAL_PART" in core) clean="Custody CustodyFK" ;; live) clean="CustodyLive" ;; esac
+  if [ "$FORMAL_PART" != live ]; then
+    echo ">>> formal: the harness's own checks discriminate"
+    python3 formal/mutations/mutate.py selftest
+    echo ">>> formal: liveness witnesses (archive, drop, dispatch, overtaken read, custody all reachable)"
+    python3 formal/mutations/mutate.py witness
+  fi
+  for c in $clean; do
     echo ">>> formal: $c.cfg must check clean"
     formal/tlc.sh "$f" Custody.tla "$c.cfg" > "$out/$c.out" 2>&1 || true
     if ! grep -q 'No error has been found' "$out/$c.out"; then
@@ -1697,8 +1706,9 @@ run_formal() {
     grep -E 'Finished in' "$out/$c.out" | tail -1
     python3 formal/mutations/mutate.py scope "$c.cfg" "$out/$c.out"
   done
+  if [ "$FORMAL_PART" = live ]; then rm -rf "$out"; return; fi
   # config:invariant for every claim still on record (C1 closed by #1452)
-  local asis="Custody-asisC2:DropOnlyCovered CustodyFK-asisC3:NoLostRow"
+  local asis="Custody-asisC2:DropOnlyCovered CustodyFK-asisC3:NoLostRow CustodyFK-asisC4:ResolveByRecord"
   for c in $asis; do
     want=${c#*:}; c=${c%%:*}
     echo ">>> formal: $c.cfg must keep its claim's violation of $want"
