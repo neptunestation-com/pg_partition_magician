@@ -264,6 +264,9 @@ outside the model for the same reason, and is guarded by `bench/write_block_read
 mutations.
 A mark that records no oid at all (v0.4.0) is outside the model for the same reason; its refusal by `retire`, the
 recall and the install pass (#1432, #1434) is guarded by `bench/unrecorded_mark_refused.sh` and its nine mutations.
+A DEFAULT partition, which makes PostgreSQL refuse every concurrent detach, is outside the model too (its
+detaches never refuse); `retire`'s refusal under one and the detach slot passing over it (#1453) are guarded by
+`bench/retire_default_partition.sh` and its six mutations.
 
 ## Independent fidelity read
 

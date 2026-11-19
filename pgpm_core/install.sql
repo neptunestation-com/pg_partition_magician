@@ -4522,7 +4522,7 @@ declare
   cfg pgpm.config; v_nsp name; v_boundary text; r record;
   v_referenced boolean; v_child regclass; v_now regclass; v_why text;
   v_cross text[]; v_coltype text; v_lo_lit text; v_hi_lit text; v_deleted int; v_reason text;
-  v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean; v_rec oid;
+  v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean; v_rec oid; v_default regclass;
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('retire', json_build_object('p_parent', p_parent, 'p_child', p_child));
@@ -4818,6 +4818,21 @@ begin
      where i.inhparent = p_parent and i.inhrelid = v_rel;
 
     if v_child is not null then
+      -- #1453: a DEFAULT partition on the parent makes PostgreSQL refuse every DETACH ... CONCURRENTLY of it, so
+      -- the detach could never land. Refused here, before the crossing DELETE (which would fire the operator's
+      -- referential actions for a detach that cannot follow) and before a mark or a dispatch: counted, with the
+      -- way out. A mark already dispatched stays, and the slot below passes over it until the DEFAULT is gone. A
+      -- detach already pending is not refused: FINALIZE completes it (_detach_reap) whatever partitions the parent has.
+      select t.partdefid::regclass into v_default
+        from pg_partitioned_table t where t.partrelid = p_parent and t.partdefid <> 0;
+      if v_default is not null and not v_pending then
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (p_parent, 'fail_retain_detach', r.lo, r.hi,
+                  format('%s has a DEFAULT partition, %s, and PostgreSQL detaches no partition concurrently while one exists, so %I.%I, which an incoming foreign key makes retire by a concurrent detach, cannot be retired; detach the DEFAULT partition, and the next tick dispatches it',
+                         p_parent, v_default, v_nsp, p_child));
+        return false;
+      end if;
+
       -- ONE DETACH IN FLIGHT AT A TIME, database-wide. There is a single standing cron job, so a
       -- second dispatch would overwrite the first and silently abandon it -- leaving a partition
       -- marked retiring_at that nothing is detaching. retain()'s batch loop walks every eligible
@@ -4831,7 +4846,9 @@ begin
       -- and both mark, after which each sees the other in flight and neither ever proceeds again. With a
       -- total order the oldest marker always wins, so there is always exactly one partition able to make
       -- progress and the loser simply retries. An unmarked candidate sorts last (`infinity`), so a fresh
-      -- retirement always yields to one already under way.
+      -- retirement always yields to one already under way. #1453: except one still attached to a parent with a
+      -- DEFAULT partition, whose detach PostgreSQL refuses on every run: it holds no slot while the DEFAULT stands.
+      -- One whose detach is pending keeps it: FINALIZE completes it whatever partitions the parent has.
       if exists (
         select 1 from pgpm.part p
          where p.retiring_at is not null
@@ -4840,7 +4857,10 @@ begin
              < (coalesce(r.retiring_at, 'infinity'::timestamptz), p_parent::text, p_child)
            and exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid   -- #1365: its anchor's
                         where i.inhparent = p.parent_table and c.relname = p.child_name   -- part-row-by-name: found by oid; a rename drops out
-                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)))
+                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)
+                          and (i.inhdetachpending
+                               or not exists (select 1 from pg_partitioned_table t
+                                               where t.partrelid = p.parent_table and t.partdefid <> 0))))
       then
         return false;
       end if;
@@ -5022,8 +5042,9 @@ $$;
 --   ARMED, still attached: nothing is done. The detach lands on pg_cron's next run, and a later call finds
 --   the partition detached. Except when it never can: a foreign key referencing the partition's rows (one
 --   added once retention stopped reaching them is ordinary), or a DEFAULT partition on the parent, makes
---   PostgreSQL refuse the detach on every run, and the mark, holding the one detach slot of the database,
---   starves every other retirement. A tick finds the DEFAULT, or the references as retire() does
+--   PostgreSQL refuse the detach on every run. Under a foreign key the mark, holding the one detach slot of the
+--   database, starves every other retirement; under a DEFAULT it holds none (#1453: retire()'s slot passes over
+--   it while the DEFAULT stands), but its rows wait. A tick finds the DEFAULT, or the references as retire() does
 --   (_crossing_keys), and logs fail_retain_crossing, counted, with the two ways out: remove the cause, or
 --   return the job to idle so a tick a minute later clears the mark. A reference check that could not run (a lock
 --   timeout) proves nothing, so it is logged skip_retain_crossing, uncounted, and the next tick asks again.
@@ -5148,7 +5169,7 @@ begin
       if v_armed then
         continue when p_reattach is not true;
         -- a DEFAULT partition refuses every concurrent detach of the parent, whatever references the rows
-        select format('is refused: %s has a DEFAULT partition, %s, and PostgreSQL detaches no partition concurrently while one exists', p_parent, t.partdefid::regclass),
+        select format('is refused: %s has a DEFAULT partition, %s, and PostgreSQL detaches no partition concurrently while one exists, so it can never land (while the DEFAULT stands, its retirement holds no detach slot)', p_parent, t.partdefid::regclass),
                format('Detach the DEFAULT partition %s', t.partdefid::regclass)
           into v_why, v_out
           from pg_partitioned_table t where t.partrelid = p_parent and t.partdefid <> 0;
@@ -5165,12 +5186,12 @@ begin
             continue;
           end;
           continue when coalesce(array_length(v_cross, 1), 0) = 0;
-          v_why := format('is refused: %s of its key(s) are referenced by a foreign key', array_length(v_cross, 1));
+          v_why := format('is refused: %s of its key(s) are referenced by a foreign key, so it can never land and its retirement holds the one detach slot of this database', array_length(v_cross, 1));
           v_out := 'Remove the references';
         end if;
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'fail_retain_crossing', r.lo, r.hi,
-                  format('retention no longer reaches %I.%I, but the detach pgpm dispatched for it %s, so it can never land and its retirement holds the one detach slot of this database. %s, and the detach lands and the table is released with its rows; or return the job to idle (select cron.alter_job(jobid, command => ''select 1'') from cron.job where jobname = ''pgpm_detach'' and command = %L), and a tick a minute after the idle clears the mark and keeps the partition',
+                  format('retention no longer reaches %I.%I, but the detach pgpm dispatched for it %s. %s, and the detach lands and the table is released with its rows; or return the job to idle (select cron.alter_job(jobid, command => ''select 1'') from cron.job where jobname = ''pgpm_detach'' and command = %L), and a tick a minute after the idle clears the mark and keeps the partition',
                          v_nsp, r.child_name, v_why, v_out, v_cmd_q));
         v_n := v_n + 1;
         continue;
