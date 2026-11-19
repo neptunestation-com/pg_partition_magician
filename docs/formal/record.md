@@ -295,6 +295,43 @@ archived rows on each path, a dispatched detach, a read a detach overtook, and r
 reachable. A mutation that kills the archive must make the progress witnesses unreachable, so the witness check
 is itself shown to discriminate.
 
+## What modelling pg_cron's cache taught (#1451, #1463)
+
+Review found #1451, and the model could not see it (K9). Bringing one detail of pg_cron into the model let the
+model see it, and turned up a new claim besides. Six lessons, each from something that happened in that work.
+
+- **A clean check said nothing about what the model left out.** #1451 sat in known gap K9 while the spec checked
+  clean, and the shipped recall could lose rows. With the launcher's cache modelled, TLC found #1451's path 1 in
+  11 states (M1451). The known-gaps list is part of the result: a clean check is a claim about the modelled world
+  only, and K9 said in advance which world that was.
+- **The defects live where pgpm meets its environment.** The one detail found trouble far from the recall it was
+  added for: claim C4, at `forget_missing` and at retire's DROP and release (#1462). pgpm's own logic was right at
+  each site. What was wrong was an assumption about pg_cron, that idling the job takes effect at once. Modelling the
+  environment more faithfully pays more than re-checking pgpm's code against a simplified one.
+- **The model refutes a framing in minutes.** The first H_C4 had the operator wait out the refresh. TLC answered
+  with a path where the namesake was in place before pgpm idled the job, so no operator-side wait could describe
+  the claim, and it had to be stated at the run itself (`jobStale`). A hypothesis is a claim too, and the checker
+  tests it. An adversarial review round takes hours to settle a framing; this took one TLC run.
+- **The model needs liveness witnesses as much as the tests do.** A bulk edit held the new `jobStale` fixed in
+  the very actions that set it, so a stale launch became impossible, and every config checked clean. Only M1451
+  coming back MISSED showed it. A mutation that must be caught is the model's witness that a mechanism is still
+  reachable, the same rule as "A vacuous pass, caught" above and CLAUDE.md's first section.
+- **State space is a budget, and a smaller world must not pass for the same check.** One variable grew
+  `CustodyFK.cfg` by 62% and put the full liveness check (7.6M states, 1 h 40 min with four TLC workers) out of CI's reach.
+  `CustodyLive.cfg` now leaves out the archive-side groups, and the change is written in the config, in the
+  scope floors (`SCOPE`, reset in the same commit) and here. The floors exist so that a narrower check cannot
+  quietly stand in for the wider one.
+- **The model has no clock.** It said C4 can happen, not how often. The reach (a one-second window against a
+  one-minute cadence, about one scripted drop-forget-recreate in sixty) came from reasoning about pg_cron outside
+  the model. Equally, `G1451` reads the recall's minute as outlasting the refresh rather than checking it. The
+  model answers "can this happen?". "How likely?" and "is this wait long enough?" are separate arguments, and the
+  record has to make them.
+
+For scale: #1451 took five per-PR verification rounds and about 2M tokens to close in code, each round finding a
+narrower path to the same harm. The model, once it had the mechanism, found the three paths of C4 in about an hour
+of TLC. Neither replaces the other. The review found paths through code the model abstracts (role visibility, a
+stamp from a younger cluster). The model found paths through an environment the review had treated as reliable.
+
 ## Per-PR verification of this PR
 
 An independent agent tried to make `./test.sh formal` pass where it should fail. A model with no reachable
