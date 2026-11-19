@@ -1058,6 +1058,10 @@ run_archive() {
   # bench/discriminate.sh completes with a uuidv7 or text_time bound read as its instant again.
   echo "--- a direct strategy call reads an encoded grid's bound at its unit guard (issue #1369) ---"
   bash "$(dirname "$0")/bench/archive_direct_call_encoded_unit.sh" pgpm_test-archive pgpm_perf423 || fail=1
+  # The core-uninstall-with-the-module guard (#1040) re-runs tests/archive/db/57 for the same reason: the clean-code
+  # half of the pair bench/discriminate.sh completes with archive.config given a foreign key to pgpm.config.
+  echo "--- the core uninstall goes through with pgpm_archive in use guard (issue #1040) ---"
+  bash "$(dirname "$0")/bench/archive_core_uninstall.sh" pgpm_test-archive pgpm_perf464 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
@@ -1411,7 +1415,7 @@ run_perf() {
     "bench/transmute_regrain_batch_positive.sh pgpm_perf461"
     "bench/retain_edges_tap.sh pgpm_perf462"
     "bench/regrain_capture_lock_wrong_kind.sh pgpm_perf463"
-    "bench/uninstall_keeps_dependants.sh pgpm_perf464"
+    "bench/uninstall_keeps_dependants.sh pgpm_perf470"
     "bench/regrain_history_coarse_child.sh pgpm_perf465"
   )
   local selected=()

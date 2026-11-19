@@ -141,13 +141,15 @@ begin
 
   -- #1040: `drop schema pgpm cascade` takes everything that depends on an object in pgpm, wherever it lives: a view
   -- of the operator's over pgpm.status() or pgpm.log in their own schema, a function of theirs taking or returning a
-  -- pgpm type (an archive strategy returns pgpm.archive_result), a column of such a type, a default, a constraint or
-  -- a policy calling a pgpm function. None of them is pgpm's to remove, and the cascade dropped every one silently.
+  -- pgpm type (an archive strategy of theirs returns pgpm.archive_result), a column of such a type, a default, a
+  -- constraint or a policy calling a pgpm function. None of them is pgpm's to remove, and the cascade dropped every one silently.
   -- So the script REFUSES while any exists, naming each, as install.sql refuses a function change a view depends on
   -- (#983), and drops nothing. Only direct dependants are named: one built on them goes with them, and dropping the
   -- named one by hand says so. pgpm's own triggers on the partitions it manages (pgpm_write_block,
   -- pgpm_regrain_truncate_guard: a pgpm_ trigger whose function is pgpm's) are the schema drop's to take, as the
-  -- header says. Asked first, from the catalog alone, so it holds against any installed release.
+  -- header says. pgpm's add-ons yield none: pgpm_hypertable and pgpm_archive's strategies live in pgpm, and nothing
+  -- in schema archive depends on pgpm (tests/archive/db/57 pins it, so a module that grows such an object is made to
+  -- say the right thing for it here first). Asked first, from the catalog alone, so it holds against any release.
   select string_agg(distinct x.what, ', ') into v_dependants_q
     from (select case when d.classid = 'pg_rewrite'::regclass
                       then (select case c.relkind when 'm' then 'materialized view ' else 'view ' end

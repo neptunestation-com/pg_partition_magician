@@ -7,8 +7,10 @@
   `pgpm.status()` in their own schema, a function of theirs returning `pgpm.archive_result`, a column default
   calling a `pgpm` function. It now refuses first (SQLSTATE `2BP01`), drops nothing, and names each direct
   dependant with the remedy, as `install.sql` refuses a change a view depends on (#983). pgpm's own triggers on the
-  partitions it manages are not named. tests/386; mutations `uninstall_drops_dependants`,
-  `uninstall_names_pgpm_triggers`.
+  partitions it manages are not named, and neither is anything of pgpm's add-ons: `pgpm_hypertable` and the
+  `pgpm_archive` strategies live in schema `pgpm`, and nothing in schema `archive` depends on it, so the uninstall
+  goes through with either module in use (the `archive` schema stays). tests/386 and tests/archive/db/57; mutations
+  `uninstall_drops_dependants`, `uninstall_names_pgpm_triggers`, `archive_config_references_pgpm`.
 - **`untransmute` returns `pgpm_detach` to idle when it forgets a retirement that armed it** (#954). A referenced
   forward partition's retirement leaves it attached until pg_cron runs the detach; `untransmute` deleted the row and
   left the job armed, so pg_cron re-ran the detach against the restored table on every tick. The job is now idled

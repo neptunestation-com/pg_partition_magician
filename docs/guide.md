@@ -179,11 +179,14 @@ of those rows. A copy made by 0.6.0 or earlier carries no record; drop it yourse
 
 Uninstall **refuses**, and removes nothing, while anything outside the `pgpm` schema depends on it: a view of
 yours over `pgpm.status()` or `pgpm.log` in your own schema, a function of yours taking or returning a `pgpm` type
-(an archive strategy returns `pgpm.archive_result`), a column of such a type, or a default, constraint or policy
-calling a `pgpm` function. Dropping the schema would take each of them with it. The error (SQLSTATE `2BP01`) names
-every one: save its definition (`select pg_get_viewdef('<view>'::regclass, true)` for a view), drop it, run the
-script again, then recreate it without `pgpm` if you still need it. A view you put inside the `pgpm` schema goes
-with the schema.
+(an archive strategy you wrote returns `pgpm.archive_result`), a column of such a type, or a default, constraint or
+policy calling a `pgpm` function. Dropping the schema would take each of them with it. The error (SQLSTATE `2BP01`)
+names every one: save its definition (`select pg_get_viewdef('<view>'::regclass, true)` for a view), drop it, run
+the script again, then recreate it without `pgpm` if you still need it. A view you put inside the `pgpm` schema goes
+with the schema. pgpm's own add-ons are never among the objects it names: the `pgpm_hypertable` functions and the
+`pgpm_archive` strategies live in the `pgpm` schema and go with it, and nothing in the `archive` schema depends on
+`pgpm`. Uninstall leaves the `archive` schema in place, its configuration (`archive.config`) and object-key ledger
+included. It is no use without `pgpm`; `drop schema archive cascade` removes it, configuration and all.
 
 Uninstall also puts back every incoming foreign key that `transmute(..., p_incoming_fks => 'preserve')`
 dropped and pgpm has not restored yet (a paused table's keys wait for a maintenance tick that never

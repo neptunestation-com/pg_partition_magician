@@ -18298,6 +18298,15 @@ MUTATIONS["uninstall_names_pgpm_triggers"] = (
       "                                                               and false))) x\n", 1)],
 )
 MUTATION_SRC["uninstall_names_pgpm_triggers"] = "pgpm_core/uninstall.sql"
+MUTATIONS["archive_config_references_pgpm"] = (
+    "bench/archive_core_uninstall.sh",
+    "pgpm_archive grows a catalog dependency on pgpm: archive.config's parent_table references pgpm.config, so "
+    "pgpm_core's uninstall refuses over the module's own constraint and tells the operator to save it, drop it and "
+    "recreate it without pgpm, which cannot be done for pgpm's module. tests/archive/db/57 catches it.",
+    [("create table if not exists archive.config (\n  parent_table    regclass    primary key,\n",
+      "create table if not exists archive.config (\n  parent_table    regclass    primary key references pgpm.config (parent_table),\n", 1)],
+)
+MUTATION_SRC["archive_config_references_pgpm"] = "pgpm_archive/install.sql"
 
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two
 # lines of an anchor. See main().
