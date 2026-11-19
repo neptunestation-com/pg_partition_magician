@@ -17955,6 +17955,15 @@ MUTATIONS["archive_skips_whole_step_dropped"] = (
     [("               where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null\n",
       "               where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null and false\n", 1)],
 )
+MUTATIONS["archive_skips_whole_step_reset_ignored"] = (
+    "bench/archive_ledger_wedges.sh",
+    "Issue #1468's defect: the whole-step count's mark is the parent's latest chunk alone, so a regrain swap that "
+    "deletes the parent's only chunks drops the mark to -infinity and every whole-step skip those chunks cleared "
+    "counts again. tests/367 part G catches it.",
+    [("                                       (select max(c.at) from pgpm.log c\n"
+      "                                         where c.parent_table = r.parent_table and c.action = 'archive_coverage_reset')),\n",
+      "                                       null::timestamptz),\n", 1)],
+)
 MUTATIONS["skip_archive_method_truncated"] = (
     "bench/archive_ledger_wedges.sh",
     "The archive step's skip_archive keeps 200 characters of the error again, cutting a refusal before its remedy. "
