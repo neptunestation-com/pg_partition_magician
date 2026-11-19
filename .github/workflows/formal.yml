@@ -11,20 +11,20 @@ name: Formal model
 # has no paths filter, so it would run on every queued group whatever the group touched. It is not one of
 # the summaries main requires, so the queue would not wait for it anyway; it would only burn runner hours.
 # A PR touching the model runs it, and so does the push to main that lands it.
+# The track's body is formal/run.sh, not test.sh (#1444): watching test.sh started a two-to-four-hour job on
+# every harness edit, a lint-only one included (#1443).
 on:
   push:
     branches: [ main ]
     paths:
       - 'formal/**'
       - 'scripts/formal/**'
-      - 'test.sh'
       - '.github/workflows/formal.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'formal/**'
       - 'scripts/formal/**'
-      - 'test.sh'
       - '.github/workflows/formal.yml'
   workflow_dispatch:
 
@@ -48,4 +48,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run the formal track
-        run: ./test.sh formal --part=${{ matrix.part }}
+        run: formal/run.sh --part=${{ matrix.part }}
