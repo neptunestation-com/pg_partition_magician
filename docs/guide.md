@@ -936,11 +936,15 @@ is what makes this path asynchronous, and what `pgpm.schedule()` is for here.
 **Then it is dropped**, by the next `retire` call that finds it detached. The referencing table's own
 foreign key survives the whole sequence and keeps enforcing.
 
-Three things follow, and none of them are optional:
+Four things follow, and none of them are optional:
 
 - **`pgpm.schedule()` is required to retire a referenced partition.** Without the `pgpm_detach` job there
   is nowhere to hand the detach to, and `retire` logs `fail_retain_detach` rather than reclaiming. If you
   scheduled pgpm before upgrading, re-run `pgpm.schedule()` once to create that job.
+- **A DEFAULT partition stops it.** pgpm builds none, but if you attach one, PostgreSQL refuses every
+  concurrent detach of the table, so `retire` logs `fail_retain_detach` (counted, naming the DEFAULT) and
+  keeps the partition, touching no row. Other tables' retirements are not held up. Detach the DEFAULT
+  partition and the next tick retires it.
 - **Retirement spans at least one extra tick.** `status().retain_detaching` counts partitions whose
   detach is in flight. Retention was already eventual, so this lengthens a delay rather than adding one.
   If retention stops reaching the partition in that window (you loosen it with `set_retain`, or the

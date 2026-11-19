@@ -1397,6 +1397,7 @@ run_perf() {
     "bench/retire_renamed_detached.sh pgpm_perf445"
     "bench/write_block_reads_mark.sh pgpm_perf446"
     "bench/unrecorded_mark_refused.sh pgpm_perf447"
+    "bench/retire_default_partition.sh pgpm_perf448"
   )
   local selected=()
   local n=${#guards[@]} idx
