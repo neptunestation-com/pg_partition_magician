@@ -463,7 +463,32 @@ begin
     raise exception 'pg_partition_magician: cannot migrate hypertable % with p_interval % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: a partition step is a whole number of calendar months or a fixed duration, never both (mixed month + duration interval unsupported). Give a whole number of months or a pure duration, then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy).',
       p_hypertable, p_interval;
   end;
+  -- #1221: and transmute's session-zone rule (#455), the one rule here that reads a setting rather than an
+  -- argument: a timestamptz grid records the transmuting session's TimeZone, and transmute refuses one
+  -- _canonical_tz cannot record ('UTC+3', 'localtime'). The cutover hands off in this same session, so asked
+  -- here it answers what the handoff will. A naive (timestamp, date) dimension's grid is UTC whatever the
+  -- session's zone (#504), so only a timestamptz one is asked.
+  if (select a.atttypid from pg_attribute a
+       where a.attrelid = p_hypertable and a.attname = p_control and not a.attisdropped) = 'timestamptz'::regtype
+     and pgpm._canonical_tz(current_setting('TimeZone')) is null then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: this session''s TimeZone (%) is not a zone pgpm can record: it must be a name in pg_timezone_names other than localtime, posixrules or Factory, and pgpm records the transmuting session''s zone as the one the partition grid of a timestamptz column is computed in for the life of the table. Set a named zone first (set timezone = ''UTC'' for UTC-aligned boundaries, the usual choice), then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy).',
+      p_hypertable, current_setting('TimeZone');
+  end if;
 end $$;
+
+-- _from_hypertable_infinite_chunk: the chunk TimescaleDB makes for an infinity value of the time dimension, whose
+-- range ends at infinity and starts past every finite bound it renders, or null (#1328). A predicate bounded at
+-- its range_start raises 'timestamp out of range' in TimescaleDB, so the copy's chunk-bounded read cannot reach
+-- it, and it stays when the rows in it are deleted. from_hypertable_copy refuses while it exists, and the
+-- frontier check's infinity refusal names it for the remedy.
+create or replace function pgpm._from_hypertable_infinite_chunk(p_hypertable regclass)
+returns regclass language sql stable as $$
+  select format('%I.%I', ch.chunk_schema, ch.chunk_name)::regclass
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    join timescaledb_information.chunks ch on ch.hypertable_schema = n.nspname and ch.hypertable_name = c.relname
+   where c.oid = p_hypertable and ch.range_end = 'infinity'::timestamptz
+   order by ch.chunk_name limit 1
+$$;
 
 -- _from_hypertable_check_frontier: transmute's frontier refusal (#457), asked of the hypertable before the
 -- swap (#792). A newest row further ahead of now() than one step plus an hour (a device with a wrong clock)
@@ -475,12 +500,17 @@ end $$;
 -- where the read's ACCESS SHARE would outlive it into a window something else must stay able to write in:
 -- from_hypertable asks it before its copy (whose first COMMIT ends that transaction), and the cutover under
 -- its ACCESS EXCLUSIVE, where the source is frozen and a row written while the cutover prepared is seen.
+-- #1328: and transmute's infinity refusal first, which p_force_frontier does not skip (transmute's does not
+-- either: no bound covers infinity, so there is nothing to accept). TimescaleDB accepts an infinity row (it
+-- refuses -infinity), and the far-future refusal below died raw on one, 'cannot subtract infinite timestamps'
+-- from its own message's v_max - now(), naming no table, column or remedy; with p_force_frontier the copy died
+-- raw on the chunk that holds it, after committing the apparatus and the chunks before it. The remedy names
+-- that chunk too, which the copy refuses while it exists (_from_hypertable_infinite_chunk).
 create or replace function pgpm._from_hypertable_check_frontier(
   p_hypertable regclass, p_control name, p_interval interval, p_force_frontier boolean
 ) returns void language plpgsql as $$
 declare v_typ regtype; v_max timestamptz; v_limit timestamptz;
 begin
-  if p_force_frontier then return; end if;
   select a.atttypid into v_typ
     from pg_attribute a where a.attrelid = p_hypertable and a.attname = p_control and not a.attisdropped;
   if v_typ is null or v_typ not in ('timestamptz'::regtype, 'timestamp'::regtype, 'date'::regtype) then
@@ -492,6 +522,12 @@ begin
                  case when v_typ = 'timestamptz'::regtype then '' else '::timestamp at time zone ''UTC''' end,
                  p_hypertable::text)
     into v_max;
+  if v_max = 'infinity'::timestamptz then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: its newest % is infinity, and no partition can hold it (a range partition''s upper bound is exclusive, and the monolith''s would have to lie past it), so p_force_frontier does not accept it either. Delete or correct the rows whose % is infinity, then drop the chunk TimescaleDB made for them once it is empty (DROP TABLE %; the copy cannot read it), and re-run.',
+      p_hypertable, quote_ident(p_control), quote_ident(p_control),
+      coalesce(pgpm._from_hypertable_infinite_chunk(p_hypertable)::text, '<the chunk whose range ends at infinity>');
+  end if;
+  if p_force_frontier then return; end if;
   v_limit := pgpm._frontier_skew_limit(p_interval);
   if v_max > v_limit then
     raise exception 'pg_partition_magician: cannot migrate hypertable % with p_interval % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: its newest % is %, which is % ahead of now() (%), more than one step plus one hour (the most the newest row may lead the clock by, so after %). That one value would fix the monolith''s permanent upper bound past it, and every row written until the clock gets there would land in the monolith, which cannot be regrained. Delete or correct the rows whose % is after %, or re-run with p_force_frontier => true to accept that bound.',
@@ -1026,6 +1062,7 @@ declare
   v_ctl_typid regtype; v_bound_tpl text; v_lo text; v_hi text;
   v_prev regclass; v_prev_fn regprocedure;   -- #955: what a previous copy recorded under the names minted here
   v_nkeys int; v_oldargs text; v_newargs text; v_delta_oid oid;   -- #1037: the capture's insert, by the record
+  v_inf_chunk regclass;   -- #1328: the chunk TimescaleDB made for an infinity value, if any
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('from_hypertable_copy', json_build_object(
@@ -1053,9 +1090,23 @@ begin
     raise exception 'pg_partition_magician: from_hypertable_copy(%) cannot bound the chunk copy on dimension % of type %: only timestamptz, timestamp and date dimensions are supported',
       p_hypertable, p_control, v_ctl_typid;
   end if;
+  -- #1328: and the chunk TimescaleDB makes for an infinity value, which the chunk loop below cannot bound a read
+  -- of: it died raw 'timestamp out of range' there, after committing the apparatus and the chunks before it.
+  -- Asked of the chunk, not the value, because the chunk outlives the rows (deleting them is half the remedy).
+  v_inf_chunk := pgpm._from_hypertable_infinite_chunk(p_hypertable);
+  if v_inf_chunk is not null then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % -- refused before anything is changed: its chunk % covers a range that ends at infinity, which TimescaleDB makes for an infinity value of %, and the copy cannot bound a read of it (TimescaleDB raises ''timestamp out of range'' on such a bound). Delete or correct the rows whose % is infinity, which no partition can hold either, then drop that chunk once it is empty (DROP TABLE %), and re-run.',
+      p_hypertable, v_inf_chunk, quote_ident(p_control), quote_ident(p_control), v_inf_chunk;
+  end if;
   -- #955: and every name this copy mints must be free or this hypertable's own recorded scratch object, before
   -- anything is created or dropped (see _from_hypertable_scratch_check).
   perform pgpm._from_hypertable_scratch_check(p_hypertable, p_track_changes);
+  -- #1037: and what a previous copy recorded follows the hypertable's owner before this drops it, as every other
+  -- path that drops those objects does (#969, _from_hypertable_scratch_follow): after ALTER TABLE <hypertable>
+  -- OWNER TO, the new owner's re-run died raw 'must be owner of function <rel>_pgpm_delta_fn' on the old
+  -- owner's apparatus, naming no remedy, where it now refuses once, 42501, naming pgpm.hand_over_scratch (or,
+  -- run by a role that may, hands them over and goes on).
+  perform pgpm._scratch_owner_follow(p_hypertable, 'from_hypertable_copy');
   v_delta := v_rel || '_pgpm_delta';
   v_trgfn := v_rel || '_pgpm_delta_fn';
   v_trg   := v_rel || '_pgpm_delta_trg';
@@ -1109,7 +1160,10 @@ begin
       raise exception 'pg_partition_magician: from_hypertable_copy(%, p_track_changes => true) needs a key to reconcile changes by, but the table has no primary key or unique constraint. Drop p_track_changes to migrate it append-only, or add a key first.',
         p_hypertable;
     end if;
-    -- the key columns, and the NEW./OLD. value lists the trigger logs, in key order
+    -- the key columns, and the NEW./OLD. value lists the trigger logs, in key order. #1413: the key columns
+    -- alone, the first indnkeyatts of indkey: an INCLUDE column follows them there and is no part of the key,
+    -- so a nullable one was refused below as 'a key with a nullable column', and a NOT NULL one widened the
+    -- delta and every reconcile's row constructor (the defect #1398 fixed in regrain's)
     select string_agg(quote_ident(a.attname), ', ' order by k.ord),
            string_agg('new.' || quote_ident(a.attname), ', ' order by k.ord),
            string_agg('old.' || quote_ident(a.attname), ', ' order by k.ord),
@@ -1118,7 +1172,7 @@ begin
       from pg_index i
       cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
       join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-     where i.indexrelid = v_keyidx;
+     where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;
     -- the capture's bind parameters: $1..$n for one key row, $n+1..$2n for an UPDATE's second
     select string_agg('$' || g, ', ' order by g) into v_oldargs from generate_series(1, v_nkeys) g;
     select string_agg('$' || g, ', ' order by g) into v_newargs from generate_series(v_nkeys + 1, 2 * v_nkeys) g;
@@ -1128,9 +1182,10 @@ begin
     -- silently lost (both online and under the lock). PK columns are NOT NULL, but a reused UNIQUE key may
     -- have nullable columns; refuse tracking up front rather than lose changes.
     if exists (select 1 from pg_index i
-                 cross join lateral unnest(i.indkey) as k(attnum)
+                 cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
                  join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-                where i.indexrelid = v_keyidx and not a.attnotnull and a.attname <> p_control) then
+                where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts   -- #1413: key columns, not INCLUDE
+                  and not a.attnotnull and a.attname <> p_control) then
       raise exception 'pg_partition_magician: from_hypertable_copy(%, p_track_changes => true) cannot track by a key with a nullable column -- a NULL key component can never be reconciled (the change would be lost). Add NOT NULL to the key column(s), or drop p_track_changes to migrate append-only.',
         p_hypertable;
     end if;
@@ -1182,6 +1237,9 @@ begin
     -- between, and the insert is dynamic, the key values bound. A delta that is gone refuses the write as
     -- 42P01, as the static insert did, naming the table and the remedy, rather than as a syntax error at the
     -- bare oid.
+    -- #1061: the LOCK's failures that mean "the name no longer leads here" include wrong_object_type (42809): a
+    -- materialized view, sequence or index the operator created under the freed name in the rename's
+    -- transaction cannot be locked, and the writer queued on the name died on it instead of taking the oid path.
     -- by-name-ok: a different contract (#1402): the copy is minted and recorded under the hypertable's schema name
     --   across its own commits, and a misplaced or short build is refused later (_from_hypertable_scratch wants it in
     --   the hypertable's schema; the cutover's conservation and #654 checks)
@@ -1193,7 +1251,7 @@ begin
         if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
           begin
             lock table only %I.%I in row exclusive mode;
-          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
             null;
           end;
           if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
@@ -1214,7 +1272,7 @@ begin
           end if;
           begin
             execute ''lock table only '' || n || '' in row exclusive mode'';
-          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
             if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
               raise;
             end if;
@@ -1985,9 +2043,9 @@ begin
       from pg_index i
       join pg_constraint con on con.conindid = i.indexrelid and con.contype in ('p', 'u')
      where i.indrelid = p_hypertable
-       and not exists (select 1 from unnest(i.indkey) as kc(attnum)
+       and not exists (select 1 from unnest(i.indkey) with ordinality as kc(attnum, ord)
                          join pg_attribute a on a.attrelid = i.indrelid and a.attnum = kc.attnum
-                        where not a.attnotnull)
+                        where kc.ord <= i.indnkeyatts and not a.attnotnull)   -- #1413: key columns, not INCLUDE
      order by con.contype = 'p' desc, con.conname
      limit 1;
     if v_akey is not null then
@@ -1998,7 +2056,7 @@ begin
         from pg_index i
         cross join lateral unnest(i.indkey) with ordinality as kc(attnum, ord)
         join pg_attribute a on a.attrelid = i.indrelid and a.attnum = kc.attnum
-       where i.indexrelid = v_akey;
+       where i.indexrelid = v_akey and kc.ord <= i.indnkeyatts;   -- #1413
     end if;
   end if;
 

@@ -846,8 +846,9 @@ to `transmute` (see there); `p_control` is the time dimension column; `p_track_c
 `p_lock_timeout` is refused before the copy starts, and so is a negative `p_retain` or `p_obtain`, a
 `p_drain_batch` or `p_interval` that is not positive, a `p_interval` or `p_anchor` the dimension's type cannot hold (a `date`
 step finer than a day, a `date` anchor off 00:00 UTC, a step or anchor finer than a `timestamp(p)` dimension
-keeps), a `p_interval` whose monolith name would not fit, a key that is a bare
-unique index, and a newest row past `transmute`'s frontier bound, see `from_hypertable_cutover`). `p_force_frontier` is passed through to the cutover and on to `transmute`.
+keeps), a `p_interval` whose monolith name would not fit, a session `TimeZone` `transmute` cannot record for a
+`timestamptz` dimension, a key that is a bare unique index, a newest row past `transmute`'s frontier bound, and
+a newest value of `infinity`, see `from_hypertable_cutover`). `p_force_frontier` is passed through to the cutover and on to `transmute`.
 When `p_retain` is left `null`, the source's `drop_chunks` policy interval (if any) is carried in.
 
 Call it from a direct session. The cutover waits for every snapshot older than its copy (see
@@ -888,7 +889,8 @@ the copied rows, or reads or sets the sequence the drains batch by, during the o
 cutover gives the migrated table the hypertable's own grants. Every drain, drain step and the cutover
 re-syncs the delta's grants from the hypertable's before it acts, as a regrain tick does, so a role granted
 DML on the hypertable during the online window can write from the next one on. And they follow the
-hypertable's owner as a regrain's do: after `ALTER TABLE <hypertable> OWNER TO`, each of those steps hands
+hypertable's owner as a regrain's do: after `ALTER TABLE <hypertable> OWNER TO`, each of those steps (and a
+re-run of this copy, before it drops the previous one's) hands
 them to the new owner when its role may, and otherwise refuses up front with the `pgpm.hand_over_scratch(...)`
 step (see [Handing a table to a new owner](#handing-a-table-to-a-new-owner-hand_over_scratch)). So the migrating role must be the hypertable's
 owner or a member of it (and the owner must hold `CREATE` on the schema), as the swap always required; this
@@ -904,7 +906,10 @@ hypertable was renamed or moved with `ALTER TABLE ... SET SCHEMA` (after a move 
 beside it and names this re-run) leaves nothing of the previous copy behind.
 Each chunk's bounds are
 applied in the dimension's own type (`timestamptz`, `timestamp` without time zone, or `date`), so the copy is exact under any
-session `TimeZone` and `DateStyle`; a hypertable on a dimension of any other type is refused here. The same
+session `TimeZone` and `DateStyle`; a hypertable on a dimension of any other type is refused here. So is a
+hypertable holding the chunk TimescaleDB makes for an `infinity` value (its range ends at infinity, and no read
+can be bounded at its start), before anything is created: delete or correct the rows whose value is
+`infinity`, drop that chunk once it is empty (the message names it, as `DROP TABLE <chunk>`), and re-run. The same
 holds for every watermark and control range the drains and the cutover carry: each is rendered in ISO style
 and in the column's own type, never through the session's zone or a zone abbreviation.
 
@@ -935,7 +940,9 @@ and in the column's own type, never through the session's zone or a zone abbrevi
   automatically by the cutover), and the cutover applies only the residual under the lock. Reconciliation is
   by the key `transmute` reuses (a primary key or unique constraint), so `p_track_changes => true` is
   **refused on a keyless table** (no key to reconcile by) and on a key with a **nullable (non-control)
-  column** (a `NULL` key component can never be reconciled, so the change would be lost). Set it for any
+  column** (a `NULL` key component can never be reconciled, so the change would be lost). A key's `INCLUDE`
+  columns are no part of it: the delta holds the key columns alone, and a nullable `INCLUDE` column is not
+  refused. The append-only catch-up's key anti-join reads the key columns the same way. Set it for any
   workload that updates or deletes rows, or can append out of order, during the migration window.
 
   **The capture trigger does not fire under `session_replication_role = replica`.** The core's own
@@ -1130,7 +1137,11 @@ frontier by `from_hypertable` before the copy, and both by the cutover under its
 that arrived while it prepared is seen too. A refused cutover rolls back whole, though a pre-drain's batches
 stay in the copy. For the key, build the unique constraint and drop the bare index (the message gives both
 statements); for the frontier, correct the rows, or pass `p_force_frontier => true` to accept the farther
-monolith bound, which is skipped here and passed to `transmute`.
+monolith bound, which is skipped here and passed to `transmute`. A newest value of `infinity` (TimescaleDB
+accepts one) is refused the same way and at the same points, `p_force_frontier` or not, since no partition can
+hold it (`... its newest <column> is infinity, and no partition can hold it ...`): delete or correct those rows,
+drop the chunk TimescaleDB made for them once it is empty (the message names the `DROP TABLE`;
+`from_hypertable_copy` refuses while it exists), and re-run.
 
 **`transmute`'s argument rules are asked first.** `transmute` refuses a negative `p_retain`, a negative
 `p_obtain`, a `p_interval` that is not positive and a `p_regrain_batch` that is not positive before it commits
@@ -1156,7 +1167,12 @@ cutover's shape check refuses a copy whose shape is not the hypertable's. The ru
 month count with a duration (`'1 mon 1 day'`, `'1 year 2 hours'`, `'1 mon -40 days'`) is refused before
 the copy and the swap (`... cannot migrate hypertable ... mixed month + duration interval unsupported ...`),
 where `transmute` would meet it only when it first places a bound. `'1 mon -40 days'`, which is below zero
-by interval ordering, is refused that way, never by the frontier check.
+by interval ordering, is refused that way, never by the frontier check. And on a `timestamptz` dimension,
+`transmute`'s session-zone rule: the grid is computed in the session's `TimeZone`, which must be a name
+`transmute` can record (see `transmute`), so a POSIX rule such as `'UTC+3'`, or `localtime`, is refused before
+the copy and before the swap (`... cannot migrate hypertable ... this session's TimeZone (UTC+3) is not a zone
+pgpm can record ...`). Set a named zone (`set timezone = 'UTC'`), then re-run. A `timestamp` or `date`
+dimension's grid is UTC whatever the session's zone, so it is not asked.
 
 **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
 preconditions to the plain table (for example, a secondary index whose name leaves no room for the `_pgpm`
@@ -3719,8 +3735,8 @@ non-superuser) refuses with a `skip_regrain` row whose message begins `run selec
 pgpm.hand_over_scratch(...)`, and the regrain resumes on the first tick after the step is taken. So does every
 other path that drops, empties or truncates those objects, before it changes anything: the tick that prepares
 the table's next regrain (it drops what the last one left), `regrain_cancel`, a retirement that reclaims the
-source of a regrain in flight, `untransmute`, and a `from_hypertable` migration's drains, drain steps and
-cutover. The refusal is SQLSTATE `42501` (`insufficient_privilege`).
+source of a regrain in flight, `untransmute`, and a `from_hypertable` migration's drains, drain steps,
+cutover and a re-run of `from_hypertable_copy` (which drops the previous copy's). The refusal is SQLSTATE `42501` (`insufficient_privilege`).
 A retirement with nothing of a regrain to reclaim is not refused. A null table is refused.
 
 ### `set_partition_tz`
