@@ -17794,16 +17794,27 @@ MUTATIONS["ledger_empty_equal_text_only"] = (
     "bench/archive_ledger_wedges.sh",
     "The install pass discards only a row whose hi is lo as written, so one whose hi is below lo (no release before #454 "
     "refused that either) still wedges its partition. One clause. tests/367 part A catches it.",
-    [(" or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))", ")", 1)],
+    [("\n              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n                      then coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false)\n                      else false end)", ")", 1)],
 )
 MUTATIONS["ledger_empty_cast_aborts"] = (
     "bench/archive_ledger_wedges.sh",
     "The install pass compares an id grid's bounds by casting them, as #1466's first head did, so an older install's "
     "ledger row whose hi is not a number (reference.md's contract check names the shape) aborts the whole install, "
     "the repair included. tests/367 part A catches it.",
-    [(" or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))",
+    [("\n              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n                      then coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false)\n                      else false end)",
       "\n              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n"
       "                      then not pgpm._native_gt(c.control_kind, l.hi, l.lo) else false end)", 1)],
+)
+MUTATIONS["ledger_empty_kind_unguarded"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass compares a row's bounds by their order keys without asking whether each names a value of the "
+    "parent's kind, as #1466's fourth head did, so a time bound written as digits ('20300101') compares as a number "
+    "and a retired chunk covering years, at a lo a partition holds, is discarded as empty: the record of the only "
+    "copy of a dropped relation's rows. tests/367 part A catches it.",
+    [("              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n"
+      "                      then coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false)\n"
+      "                      else false end)",
+      "              or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))", 1)],
 )
 MUTATIONS["ledger_empty_discards_retired"] = (
     "bench/archive_ledger_wedges.sh",

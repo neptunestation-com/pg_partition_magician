@@ -47,7 +47,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(41);
+select plan(42);
 
 create schema pgpm_t367;
 create table pgpm_t367.calls (parent regclass, p_child name, p_lo text, p_hi text);
@@ -118,6 +118,13 @@ select pgpm._enforce_write_blocks('public.ac367r');
 select pgpm.set_archive_fn('public.ac367r', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid, retired_at) values
   ('public.ac367r', '0', '0', :'r_child', 0, null, now());
+-- a time grid's retired chunk covering years, its hi written as digits, at the lo its partition holds
+create table public.ac367t (id bigint, ts timestamptz not null);
+insert into public.ac367t select g, '2026-01-01 00:00:00+00'::timestamptz + (g || ' hours')::interval from generate_series(1, 6) g;
+call pgpm.transmute('public.ac367t', 'ts', '1 month'::interval, p_retain => '5 years'::interval, p_paused => false);
+select lo as t_lo from pgpm.part where parent_table = 'public.ac367t'::regclass and attached order by lo::timestamptz limit 1 \gset
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, rows_archived, child_oid, retired_at) values
+  ('public.ac367t', :'t_lo', '20300101', 'ac367t_gone', 'the-only-copy', 20, null, now());
 
 select is(pgpm._archive_step('public.ac367a'), 0, 'A: LIVENESS: before the upgrade, a''s first chunk is not recorded');
 select ok(exists (select 1 from pgpm.log where parent_table = 'public.ac367a'::regclass and action = 'skip_archive' and lo = '0'),
@@ -131,6 +138,8 @@ select is(pgpm_t367.ledger('public.ac367a'), array['ac367a_gone:-5000--5000:reti
 select is(pgpm_t367.ledger('public.ac367r'), '{}'::text[],
   'A: and the retired row covering nothing at the lo a partition holds, which an older install''s upgrade marked');
 select is(pgpm_t367.ledger('public.ac367b'), '{}'::text[], 'A: and b''s row below its lo');
+select is((select count(*) from pgpm.archive_ledger where parent_table = 'public.ac367t'::regclass and s3_key = 'the-only-copy'),
+  1::bigint, 'A: a time grid''s retired chunk whose hi is written as digits is not read as empty, and stays');
 select is(pgpm_t367.ledger('public.ac367n'), array[format('%s:0-not-a-number:live', :'n_child')],
   'A: a row whose hi is not a number is compared as written and kept, and the install went on');
 delete from pgpm.archive_ledger where parent_table = 'public.ac367n'::regclass;

@@ -9,11 +9,13 @@
 # left under names an operator swapped, which are still tracked (#1440). The file re-runs install.sql with \ir; this
 # wrapper hands it the copy under test as the psql variable `install`, as bench/install_keeps_dependent_views.sh does.
 #
-# THIRTEEN mutations are required to fail against it (bench/mutations/mutate.py):
+# FOURTEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   ledger_empty_chunk_kept        -- the install pass discards no row covering nothing. Part A.
 #   ledger_empty_equal_text_only   -- only a row whose hi is lo as written, not one below lo. Part A.
 #   ledger_empty_discards_retired  -- a retired row covering nothing is discarded too. Part A.
 #   ledger_empty_cast_aborts       -- the bounds are cast, so a non-numeric hi aborts the install. Part A.
+#   ledger_empty_kind_unguarded    -- bounds compared by order key whatever the kind, so a time hi written as
+#                                     digits reads as a number and a retired chunk covering years goes. Part A.
 #   ledger_empty_retired_wedge_kept -- a retired empty row at a lo a partition holds is kept, so an install
 #                                     older than v0.6.0 (its upgrade marks every chunk retired) stays wedged. Part A.
 #   ledger_swap_by_name_only       -- the orphan discard asks only whether the name is tracked. Part B.

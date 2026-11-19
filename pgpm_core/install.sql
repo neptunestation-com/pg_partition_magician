@@ -6087,10 +6087,14 @@ create index if not exists archive_ledger_retired_hi_key_idx
 -- (_backfill_chunk_oids, an adopted anchor) has just marked every one of its chunks retired, the empty one included,
 -- and an empty range holds no partition (_over_retired_chunks), so the partition's first chunk met that row on the
 -- primary key every tick, as before. The partition still holds its rows and archives them again to the same object
--- key, so that row is discarded too; a retired empty row at a lo no partition holds stays as a record. Bounds are compared by their order key, which reads
--- only a bound that names one value in every session (#1336) and never raises: an older install can hold a hi that
--- is not a value of the column at all (reference.md, the archive step's contract check), and a cast of it here
--- aborted the whole install, the repair included. Any other pair is compared only as written. Logged
+-- key, so that row is discarded too; a retired empty row at a lo no partition holds stays as a record.
+--
+-- Bounds are compared by their order key, which reads only a bound that names one value in every session (#1336)
+-- and never raises: an older install can hold a hi that is not a value of the column at all (reference.md, the
+-- archive step's contract check), and a cast of it here aborted the whole install, the repair included. And only
+-- when both name a value of the parent's kind (_native_named): the key reads any digits as a number, and a time
+-- bound written as digits ('20300101') compared as one made a chunk covering years look empty. Any other pair is
+-- compared only as written. Logged
 -- archive_coverage_reset, once per partition.
 do $$
 declare r record;
@@ -6106,7 +6110,10 @@ begin
                             and (p.lo = l.lo
                                  or coalesce(pgpm._native_order_key(p.lo) <= pgpm._native_order_key(l.lo)
                                              and pgpm._native_order_key(l.lo) < pgpm._native_order_key(p.hi), false))))
-         and (l.hi = l.lo or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))
+         and (l.hi = l.lo
+              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)
+                      then coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false)
+                      else false end)
       returning l.parent_table, l.child_name, l.lo)
     select parent_table, child_name, count(*) as chunks, string_agg(lo, ', ' order by lo) as los
       from empty group by parent_table, child_name
