@@ -33,10 +33,28 @@
 --         is older than the cutover's transaction, and it is waited for.
 -- ASYMMETRIC: A has 240 rows, B 120, C 60 keyed devices with device 17 deleted, D 90, E 75, F 66, G 57; the rows
 -- are judged by identity against the source as it stood (a bag), never by count.
+--
+-- THE HORIZON (#1340; tests/328's header has the whole argument). A cutover against the copy's recorded last write
+-- (parts A to E) lists every session of this database whose backend_xmin is at or before it, and a snapshot's xmin is
+-- the oldest transaction running anywhere in the CLUSTER when it is taken. So while a transaction of another database
+-- that began before the copy's last write stays open (a neighbour, autovacuum's ANALYZE, the TimescaleDB scheduler),
+-- this session's own statements are listed too, beside the reader, and the refusal reads '2 snapshot(s)' or names
+-- this session as the oldest: on correct code. Each of those parts therefore waits, before its first cutover, for a
+-- fresh snapshot whose xmin is past the copy's last write (pg_temp.t67_horizon). The oldest running xid only moves
+-- forward, so once one snapshot shows it every later one does. Its budget (300 s) is a backstop against a
+-- transaction that never ends, and a GUARD after it says what it was for. Parts F and G wait against the cutover's
+-- own xid, which lists every snapshot open by design, and their assertions already allow other sessions. Two
+-- premises rest on the same fact and wait the same way (pg_temp.t67_past, pg_temp.t67_oldest_is): part C's reader
+-- must open past the source delete, and part G's S1 must have W's xid as its xmin, so that S2, exported once W has
+-- committed, is newer; an older transaction of another database still running at either moment broke both.
+-- THE WAIT'S MARKER (#1340). Parts E to G open their importer only once the cutover is in its snapshot wait, seen by
+-- the marker the wait takes (the advisory lock (1885826423, its own pid), objsubid 2, held from its first poll that
+-- finds a session to wait for until its transaction ends), not by a PgSleep sample, which is true only between the
+-- wait's polls; pg_temp.t67_await_marker returns NULL as soon as the cutover has finished without it.
 create extension if not exists dblink;
 \set pgpm_host `hostname -i | tr ' ' '\n' | grep -m1 '^[0-9][0-9.]*$'`
 select set_config('t67.connstr', format('host=%s dbname=%s user=postgres password=postgres', :'pgpm_host', current_database()), false) \g /dev/null
-select plan(41);
+select plan(48);
 
 -- runs the cutover in dblink connection p_conn, waits for it from short statements of this session, and returns
 -- its error message ('' when it went through): a refusal raised here would be a raw error
@@ -52,6 +70,52 @@ begin
   perform * from dblink_get_result(p_conn, false) as t(r text);   -- drains the connection
   if v_status = 'CALL' then return ''; end if;
   return dblink_error_message(p_conn);
+end $$;
+
+-- waits until no transaction at or before p_xid runs anywhere in the cluster: a fresh snapshot's xmin is past it
+-- (READ COMMITTED takes one per statement); returns whether it saw that, read in the same statement, never sampled
+-- again. The oldest running xid only moves forward, so every later snapshot is past it too.
+create function pg_temp.t67_past(p_xid xid8) returns boolean language plpgsql as $$
+declare v_until timestamptz := clock_timestamp() + interval '300 seconds';
+begin
+  loop
+    if p_xid is not null and pg_snapshot_xmin(pg_current_snapshot()) > p_xid then return true; end if;
+    if p_xid is null or clock_timestamp() > v_until then return false; end if;
+    perform pg_sleep(0.05);
+  end loop;
+end $$;
+
+-- waits until p_xid, still running, is the oldest transaction running anywhere in the cluster: a fresh snapshot's
+-- xmin IS it; none older can begin, so every snapshot taken from then until p_xid ends has that xmin
+create function pg_temp.t67_oldest_is(p_xid xid8) returns boolean language plpgsql as $$
+declare v_until timestamptz := clock_timestamp() + interval '300 seconds';
+begin
+  loop
+    if p_xid is not null and pg_snapshot_xmin(pg_current_snapshot()) = p_xid then return true; end if;
+    if p_xid is null or clock_timestamp() > v_until then return false; end if;
+    perform pg_sleep(0.05);
+  end loop;
+end $$;
+
+-- THE HORIZON: past p_parent's copy's recorded last write
+create function pg_temp.t67_horizon(p_parent regclass) returns boolean language sql as $$
+  select pg_temp.t67_past((select s.written_xid from pgpm.scratch s
+                            where s.parent_oid = p_parent::oid and s.kind = 'hypertable_dest'))
+$$;
+
+-- the moment p_pid was seen holding its snapshot wait's marker (THE WAIT'S MARKER), or NULL once its dblink call
+-- p_conn finished without it; it reads pg_locks, not a statistics view, and returns at once on the marker
+create function pg_temp.t67_await_marker(p_conn text, p_pid int) returns timestamptz language plpgsql as $$
+declare v_until timestamptz := clock_timestamp() + interval '300 seconds';
+begin
+  loop
+    if exists (select 1 from pg_locks where pid = p_pid and locktype = 'advisory' and classid = 1885826423::oid
+                and objid = p_pid::oid and objsubid = 2 and granted) then
+      return clock_timestamp();
+    end if;
+    if dblink_is_busy(p_conn) = 0 or clock_timestamp() > v_until then return null; end if;
+    perform pg_sleep(0.01);
+  end loop;
 end $$;
 
 select mk_plain_hypertable('h67', 240, '1 day', '10 days') \g /dev/null
@@ -76,6 +140,8 @@ select is((select count(*) from pg_locks l, h67_reader r
                                  union all select c.oid from pg_class c where c.relname = (select name from h67_copy))),
   0::bigint, 'LIVENESS: the reader holds no lock on the hypertable, its chunks or the copy');
 
+select ok(pg_temp.t67_horizon('h67'::regclass),
+  'GUARD: no transaction at or before the copy''s last write still runs anywhere in the cluster, so this session''s snapshots from here on are newer than the copy and the cutover lists the reader alone');
 -- the cutover, from a second session so that a cutover which does not wait commits its swap (a refusal raised in
 -- this session would be a raw error); p_predrain => false keeps its swap in the transaction its call opened, which
 -- began before this session's poll, so the poll is not one of the snapshots it waits for
@@ -145,6 +211,8 @@ select ok(not (select rolsuper from pg_roles where rolname = 't67_owner')
                  from pg_stat_activity where pid = (select pid from h67b_reader)),
   'LIVENESS: (B) the owner, no superuser and without pg_read_all_stats, sees the reader''s snapshot and nothing else of it');
 reset role;
+select ok(pg_temp.t67_horizon('h67b'::regclass),
+  'GUARD: (B) no transaction at or before the copy''s last write still runs anywhere in the cluster (THE HORIZON)');
 select dblink_connect('d67b', current_setting('t67.owner')) \g /dev/null
 select alike(pg_temp.t67_cutover('d67b', $q$call pgpm.from_hypertable_cutover('h67b', 'ts', interval '1 month', p_paused => false, p_predrain => false, p_lock_timeout => '1s')$q$),
   'ERROR:  pg_partition_magician: hypertable cutover deferred: 1 snapshot(s) older than the copies still open (oldest: pid '
@@ -169,6 +237,8 @@ delete from h67c where device_id = 17;                              -- captured 
 insert into h67c_del select pg_current_xact_id();
 commit;
 create temp table h67c_after as select ts, device_id from h67c;     -- 59 devices, 17 gone
+select ok(pg_temp.t67_past((select xid from h67c_del)),
+  'GUARD: (C) no transaction at or before the source delete still runs anywhere in the cluster, so a snapshot taken now is past it');
 -- the reader opens after the source delete, so device 17 is gone to it, and touches nothing of the table
 select dblink_connect('r67c', current_setting('t67.connstr')) \g /dev/null
 select dblink_exec('r67c', 'begin isolation level repeatable read') \g /dev/null
@@ -181,6 +251,8 @@ select ok((select age(a.backend_xmin) >= age(s.written_xid::xid)
              from pg_stat_activity a, pgpm.scratch s
             where a.pid = (select pid from h67c_reader) and s.parent_oid = 'h67c'::regclass::oid and s.kind = 'hypertable_dest'),
   'LIVENESS: (C) and predates the drain that deleted it from the copy, the copy''s last write');
+select ok(pg_temp.t67_horizon('h67c'::regclass),
+  'GUARD: (C) no transaction at or before the copy''s last write (the drain''s delete) still runs anywhere in the cluster (THE HORIZON)');
 select dblink_connect('d67c', current_setting('t67.connstr')) \g /dev/null
 select alike(pg_temp.t67_cutover('d67c', $q$call pgpm.from_hypertable_cutover('h67c', 'ts', interval '1 month', p_paused => false, p_predrain => false, p_lock_timeout => '1s')$q$),
   'ERROR:  pg_partition_magician: hypertable cutover deferred: 1 snapshot(s) older than the copies still open (oldest: pid '
@@ -203,10 +275,27 @@ select dblink_connect('r67d', current_setting('t67.connstr')) \g /dev/null
 select dblink_exec('r67d', 'begin isolation level repeatable read') \g /dev/null
 create temp table h67d_reader as select pid from dblink('r67d', 'select pg_backend_pid() from pg_class limit 1') as t(pid int);
 call pgpm.from_hypertable_copy('h67d', 'ts');
--- the reader runs a statement that does not touch the table and outlasts the cutover's budget
+select ok(pg_temp.t67_horizon('h67d'::regclass),
+  'GUARD: (D) no transaction at or before the copy''s last write still runs anywhere in the cluster (THE HORIZON)');
+-- the reader runs a statement that does not touch the table and outlasts the cutover's budget; it is seen running
+-- by a poll that records what it saw, not by one look after a fixed 0.2 s (#1340)
 select dblink_send_query('r67d', 'select pg_sleep(3)') \g /dev/null
-select pg_sleep(0.2) \g /dev/null
-select ok((select state = 'active' and backend_xmin is not null from pg_stat_activity where pid = (select pid from h67d_reader)),
+create temp table h67d_seen (at timestamptz);
+do $$
+declare v_until timestamptz := clock_timestamp() + interval '300 seconds';
+begin
+  loop
+    perform pg_stat_clear_snapshot();   -- the activity view is snapshotted per transaction (CLAUDE.md, #1045)
+    if exists (select 1 from pg_stat_activity where pid = (select pid from h67d_reader) and state = 'active'
+                and backend_xmin is not null) then
+      insert into h67d_seen values (clock_timestamp());
+      exit;
+    end if;
+    exit when dblink_is_busy('r67d') = 0 or clock_timestamp() > v_until;
+    perform pg_sleep(0.01);
+  end loop;
+end $$;
+select ok(exists (select 1 from h67d_seen),
   'LIVENESS: (D) the reader is in the middle of a statement, its snapshot from before the copy still held');
 select dblink_connect('d67d', current_setting('t67.connstr')) \g /dev/null
 select alike(pg_temp.t67_cutover('d67d', $q$call pgpm.from_hypertable_cutover('h67d', 'ts', interval '1 month', p_paused => false, p_predrain => false, p_lock_timeout => '1s')$q$),
@@ -232,21 +321,14 @@ select dblink_exec('a67e', 'begin isolation level repeatable read') \g /dev/null
 insert into h67e_state select 'snap', s from dblink('a67e', 'select pg_export_snapshot()') as t(s text);
 insert into h67e_state select 'apid', p::text from dblink('a67e', 'select pg_backend_pid()') as t(p int);
 call pgpm.from_hypertable_copy('h67e', 'ts');
+select ok(pg_temp.t67_horizon('h67e'::regclass),
+  'GUARD: (E) no transaction at or before the copy''s last write still runs anywhere in the cluster (THE HORIZON)');
 -- the cutover, its budget 3 s; it waits for A
 select dblink_connect('d67e', current_setting('t67.connstr')) \g /dev/null
 insert into h67e_state select 'dpid', p::text from dblink('d67e', 'select pg_backend_pid()') as t(p int);
 select dblink_send_query('d67e', $q$call pgpm.from_hypertable_cutover('h67e', 'ts', interval '1 month', p_paused => false, p_predrain => false, p_lock_timeout => '3s')$q$) \g /dev/null
-do $$
-begin
-  for i in 1..400 loop
-    perform pg_stat_clear_snapshot();
-    if exists (select 1 from pg_stat_activity where pid = (select v::int from h67e_state where k = 'dpid') and wait_event = 'PgSleep') then
-      insert into h67e_state values ('d_waiting_at', clock_timestamp()::text);   -- as observed: a moment later it may be between polls
-      exit;
-    end if;
-    perform pg_sleep(0.01);
-  end loop;
-end $$;
+insert into h67e_state select 'd_waiting_at', w::text   -- as observed (see THE WAIT'S MARKER)
+  from pg_temp.t67_await_marker('d67e', (select v::int from h67e_state where k = 'dpid')) w where w is not null;
 select ok(exists (select 1 from h67e_state where k = 'd_waiting_at'), 'LIVENESS: (E) the cutover is in its snapshot wait (waiting for A)');
 -- B: opened NOW, after the wait began, importing A's snapshot
 select dblink_connect('b67e', current_setting('t67.connstr')) \g /dev/null
@@ -302,17 +384,8 @@ select ok((select written_xid is null from pgpm.scratch where parent_oid = 'h67f
 select dblink_connect('d67f', current_setting('t67.connstr')) \g /dev/null
 insert into h67f_state select 'dpid', p::text from dblink('d67f', 'select pg_backend_pid()') as t(p int);
 select dblink_send_query('d67f', $q$call pgpm.from_hypertable_cutover('h67f', 'ts', interval '1 month', p_paused => false, p_predrain => false, p_lock_timeout => '3s')$q$) \g /dev/null
-do $$
-begin
-  for i in 1..400 loop
-    perform pg_stat_clear_snapshot();
-    if exists (select 1 from pg_stat_activity where pid = (select v::int from h67f_state where k = 'dpid') and wait_event = 'PgSleep') then
-      insert into h67f_state values ('d_waiting_at', clock_timestamp()::text);   -- as observed: a moment later it may be between polls
-      exit;
-    end if;
-    perform pg_sleep(0.01);
-  end loop;
-end $$;
+insert into h67f_state select 'd_waiting_at', w::text   -- as observed (see THE WAIT'S MARKER)
+  from pg_temp.t67_await_marker('d67f', (select v::int from h67f_state where k = 'dpid')) w where w is not null;
 select ok(exists (select 1 from h67f_state where k = 'd_waiting_at'), 'LIVENESS: (F) the cutover is in its snapshot wait');
 -- B: opened after the wait began, importing A's snapshot
 select dblink_connect('b67f', current_setting('t67.connstr')) \g /dev/null
@@ -358,6 +431,9 @@ select dblink_connect('w67g', current_setting('t67.connstr')) \g /dev/null
 select dblink_exec('w67g', 'begin') \g /dev/null
 select dblink_exec('w67g', 'insert into h67g_w values (1)') \g /dev/null
 insert into h67g_state select 'wpid', p::text from dblink('w67g', 'select pg_backend_pid()') as t(p int);
+insert into h67g_state select 'wxid', x from dblink('w67g', 'select pg_current_xact_id()::text') as t(x text);
+select ok(pg_temp.t67_oldest_is((select v::xid8 from h67g_state where k = 'wxid')),
+  'GUARD: (G) W is the oldest transaction running in the cluster, so S1''s xmin is W''s xid and S2''s, once W has committed, is newer');
 -- E: READ COMMITTED, exports S1 while W runs; W commits; E exports S2, a newer snapshot, still before the copy
 select dblink_connect('a67g', current_setting('t67.connstr')) \g /dev/null
 select dblink_exec('a67g', 'begin isolation level read committed') \g /dev/null
@@ -373,17 +449,8 @@ select ok((select written_xid is null from pgpm.scratch where parent_oid = 'h67g
 select dblink_connect('d67g', current_setting('t67.connstr')) \g /dev/null
 insert into h67g_state select 'dpid', p::text from dblink('d67g', 'select pg_backend_pid()') as t(p int);
 select dblink_send_query('d67g', $q$call pgpm.from_hypertable_cutover('h67g', 'ts', interval '1 month', p_paused => false, p_predrain => false, p_lock_timeout => '3s')$q$) \g /dev/null
-do $$
-begin
-  for i in 1..400 loop
-    perform pg_stat_clear_snapshot();
-    if exists (select 1 from pg_stat_activity where pid = (select v::int from h67g_state where k = 'dpid') and wait_event = 'PgSleep') then
-      insert into h67g_state values ('d_waiting_at', clock_timestamp()::text);   -- as observed: a moment later it may be between polls
-      exit;
-    end if;
-    perform pg_sleep(0.01);
-  end loop;
-end $$;
+insert into h67g_state select 'd_waiting_at', w::text   -- as observed (see THE WAIT'S MARKER)
+  from pg_temp.t67_await_marker('d67g', (select v::int from h67g_state where k = 'dpid')) w where w is not null;
 select ok(exists (select 1 from h67g_state where k = 'd_waiting_at'), 'LIVENESS: (G) the cutover is in its snapshot wait');
 -- B: opened after the wait began, importing A's snapshot
 select dblink_connect('b67g', current_setting('t67.connstr')) \g /dev/null

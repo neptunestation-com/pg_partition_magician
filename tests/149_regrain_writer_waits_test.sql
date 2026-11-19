@@ -92,18 +92,24 @@ select ok(exists (select 1 from pg_stat_activity where pid = :rpid and state = '
 -- one transaction, so its swap waits for every snapshot open while it runs (#1241): a statement of this session
 -- waiting on R (the DO below, blocked in dblink_get_result) would be one, and R would wait for it while it waited for
 -- R. So the wait is a shell loop (\!), which holds no snapshot here, asking a separate short-lived psql about R.
--- W is not such a reader to R: it waits on R's SHARE lock, which is the wait's one exemption.
+-- W is not such a reader to R: it waits on R's SHARE lock, which is the wait's one exemption. The loop's 600 s
+-- deadline is a backstop, never a budget: it returns the moment R is done. It is read off the clock, not counted in
+-- iterations, because each iteration starts a psql, whose cost under load is what made 1200 x 0.1 s no bound at
+-- all. A loaded run once outlasted the wait, and the collection below then waited on R from inside a statement
+-- while R waited for that statement, until the suite was killed (#1340). So a backstop that runs out cancels R
+-- before collecting it, and the hang becomes a failure that names it (57014 below) instead.
 \setenv T149_DB :DBNAME
 \setenv T149_RPID :rpid
-\! for i in $(seq 1 1200); do [ "$(psql -X -U postgres -d "$T149_DB" -Atc "select count(*) from pg_stat_activity where pid = $T149_RPID and state = 'active'")" = "0" ] && break; sleep 0.1; done
+\! end=$(( $(date +%s) + 600 )); while [ "$(date +%s)" -lt "$end" ]; do [ "$(psql -X -U postgres -d "$T149_DB" -Atc "select count(*) from pg_stat_activity where pid = $T149_RPID and state = 'active'")" = "0" ] && break; sleep 0.1; done
 -- Collect both sides, recording each one's SQLSTATE rather than dying on it.
 do $$
 declare v text;
 begin
+  if dblink_is_busy('rww_r') = 1 then perform dblink_cancel_query('rww_r'); end if;
   begin
     select x into v from dblink_get_result('rww_r') as t(x text);
     insert into public.rww_outcome values ('regrain', '00000', v, null);
-  exception when others then
+  exception when others or query_canceled then   -- OTHERS does not include 57014, the backstop's cancel
     insert into public.rww_outcome values ('regrain', sqlstate, null, left(sqlerrm, 200));
   end;
   begin
