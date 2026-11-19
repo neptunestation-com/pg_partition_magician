@@ -1714,7 +1714,12 @@ that job's command, and returns `false`; a later call finds the partition detach
 
 The sequence, per partition:
 
-1. If a live row references a doomed one, `DELETE` exactly those keys from the parent, so PostgreSQL
+1. If the table has a DEFAULT partition, stop: PostgreSQL refuses every concurrent detach of a table with one,
+   so the detach could never land. `fail_retain_detach` is logged, counted, naming the DEFAULT partition,
+   before anything below runs: no row is deleted, no retirement is marked and nothing is dispatched. Detach
+   the DEFAULT partition and the next call carries on. A partition whose detach is already pending is not
+   refused: `FINALIZE` completes it whatever the table's partitions.
+2. If a live row references a doomed one, `DELETE` exactly those keys from the parent, so PostgreSQL
    applies the referential action the operator declared. `CASCADE`, `SET NULL` and `SET DEFAULT` proceed,
    and a `CASCADE` reaches whatever further tables it would reach on any other delete; `NO ACTION` and
    `RESTRICT` refuse, and the refusal is logged `fail_retain_crossing` with the
@@ -1722,10 +1727,10 @@ The sequence, per partition:
    The keys are found by comparing each referencing column against the partition's bounds under the control
    column's collation, not the referencing column's own, so a referencing column declared without `COLLATE`
    (the database default, `en_US` say) still finds every key of a mixed-case `text_time` cell.
-2. Set `pgpm.part.retiring_at` and `pgpm.part.retiring_oid`, and point `pgpm_detach` at this partition's
+3. Set `pgpm.part.retiring_at` and `pgpm.part.retiring_oid`, and point `pgpm_detach` at this partition's
    concurrent detach, in one transaction, logged `retain_detach`. With no such job, `fail_retain_detach`
    is logged instead.
-3. On a later call, with the partition detached, return the cron job to idle, `DROP` the partition, delete
+4. On a later call, with the partition detached, return the cron job to idle, `DROP` the partition, delete
    the catalog row and log `retain_drop`. If the incoming FK has been dropped in the meantime, before the
    detach ran, the later call finishes the retirement with the one-step `DROP` of the still-attached
    partition instead; it returns the job to idle first too, provided the job still holds this
@@ -1745,8 +1750,9 @@ can take the partition out after any recall commits, so pgpm lets it land and ha
 - still attached, the `pgpm_detach` job holding its detach: nothing is done. The detach lands on pg_cron's
   next run, and the tick after it finds the partition detached (next bullet). Unless a foreign key
   references the partition's rows (one added once retention stopped reaching them is ordinary), or the
-  table has a DEFAULT partition: PostgreSQL then refuses the detach on every run, and the mark holds the
-  one detach slot of the database, so no other table's retirement is dispatched. Each tick finds the
+  table has a DEFAULT partition: PostgreSQL then refuses the detach on every run. Under a foreign key the
+  mark holds the one detach slot of the database, so no other table's retirement is dispatched; under a
+  DEFAULT it holds none while the DEFAULT stands, and other tables' retirements go ahead. Each tick finds the
   DEFAULT or the references and logs `fail_retain_crossing`, counted, whose `method` gives the two ways
   out: remove the references (or detach the DEFAULT partition), and the detach lands and the table is
   released (next bullet); or return the job to idle with the `cron.alter_job` statement it spells, and a
@@ -3768,7 +3774,7 @@ One row per managed table. Beyond the static config it surfaces:
   child whose chunked archiving simply hasn't caught up yet -- see `retire`). Non-zero means a partition
   is genuinely stuck. Counts `fail_retain_drop`, `fail_retain_crossing` (a live row references an aged
   one and the FK's own `ON DELETE` refused the delete), `fail_retain_detach` (nowhere to dispatch a
-  concurrent detach to), `fail_retain_identity` (the partition's name no longer resolves to the
+  concurrent detach to, or a DEFAULT partition on the table, which refuses every one), `fail_retain_identity` (the partition's name no longer resolves to the
   relation whose detach was dispatched), `fail_archive_identity` (the same mismatch found one step
   earlier, by the archive step, so coverage never completes and the drop gate never opens) and
   `fail_write_block_identity` (the same mismatch one step earlier again, so the partition never
@@ -4245,7 +4251,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
 | `skip_archive_retired_range` | the archive step left out a partition whose range overlaps a chunk `retire()` marked retired: archived, its first chunk would go to that chunk's object key, over the only copy of the dropped rows. Logged once per partition; `method` names the retired chunks, their object keys and the remedy (export the partition with `archive.to_s3`, then detach and drop it and delete its `pgpm.part` row), and, for a chunk whose bound names no instant and is held at its widest, its `lo` and the ledger update that writes the bound with its offset. The tick archives the parent's next partition instead, and `retire` never drops this one (see [the archive step](#byte-budget-chunked-archiving)) |
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan, or either did not get its table's lock in time |
-| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone, or (with `pg_cron`, for any role but a superuser) a pending or detached partition under a mark older than this release with no record of pgpm's dispatch, kept for a superuser's tick / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete, or a dispatched detach retention no longer reaches is refused for good by a foreign key referencing its rows or by a DEFAULT partition on the table (`method` gives the two ways out) / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
+| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone, or (with `pg_cron`, for any role but a superuser) a pending or detached partition under a mark older than this release with no record of pgpm's dispatch, kept for a superuser's tick / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`), or a DEFAULT partition on the table, which refuses every concurrent detach (detach it; `method` names it) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete, or a dispatched detach retention no longer reaches is refused for good by a foreign key referencing its rows or by a DEFAULT partition on the table (`method` gives the two ways out) / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which pgpm's dispatched detach had already taken out of the parent, was released to the operator rather than re-attached, since a pg_cron run may still carry the detach. The table and its rows are left whole; the `retain_disown` row logged with it gives the `ATTACH` that puts it back. Logged once. Counts in `status().retain_drop_failures` |
 | `fail_retain_recall` | a retirement retention no longer reaches was kept rather than cleared (or, its detach landed, rather than released), because the tick's role cannot read the `pgpm_detach` job that would hold its detach (pg_cron keeps a job per role that ran `pgpm.schedule()` and shows a role only its own): it is neither a superuser nor the one role whose job holds the detach (`retiring_by`), or the mark is older than this release, or more than one role dispatched it. `method` names the tick's role and the role to run as. Logged every such tick; counts in `status().retain_drop_failures`. Run maintenance as that role, or as a superuser |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |

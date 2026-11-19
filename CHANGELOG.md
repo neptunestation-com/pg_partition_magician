@@ -24,6 +24,17 @@
   `retire` takes its locks, so it cannot deadlock against it, and its in-flight rename note now includes the ledger.
   Guard `bench/archive_ledger_wedges.sh` runs `tests/367`, with fourteen mutations, and
   `bench/archive_skips_scans.sh` holds a `status()` call to one read of the ledger however many skips the log keeps.
+- **A referenced partition is no longer retired into a DEFAULT partition's refusal** (#1453). PostgreSQL refuses
+  every concurrent detach of a table with a DEFAULT partition. pgpm builds none, but nothing refused one an
+  operator attached, and `retire` dispatched the detach anyway: on every tick it was refused, `retire`
+  re-dispatched it and logged `retain_detach` (a success action), `status()` counted nothing, and the retirement's
+  mark held the database's one detach slot, so no other table's referenced retirement was ever dispatched. With
+  the DEFAULT there before the first dispatch, `retire` also ran the crossing `DELETE` first, firing the operator's
+  `ON DELETE` actions for a detach that could not follow. Now `retire` refuses before any of that, logging
+  `fail_retain_detach`, counted in `status().retain_drop_failures`, naming the DEFAULT partition, and the slot
+  passes over such a retirement while the DEFAULT stands, so other tables' retirements go ahead. A detach already
+  pending is neither refused nor passed over, since `FINALIZE` completes it. Detach the DEFAULT partition and the
+  next tick retires the partition. Guard `bench/retire_default_partition.sh` runs `tests/366`, with six mutations.
 - **A retirement whose detach pgpm dispatched is no longer cleared on a reading of the job that cannot be trusted**
   (#1451). When retention stopped reaching a still-attached partition whose `pgpm_detach` job no longer held its
   detach, the recall cleared the retirement's mark at once. Two readings of "no longer held" were wrong, and the

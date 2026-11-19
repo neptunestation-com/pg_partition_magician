@@ -16726,8 +16726,8 @@ MUTATIONS["retire_yield_by_relname"] = (
     "partition is still a partition of its parent by relname alone, so a namesake in another schema attached to that "
     "parent, after the marked partition was dropped by hand, holds every referenced retirement in the database off, "
     "silently. One clause, the anchor. tests/355 part B catches it.",
-    [("\n                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)))\n",
-      "\n                          ))\n", 1)],
+    [("\n                          and i.inhrelid = coalesce(p.retiring_oid, p.child_oid, pgpm._part_rel(p.parent_table, p.child_name)::oid)\n",
+      "\n", 1)],
 )
 
 # PR #1392 verification (V-01, V-02): the same relname-alone choice in the upgrade's paths. One clause each.
@@ -17777,6 +17777,56 @@ MUTATION_SRC.update({_m: "scripts/check_by_name_after_wait.py" for _m in (
     "by_name_lint_mark_in_literal")})
 
 
+# Issue #1453: retire() refuses a referenced partition's concurrent detach, counted, while the parent has a DEFAULT
+# partition (PostgreSQL refuses every such detach), before the crossing DELETE and before a mark; and the detach slot
+# passes over an attached retirement on such a parent, while a pending one keeps it. bench/retire_default_partition.sh
+# runs tests/366 against the mutant.
+MUTATIONS["retire_default_dispatched"] = (
+    "bench/retire_default_partition.sh",
+    "Issue #1453's defect: retire() dispatches the detach a DEFAULT partition refuses on every run, logging "
+    "retain_detach, counting nothing. One condition. tests/366 parts A and B catch it.",
+    [("      if v_default is not null and not v_pending then\n",
+      "      if false then\n", 1)],
+)
+MUTATIONS["retire_default_holds_slot"] = (
+    "bench/retire_default_partition.sh",
+    "The refused retirement's mark keeps the database's one detach slot, so another table's reached retirement is "
+    "never dispatched. The slot's DEFAULT clause removed. tests/366 parts B and C catch it.",
+    [("                          and (i.inhdetachpending\n"
+      "                               or not exists (select 1 from pg_partitioned_table t\n"
+      "                                               where t.partrelid = p.parent_table and t.partdefid <> 0))))\n",
+      "                          ))\n", 1)],
+)
+MUTATIONS["retire_default_slot_skips_pending"] = (
+    "bench/retire_default_partition.sh",
+    "The slot passes over a PENDING retirement on a parent with a DEFAULT too, so another table's dispatch takes the "
+    "job while FINALIZE could still complete the first. One clause. tests/366 part D catches it.",
+    [("                          and (i.inhdetachpending\n", "                          and (false\n", 1)],
+)
+MUTATIONS["retire_default_refuses_pending"] = (
+    "bench/retire_default_partition.sh",
+    "retire() refuses a detach that is already pending under a DEFAULT, which FINALIZE completes, logging a counted "
+    "failure for a retirement that is landing. One clause. tests/366 part D catches it.",
+    [("      if v_default is not null and not v_pending then\n",
+      "      if v_default is not null then\n", 1)],
+)
+MUTATIONS["retire_default_uncounted"] = (
+    "bench/retire_default_partition.sh",
+    "The refusal is logged under an action status() does not count, so retain_drop_failures stays 0. "
+    "tests/366 parts A and B catch it.",
+    [("          values (p_parent, 'fail_retain_detach', r.lo, r.hi,\n"
+      "                  format('%s has a DEFAULT partition, %s, and PostgreSQL detaches",
+      "          values (p_parent, 'skip_retain_detach', r.lo, r.hi,\n"
+      "                  format('%s has a DEFAULT partition, %s, and PostgreSQL detaches", 1)],
+)
+MUTATIONS["retire_default_after_crossing"] = (
+    "bench/retire_default_partition.sh",
+    "The refusal comes too late for a crossing: with a referencing row in the range, the crossing DELETE fires the "
+    "operator's ON DELETE actions and the detach is dispatched anyway. tests/366 part A catches it.",
+    [("      if v_default is not null and not v_pending then\n",
+      "      if v_default is not null and not v_pending\n"
+      "         and coalesce(array_length(pgpm._crossing_keys(p_parent, r.lo, r.hi), 1), 0) = 0 then\n", 1)],
+)
 # Issues #1439 and #1440: archive ledger rows that wedge a partition for good are discarded (a row covering nothing at
 # install, a row under a tracked name whose partition records another oid in the archive step), and status() counts a
 # skip_archive that recurs. bench/archive_ledger_wedges.sh runs tests/367 against the mutant.
