@@ -141,7 +141,8 @@ of its parent's: without it a keyless `FULL` table in a publication fails every 
 row past the monolith. A change to the parent's identity made later reaches the partitions minted after
 it, not the ones that already exist. A parent whose `USING INDEX` index was dropped (PostgreSQL allows it
 and treats the table as `NOTHING`) gives its new partitions `NOTHING`, and logs
-`warn_replica_identity_nothing` naming the first of them. The reused **key keeps its constraint name** on the parent, so
+`warn_replica_identity_nothing` naming the first of them. A table converted in that state gives its parent
+`NOTHING`, the identity it had in effect. The reused **key keeps its constraint name** on the parent, so
 `INSERT ... ON CONFLICT ON CONSTRAINT <name>` and DDL naming the key keep working; the monolith's copy is
 renamed `pgpm_key_<index oid>` to make way, and an `untransmute` hands the original name back. Every other
 **unique constraint** (one whose key includes the control column, beside the reused key) is carried the
@@ -339,7 +340,8 @@ Parameters:
   allowed and keeps only the partition taking writes. One exception to `null`: on a table a
   `from_hypertable_cutover` swapped in and could not hand over, `null` takes the retention that cutover
   recorded in [`pgpm.handoff`](#pgpmhandoff) (see its refused-handoff remedy).
-- `p_regrain_batch` -- rows per regrain COPY microbatch.
+- `p_regrain_batch` -- rows per regrain COPY microbatch. Must be positive: zero or a negative value is
+  refused before anything is committed, since the value is recorded for the life of the table.
 - `p_anchor` -- the grid origin the boundaries align to (month and year steps count from its month in
   the session's zone; day and shorter steps count seconds from the instant).
 - `p_paused` -- register paused (the default); `false` goes live immediately.
@@ -434,7 +436,7 @@ and `p_tt_alphabet`, whose null is the default alphabet): the message names each
 `p_regrain_batch`, `p_paused` or `p_tt_epoch` passed as null is refused rather than read as `true`, as
 absent, or as a bound no row satisfies; the step is not positive (a negative or zero
 interval or `bigint`), or is not a whole number of days or months on a `date` control column (a finer
-step's bounds truncate to dates); `p_anchor` is not at 00:00 UTC on a `date` control column, whose grid is
+step's bounds truncate to dates); `p_regrain_batch` is not positive; `p_anchor` is not at 00:00 UTC on a `date` control column, whose grid is
 computed in UTC (an anchor at noon, or `'2024-01-01'` typed in a New York session, which is 05:00 UTC, would
 have every bound attached at its date while pgpm recorded the hour: write the anchor with `+00`); the step (unless it is a whole number of months) or `p_anchor` is not a
 whole multiple of a `timestamp(p)` or `timestamptz(p)` control column's smallest unit (`10^-p` seconds),
@@ -453,7 +455,9 @@ that attempt used, which a rename in between does not change, or abort it), or o
 recorded in another encoding (any of `p_tt_prefix`, `p_tt_width`, `p_tt_radix`, `p_tt_unit`, `p_tt_alphabet`,
 `p_tt_discard_bits` or `p_tt_epoch` differs, so the `CHECK`'s literals cannot certify this call's partition
 bound either: re-run with that attempt's encoding, where an epoch at another offset for the same instant and
-the default alphabet written out are the same encoding, or abort it and re-run); the session's own
+the default alphabet written out are the same encoding, or abort it and re-run), or was computed in
+`localtime`, `posixrules` or `Factory` (a claim an older install recorded from a session set to one: abort it
+and re-run from a session in a named zone); the session's own
 `backend_start` is visible neither to the current role nor to pgpm's owner (a session under `SET ROLE` to a
 role without the session user's privileges, with pgpm owned by a role that has neither those nor
 `pg_read_all_stats`: the claim records it as its owner's identity, which a resume and the reaper match on,
@@ -611,7 +615,9 @@ that identity before it drops the bound, so a schema renamed while the call wait
 same-named table put in its place, is followed to the claimed table: the bound comes off it, and the
 other table keeps what it had. The sweep waits at most 5 s
 for the table's lock: behind a longer transaction it logs `skip_transmute_reap` and tries again next tick,
-rather than queue every read and write of the table behind its own `ACCESS EXCLUSIVE` request.
+rather than queue every read and write of the table behind its own `ACCESS EXCLUSIVE` request. A deadlock met
+in that wait (a reader of the table that also reads one the sweep has just reaped) is deferred the same way,
+not raised out of the tick.
 
 ### `untransmute`
 
@@ -650,7 +656,8 @@ conversion issues no `ALTER PUBLICATION` at all. A publication `FOR ALL TABLES` 
 names no table and covers the restored table as it covered the parent. And for its **replica identity**:
 `ALTER TABLE ... REPLICA IDENTITY` on the managed table lands on the parent only, so the restored table takes
 the parent's (`DEFAULT`, `FULL`, `NOTHING`, or `USING INDEX` on its own index that was attached under the
-parent's identity index) rather than the one the monolith kept from the conversion.
+parent's identity index) rather than the one the monolith kept from the conversion. A parent whose
+`USING INDEX` index was dropped hands back `NOTHING`, the identity PostgreSQL gives it in that state.
 
 The **indexes and index-backed constraints made on the managed table since the conversion** come back under
 the names the managed table gave them. `CREATE INDEX` or `ADD CONSTRAINT ... UNIQUE` on a partitioned table
@@ -833,7 +840,7 @@ migration does not need to interleave application writes between the phases. `p_
 to `transmute` (see there); `p_control` is the time dimension column; `p_track_changes`, `p_predrain` and
 `p_lock_timeout` are described under `from_hypertable_copy` and `from_hypertable_cutover` (a bad
 `p_lock_timeout` is refused before the copy starts, and so is a negative `p_retain` or `p_obtain`, a
-`p_interval` that is not positive, a `p_interval` or `p_anchor` the dimension's type cannot hold (a `date`
+`p_drain_batch` or `p_interval` that is not positive, a `p_interval` or `p_anchor` the dimension's type cannot hold (a `date`
 step finer than a day, a `date` anchor off 00:00 UTC, a step or anchor finer than a `timestamp(p)` dimension
 keeps), a `p_interval` whose monolith name would not fit, a key that is a bare
 unique index, and a newest row past `transmute`'s frontier bound, see `from_hypertable_cutover`). `p_force_frontier` is passed through to the cutover and on to `transmute`.
@@ -1122,11 +1129,13 @@ statements); for the frontier, correct the rows, or pass `p_force_frontier => tr
 monolith bound, which is skipped here and passed to `transmute`.
 
 **`transmute`'s argument rules are asked first.** `transmute` refuses a negative `p_retain`, a negative
-`p_obtain` and a `p_interval` that is not positive before it commits anything, and the cutover reaches it only
-after its swap. So `from_hypertable` before its copy, and the cutover before its pre-drain, ask the same rules
-first, ahead of every check that reads the table, and refuse with `transmute`'s own messages
-(`pg_partition_magician: p_retain cannot be negative ...`, `... p_obtain must be a non-negative integer ...`,
-`... the partition step must be positive ...`), with the hypertable untouched. A negative `p_interval` is
+`p_obtain`, a `p_interval` that is not positive and a `p_regrain_batch` that is not positive before it commits
+anything, and the cutover reaches it only after its swap. So `from_hypertable` before its copy, and the
+cutover before its pre-drain, ask the same rules first, ahead of every check that reads the table, and refuse
+with `transmute`'s own messages (`pg_partition_magician: p_retain cannot be negative ...`, `... p_obtain must
+be a non-negative integer ...`, `... the partition step must be positive ...`, and `... p_drain_batch must be a
+positive integer ...` for the batch the cutover hands `transmute` as `p_regrain_batch`), with the hypertable
+untouched. A negative `p_interval` is
 therefore refused as a step, with or without `p_force_frontier`, never by the frontier check, whose remedy
 (correct the newest rows) does not apply to it. The rules the time dimension's type puts on `p_interval` and
 `p_anchor` are asked there too, of the hypertable's own column, with `transmute`'s messages: on a `date`
@@ -4254,7 +4263,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `warn_grid_off_unit` | re-running `install.sql` (the upgrade) found a `time` grid an install from before `transmute` held a time grid to its control column could register: one whose registered `partition_anchor` or `partition_step` is not a whole multiple of what the column keeps (a `date` grid anchored other than 00:00 UTC, a `timestamptz(0)` grid anchored off the second): on a fixed step (days, hours) every partition `obtain` mints is attached at other bounds than `pgpm.part` records and every regrain is refused, while on a whole number of months, whose bounds fall at midnight on the 1st of a month whatever the anchor's time, every partition is attached at the bounds `pgpm.part` records and only a regrain toward a fixed step (which counts its fine cells from the anchor) is refused, and `method` says which; or a `date` or `timestamp` grid recorded in a zone other than UTC, whose bounds sit at that zone's midnight and on which every regrain toward a fixed step is refused (see [`set_regrain`](#set_regrain)). `method` names what is off and the remedy, a reconversion that `untransmute` can make only while every row is in the monolith (see the remedy under `set_regrain`). Logged once per grid; every run of `install.sql` that finds it also raises it as a `WARNING` |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_retain_crossing` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason, up to 1000 characters for `skip_archive`). A `skip_archive` that recurs every tick is not transient (stale credentials, a deleted bucket, a strategy's refusal): `status().archive_skips` counts the longest run of them since a recorded chunk. `skip_retain_crossing`: a tick could not check whether a foreign key refuses a dispatched detach retention no longer reaches, and checks again next tick |
-| `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout |
+| `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), or met a deadlock waiting for it, so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout or the deadlock |
 | `write_block_reenable` | a partition's retention write block was found disabled, `ENABLE REPLICA` or origin-only and was put back `ENABLE ALWAYS` (see [`maintain`](#maintain)); `method` names the partition and the state it found. Logged once per re-enable |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
 | `skip_archive_retired_range` | the archive step left out a partition whose range overlaps a chunk `retire()` marked retired: archived, its first chunk would go to that chunk's object key, over the only copy of the dropped rows. Logged once per partition; `method` names the retired chunks, their object keys and the remedy (export the partition with `archive.to_s3`, then detach and drop it and delete its `pgpm.part` row), and, for a chunk whose bound names no instant and is held at its widest, its `lo` and the ledger update that writes the bound with its offset. The tick archives the parent's next partition instead, and `retire` never drops this one (see [the archive step](#byte-budget-chunked-archiving)) |
@@ -4313,7 +4322,7 @@ carries a `pgpm_monolith_bound` `CHECK` and is refusing writes outside `[lo, hi)
 | `nsp` / `rel` | `name` | its schema and name as of the conversion's start, so the bound can still be dropped by name after the rename |
 | `control_kind` | `text` | `time`, `id`, `uuidv7` or `text_time` |
 | `lo` / `hi` | `text` | the native bounds the `CHECK` is enforcing; a retry reuses these rather than recomputing |
-| `partition_tz` | `text` | the zone `lo` and `hi` were computed in; a retry adopts it along with them, whatever zone its own session runs in (null on a row written before the column existed, which a retry reads as "keep this session's zone") |
+| `partition_tz` | `text` | the zone `lo` and `hi` were computed in; a retry adopts it along with them, whatever zone its own session runs in (null on a row written before the column existed, which a retry reads as "keep this session's zone"; `localtime`, `posixrules` or `Factory`, which an older install could record, is refused, so abort the claim) |
 | `control_attnum` | `smallint` | the attribute number of the control column `lo` and `hi` were computed on, which the `CHECK` constrains; a retry on another column is refused, one on the same column under a new name resumes (null on a row written before the column existed, which a retry does not check) |
 | `text_time_encoding` | `jsonb` | on a `text_time` key, the encoding the `CHECK`'s literals were written in (`prefix`, `width`, `radix`, `unit`, `alphabet` with an omitted one written out as the default it stands for, `discard_bits`, and `epoch` in seconds since 1970-01-01 UTC); a retry under another encoding is refused, the same one spelled otherwise resumes (null for every other kind, and on a row written before the column existed, which a retry does not check) |
 | `started_at` | `timestamptz` | when the conversion added the bound |

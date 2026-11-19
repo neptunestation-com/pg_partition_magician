@@ -20,6 +20,13 @@
 -- It now recognises such an index by what it is: on the recorded destination, with the key's definition, and
 -- under no temp name another of the table's keys adopts (part E: two keys with one definition).
 --
+-- Part F is the same read in core, reached from the cutover (issue #1333 bullet 4). The cutover's under-lock key
+-- gate (_from_hypertable_check_key, #792) asks transmute's own rule, pgpm._transmute_bare_unique, whether the
+-- table has a bare unique index transmute will refuse, and that rule asked "backs no constraint" of the index
+-- alone. A keyless hypertable copied append-only, then given a bare unique index and an incoming key on it in the
+-- online window, passed the gate: the swap committed, dropping the hypertable and the incoming key, and transmute
+-- refused the bare index after it, leaving a plain unmanaged table. The rule now asks for the table's own key.
+--
 -- ASYMMETRIC FIXTURE. Part A's key is a PRIMARY KEY (50 rows, ids 1 to 50, one incoming key); part B's is a
 -- UNIQUE constraint on a table with no primary key (30 rows, ids 101 to 130, one incoming key, and a secondary
 -- index of its own). In each, RENAME CONSTRAINT on the key rewrites its catalog row, so the incoming key's row
@@ -31,7 +38,7 @@
 -- row by id and handed the table to transmute; the incoming key was restored against the new parent. The
 -- checks name the index the copy built, by oid, the one key index the migrated parent carries, and (C) each
 -- index the migrated parent carries with the columns of the one that was lost.
-select plan(28);
+select plan(31);
 
 -- PART A: a primary key, referenced by an incoming foreign key.
 create table public.a68 (id int not null, ts timestamptz not null, v int, constraint a68_pk primary key (id, ts));
@@ -226,5 +233,30 @@ select is((select array_agg(c.relname::text order by c.relname) from pg_index i 
             where i.indrelid = 'public.e68'::regclass and i.indisunique),
           array['e68_dup', 'e68_pkey'],
           'E''s migrated parent carries both keys, each with one index');
+
+-- PART F: a keyless hypertable (rows 501 to 512) copied append-only, then a bare unique index on (ts, id) and an
+-- incoming key on it, added in the online window the cutover's gate exists for.
+create table public.f68 (id int not null, ts timestamptz not null, v int);
+select create_hypertable('public.f68', 'ts', chunk_time_interval => interval '1 day');
+insert into public.f68 select g, '2026-10-01'::timestamptz + make_interval(hours => g - 500), g from generate_series(501, 512) g;
+call pgpm.from_hypertable_copy('public.f68', 'ts', false);
+create unique index f68_ts_id_ux on public.f68 (ts, id);
+create table public.f68_ref (rid int primary key, id int, ts timestamptz,
+  constraint f68_ref_fk foreign key (ts, id) references public.f68 (ts, id));
+insert into public.f68_ref values (1, 505, '2026-10-01'::timestamptz + interval '5 hours');
+select ok((select conindid from pg_constraint where conname = 'f68_ref_fk' and conrelid = 'public.f68_ref'::regclass)
+            = 'public.f68_ts_id_ux'::regclass
+          and not exists (select 1 from pg_constraint where conrelid = 'public.f68'::regclass and contype in ('p', 'u')),
+  'LIVENESS: F''s incoming key sits on the bare unique index, and the hypertable has no key of its own');
+-- p_predrain => false, so a cutover that does not refuse dies on the swap's COMMIT inside throws_like
+select throws_like(
+  $$ call pgpm.from_hypertable_cutover('public.f68', 'ts', interval '1 day', p_predrain => false) $$,
+  'pg_partition_magician: cannot migrate hypertable f68 -- refused before anything is changed%the unique index f68_ts_id_ux %bare index%',
+  'the cutover''s key gate refuses F''s bare unique index, an incoming key on it or not, before the swap');
+select is((select count(*) from timescaledb_information.hypertables where hypertable_name = 'f68')
+          || '/' || (select string_agg(id::text, ',' order by id) from public.f68 where id in (501, 512))
+          || '/' || (select string_agg(conname, ',') from pg_constraint
+                      where conrelid = 'public.f68_ref'::regclass and contype = 'f' and confrelid = 'public.f68'::regclass),
+          '1/501,512/f68_ref_fk', 'invariant: F is still a hypertable holding its rows, and its incoming key is in place');
 
 select * from finish();

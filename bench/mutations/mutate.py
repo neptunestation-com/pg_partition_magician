@@ -397,7 +397,7 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
     when duplicate_table or duplicate_object or unique_violation then
       perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);
       perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
-        format('CREATE of the new parent %I.%I', v_nsp, v_staging));
+        format('CREATE of the new parent %I.%I', v_nsp, v_staging), p_skip => v_pre_names);
       raise;
     when internal_error then
       if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held
@@ -6855,7 +6855,7 @@ $$;''',
         "table named _<x>), that a still-open transaction was creating makes the CREATE die raw 23505 once it "
         "commits, after phases 1 and 2 committed the bound and the claim. One site: that handler's call.",
         [("      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],\n"
-          "        format('CREATE of the new parent %I.%I', v_nsp, v_staging));\n", "", 1)],
+          "        format('CREATE of the new parent %I.%I', v_nsp, v_staging), p_skip => v_pre_names);\n", "", 1)],
     ),
     "transmute_rename_held_names_unchecked": (
         "bench/transmute_cutover_names_held.sh",
@@ -6865,7 +6865,7 @@ $$;''',
         "commits. "
         "One site: that handler's call in its 23505 arm.",
         [("      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_monolith],\n"
-          "        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr]);\n", "", 1)],
+          "        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr], v_pre_names);\n", "", 1)],
     ),
     "transmute_final_rename_unhandled": (
         "bench/transmute_cutover_names_held.sh",
@@ -6894,7 +6894,8 @@ $$;''',
         "waits (tests/299 (M)), is blamed on a holder that existed before the statement and that PostgreSQL "
         "steps around (another monolith's implicit array type, equal to this table's monolith name), with a "
         "remedy that does not apply. One site: the arm's p_skip argument.",
-        [("array[p_parent], array[v_own_arr], v_pre_names);\n", "array[p_parent], array[v_own_arr]);\n", 1)],
+        [("array[p_parent], array[v_own_arr], v_pre_names);\n      end if;\n",
+          "array[p_parent], array[v_own_arr]);\n      end if;\n", 1)],
     ),
     "transmute_isolation_unchecked": (
         "bench/transmute_cutover_names_held.sh",
@@ -11791,11 +11792,13 @@ MUTATIONS["capture_definer_reach_by_fn_schema"] = (
 # tests/timescale/db/58 (bench/hypertable_argument_rules.sh, on the timescale track).
 _HT_ARGS_DRIVER = ("""  -- #1085: and transmute's argument rules, before the copy and ahead of the frontier check below, which would
   -- read a step that is not positive as a frontier to delete rows for
-  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain);
+  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain,
+                                                 p_drain_batch);
 """, "", 1)
 _HT_ARGS_CUTOVER = ("""  -- #1085: transmute's argument rules, before the pre-drain commits anything and before any check reads the
   -- table: refused only by transmute, they came after the swap had dropped the hypertable
-  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain);
+  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain,
+                                                 p_drain_batch);
 """, "", 1)
 MUTATIONS["hypertable_arguments_unchecked"] = (
     "bench/hypertable_argument_rules.sh",
@@ -11805,7 +11808,8 @@ MUTATIONS["hypertable_arguments_unchecked"] = (
     "check first, which tells the operator to delete the newest rows. _from_hypertable_check_arguments asks "
     "nothing. tests/timescale/db/58's ten refusals by from_hypertable and the cutover fail (the copy's or the "
     "swap's COMMIT dies 2D000 inside throws_like, and the negative step meets the frontier's message).",
-    [("  perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);\n",
+    [("  perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text,\n"
+      "                                               p_drain_batch, 'p_drain_batch');\n",
       "", 1)],
 )
 MUTATIONS["hypertable_arguments_unchecked_up_front"] = (
@@ -18092,6 +18096,120 @@ MUTATIONS["log_parent_action_index_dropped"] = (
     "catches it.",
     [("create index if not exists log_parent_action_idx on pgpm.log (parent_table, action);\n", "", 1)],
 )
+
+# Issue #1036: a REPLICA IDENTITY USING INDEX whose index was dropped (PostgreSQL's NOTHING, the #978 state) is
+# carried as NOTHING by transmute's step 9d and handed back as NOTHING by untransmute. tests/376
+# (bench/transmute_state_reads.sh).
+_G1036 = "bench/transmute_state_reads.sh"
+MUTATIONS["transmute_dropped_identity_index_refused"] = (
+    _G1036,
+    "Pre-#1036 transmute step 9d: a table whose identity index was dropped is refused 'that index was not carried "
+    "onto the partitioned parent', an index that does not exist. tests/376 part A catches it.",
+    [("""  -- #1036: USING INDEX with no identity index left (DROP INDEX allows it) is the #978 state, which PostgreSQL
+  -- treats as NOTHING, so NOTHING is the identity carried; it was refused as an index transmute had not carried.
+  if v_replident = 'i' and not exists (select 1 from pg_index where indrelid = p_parent and indisreplident) then
+    v_replident := 'n';
+  end if;
+""", "", 1)],
+)
+MUTATIONS["untransmute_dropped_identity_index_refused"] = (
+    _G1036,
+    "Pre-#1036 untransmute: a parent whose identity index was dropped is refused 'that index has no copy on the "
+    "original table to hand back', where the reference says the restored table takes the parent's identity, NOTHING "
+    "here. tests/376 part B catches it.",
+    [("""  -- #1036: USING INDEX with no identity index left is the #978 state, NOTHING to PostgreSQL, and handed back as
+  -- that; it was refused as an index with no copy on the original table.
+  if v_ri = 'i' and not exists (select 1 from pg_index where indrelid = p_parent and indisreplident) then
+    v_ri := 'n';
+  end if;
+""", "", 1)],
+)
+
+# Issue #1217: the staging CREATE's and the first RENAME's 23505 arms pass _transmute_refuse_names_held the holders
+# present before the statement ran (p_skip), so an implicit array type PostgreSQL moves aside is not named in place
+# of the enum in flight the statement collided with. tests/379 (bench/transmute_state_reads.sh).
+MUTATIONS["staging_create_names_held_unskipped"] = (
+    _G1036,
+    "Pre-#1217 staging CREATE: its 23505 arm asks _transmute_refuse_names_held without p_skip, so for public._s it "
+    "names the array type of s_pgpm_new committed at _s_pgpm_new beforehand, which cannot be dropped, and not the "
+    "enum in flight at __s_pgpm_new. tests/379 part A catches it.",
+    [("""      perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);
+      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
+        format('CREATE of the new parent %I.%I', v_nsp, v_staging), p_skip => v_pre_names);
+""", """      perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);
+      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
+        format('CREATE of the new parent %I.%I', v_nsp, v_staging));
+""", 1)],
+)
+MUTATIONS["monolith_rename_names_held_unskipped"] = (
+    _G1036,
+    "Pre-#1217 first RENAME: its 23505 arm asks _transmute_refuse_names_held without p_skip, so for public._m it "
+    "names the array type of m_p0000000000000000000 committed at the monolith's name beforehand, and not the enum in "
+    "flight at __m_p0000000000000000000. tests/379 part B catches it.",
+    [("""        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr], v_pre_names);
+      raise;
+    when internal_error then""", """        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr]);
+      raise;
+    when internal_error then""", 1)],
+)
+
+# Issue #1333 bullets 4 and 5: _transmute_bare_unique counts only a primary key or unique constraint of the table
+# itself as backing the index, so an incoming foreign key on a bare unique index does not hide it. tests/381
+# (bench/transmute_state_reads.sh); tests/timescale/db/68 part F holds the cutover's gate to it as well.
+MUTATIONS["bare_unique_any_constraint"] = (
+    _G1036,
+    "Pre-#1333 _transmute_bare_unique: any constraint whose conindid is the index backs it, an incoming foreign key's "
+    "included, so a keyless table whose bare unique index such a key references falls through as keyless and is "
+    "refused with incoming-key remedies that do not work. tests/381 catches it.",
+    [("""     and not exists (select 1 from pg_constraint con
+                      where con.conrelid = p_parent and con.contype in ('p', 'u') and con.conindid = i.indexrelid)
+""", """     and not exists (select 1 from pg_constraint con where con.conindid = i.indexrelid)
+""", 1)],
+)
+
+# Issue #1231 (B17-03): a deadlock met in _transmute_reap's per-claim lock wait defers that claim, as a lock
+# timeout does. tests/377 (bench/transmute_reap_deadlock.sh).
+MUTATIONS["transmute_reap_deadlock_escapes"] = (
+    "bench/transmute_reap_deadlock.sh",
+    "Pre-#1231 _transmute_reap: the per-claim handler catches lock_not_available alone, so the 40P01 the sweep meets "
+    "holding a reaped table while it waits on the next ends the whole maintain_all tick, the reap already done "
+    "rolled back with it. tests/377 catches it.",
+    [("      when lock_not_available or deadlock_detected then\n",
+      "      when lock_not_available then\n", 1)],
+)
+
+# Issue #1111 (V-02): a resume refuses a claim whose recorded zone _canonical_tz does not take (localtime,
+# posixrules, Factory, as an install before #1086 could record). tests/378 (bench/resume_claim_zone.sh).
+MUTATIONS["resume_claim_zone_unasked"] = (
+    "bench/resume_claim_zone.sh",
+    "Pre-#1111 resume: the claim's zone is adopted without asking _canonical_tz, so a claim recorded in localtime "
+    "registers config.partition_tz = 'localtime', a grid that follows the host. tests/378 catches it.",
+    [("  if v_resumed and v_claim_tz is not null and pgpm._canonical_tz(v_claim_tz) is null then\n",
+      "  if false then\n", 1)],
+)
+
+# Issue #1243: transmute refuses a p_regrain_batch that is not positive, with its other argument rules, and
+# pgpm_hypertable asks the same rule of p_drain_batch, which its cutover hands transmute. tests/380
+# (bench/transmute_regrain_batch_positive.sh) and tests/timescale/db/58 (bench/hypertable_argument_rules.sh).
+MUTATIONS["transmute_regrain_batch_unchecked"] = (
+    "bench/transmute_regrain_batch_positive.sh",
+    "Pre-#1243 _refuse_bad_transmute_arguments: the batch is asked nothing, so p_regrain_batch => 0 or -5 is "
+    "recorded and regrain copies one row per tick for good. tests/380 catches it.",
+    [("  if p_regrain_batch < 1 then\n", "  if false then\n", 1)],
+)
+MUTATIONS["hypertable_drain_batch_unchecked"] = (
+    "bench/hypertable_argument_rules.sh",
+    "#1243 without the hypertable path: _from_hypertable_check_arguments does not hand p_drain_batch to transmute's "
+    "rules, so a zero or negative one is refused only by transmute at the handoff, after the cutover's swap has "
+    "dropped the hypertable. tests/timescale/db/58's two p_drain_batch refusals fail (the copy's or the swap's "
+    "COMMIT dies 2D000 inside throws_like).",
+    [("""  perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text,
+                                               p_drain_batch, 'p_drain_batch');
+""", """  perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);
+""", 1)],
+)
+MUTATION_SRC["hypertable_drain_batch_unchecked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_batch_unchecked"] = "timescale"
 
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two
 # lines of an anchor. See main().

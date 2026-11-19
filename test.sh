@@ -1405,6 +1405,10 @@ run_perf() {
     "bench/archive_chunk_unshaped_key.sh pgpm_perf467"
     "bench/progress_coarse_frozen_built.sh pgpm_perf468"
     "bench/idle_reads_indexed.sh pgpm_perf469"
+    "bench/transmute_reap_deadlock.sh pgpm_perf458"
+    "bench/transmute_state_reads.sh pgpm_perf459"
+    "bench/resume_claim_zone.sh pgpm_perf460"
+    "bench/transmute_regrain_batch_positive.sh pgpm_perf461"
   )
   local selected=()
   local n=${#guards[@]} idx
