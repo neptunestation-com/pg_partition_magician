@@ -808,12 +808,12 @@ ARCHIVE_CHUNK_TIES_BLOCK = """    if not pgpm._native_gt(cfg.control_kind, v_sto
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
-      execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',
+      execute format('select %s from %s t where t.%I >= %L%s order by t.%I asc limit 1',
                      v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
                                   cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
-                     cfg.control_column)
+                     v_shaped_q, cfg.control_column)
         into v_next_distinct_col;
       v_stop := case when v_next_distinct_col is null then v_child_hi
                      else pgpm._col_to_native(cfg, v_next_distinct_col) end;
@@ -3764,8 +3764,9 @@ $$;''',
         "budget, so a fixture whose partitions each fit one chunk never gets here and a guard would "
         "pass with the defect present; tests/125 part (C) forces the aged month through a 400-byte "
         "budget, asserts that it took several chunks, and so finds the skip_archive rows this puts back.",
-        [("    execute format('select %s from %s t where t.%I > %L order by t.%I asc limit 1',\n"
-          "                   v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column, v_probe_hi_col, cfg.control_column)\n",
+        [("    execute format('select %s from %s t where t.%I > %L%s order by t.%I asc limit 1',\n"
+          "                   v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column, v_probe_hi_col, v_shaped_q,\n"
+          "                   cfg.control_column)\n",
           "    execute format('select min(%I)::text from %I.%I t where t.%I > %L',\n"
           "                   cfg.control_column, v_nsp, p_child, cfg.control_column, v_probe_hi_col)\n", 1)],
     ),
@@ -3823,12 +3824,12 @@ $$;''',
         "millisecond, which tests/125_uuidv7_regrain_archive never builds; tests/137's direct pick, its "
         "ledger identity (three chunks, the burst whole in the second) and its retire assertions are what "
         "catch it, through bench/archive_chunk_uuidv7_ties.sh, on PostgreSQL 17.",
-        [("      execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',\n"
+        [("      execute format('select %s from %s t where t.%I >= %L%s order by t.%I asc limit 1',\n"
           "                     v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,\n",
           "      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',\n"
           "                     cfg.control_column, v_nsp, p_child, cfg.control_column,\n", 1),
          ("                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
-          "                     cfg.control_column)\n"
+          "                     v_shaped_q, cfg.control_column)\n"
           "        into v_next_distinct_col;\n",
           "                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))\n"
           "        into v_next_distinct_col;\n", 1)],
@@ -8546,7 +8547,9 @@ select ok(
         "Pre-#982 progress(): write_child, write_ceiling, freeze_margin and freeze_in come from the pgpm.part "
         "row alone, so a frontier cell dropped or detached by hand is reported as the partition taking "
         "writes, with a healthy margin. One site. tests/279 catches it.",
-        [("         and pgpm._part_built(r.parent_table, p.child_oid, p.retiring_at)\n", "", 1)],
+        [("         and pgpm._native_gt(r.control_kind, p.hi, v_frontier)\n"
+          "         and pgpm._part_built(r.parent_table, p.child_oid, p.retiring_at)\n",
+          "         and pgpm._native_gt(r.control_kind, p.hi, v_frontier)\n", 1)],
     ),
     # Issue #956: a forward cell DETACHed by hand is not built.
     "obtain_trusts_detached_cell": (
@@ -8620,11 +8623,14 @@ select ok(
     ),
     "progress_coarse_counts_hand_detached": (
         "bench/write_block_skips_hand_detached.sh",
-        "Issue #705: progress().coarse_frozen stops mirroring the auto-regrain scan and counts a coarse child "
-        "the operator detached by hand, which auto-regrain will never work. One site, progress(). tests/307 "
+        "Issue #705: progress().coarse_frozen reads attached pgpm.part rows without _part_built and counts a coarse "
+        "child the operator detached by hand, which auto-regrain will never work. One site, progress(). tests/307 "
         "part E catches it.",
-        [("         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)   -- #705, as maintain asks\n",
-          "", 1)],
+        [("       where p.parent_table = r.parent_table and p.attached\n"
+          "         and pgpm._part_built(r.parent_table, p.child_oid, p.retiring_at)\n"
+          "         and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, r.partition_step, p.lo, r.partition_tz))\n",
+          "       where p.parent_table = r.parent_table and p.attached\n"
+          "         and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, r.partition_step, p.lo, r.partition_tz))\n", 1)],
     ),
     "regrain_detached_source_orphaned": (
         "bench/write_block_skips_hand_detached.sh",
@@ -14660,10 +14666,22 @@ MUTATIONS["archive_endpoint_default_port_kept"] = (
     "answers 403 SignatureDoesNotMatch to every request, after the read. One clause, the port's removal. "
     "tests/archive/db/53 part H catches it (the stored endpoint keeps the port, and the exports through a "
     "default-port endpoint, configured and stored by hand, are refused 403 by MinIO).",
-    [("  p_endpoint := regexp_replace(p_endpoint, '^(http://[^/]*):80(/|$)|^(https://[^/]*):443(/|$)', '\\1\\2\\3\\4');\n",
-      "", 1)],
+    [("                  || case when v_m[3] = '' or (v_m[1] = 'http' and v_m[3]::numeric = 80)\n"
+      "                                           or (v_m[1] = 'https' and v_m[3]::numeric = 443) then ''\n",
+      "                  || case when v_m[3] = '' then ''\n", 1)],
 )
 MUTATION_SRC["archive_endpoint_default_port_kept"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_endpoint_port_spelling_kept"] = (
+    "bench/archive_configure_endpoint.sh",
+    "Issue #1327's defect: archive._s3_endpoint_canonical keeps a port as it is spelled, so 'http://minio:09000' is "
+    "stored as given and the signers sign 'minio:09000' as the Host while libcurl, which reads the port as a number, "
+    "sends 'minio:9000': the store answers 403 SignatureDoesNotMatch to every request, after the read. One clause, "
+    "the port's number. tests/archive/db/53 part K catches it (the stored endpoint keeps the zeros, and both exports "
+    "through a zero-padded port, configured and stored by hand, are refused 403 by MinIO).",
+    [("                          else ':' || v_m[3]::numeric::text end\n",
+      "                          else ':' || v_m[3] end\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_port_spelling_kept"] = "pgpm_archive/install.sql"
 MUTATIONS["archive_endpoint_encoded_dot_segment_unrefused"] = (
     "bench/archive_configure_endpoint.sh",
     "archive.configure's dot-segment refusal reads only a spelled '.' or '..', so a path prefix holding '%2E%2E' or "
@@ -18013,6 +18031,66 @@ MUTATIONS["obtain_hand_attached_closed_bound"] = (
     "taken for covered and left a hole, and every write into it is refused. One operator. tests/368 part A catches "
     "it.",
     [("(s.hi is null or s.hi::%1$s %2$s > $3::%1$s %2$s)", "(s.hi is null or s.hi::%1$s %2$s >= $3::%1$s %2$s)", 1)],
+)
+
+MUTATIONS["incoming_fk_orphans_join_uncollated"] = (
+    "bench/incoming_fk_orphans_collation.sh",
+    "Issue #958's defect: incoming_fk_orphans joins each referencing column to the column it references with no "
+    "COLLATE, so a foreign key whose two text columns carry different collations raises 'could not determine which "
+    "collation to use' instead of counting its orphans. tests/388 catches it.",
+    [("    select string_agg(format('r.%I = p.%I', fa.attname, pa.attname)\n"
+      "                      || case when pa.attcollation <> 0 and pa.attcollation <> fa.attcollation\n"
+      "                              then ' collate ' || pa.attcollation::regcollation::text else '' end, ' and '),\n",
+      "    select string_agg(format('r.%I = p.%I', fa.attname, pa.attname), ' and '),\n", 1)],
+)
+MUTATIONS["archive_chunk_decodes_window_newest"] = (
+    "bench/archive_chunk_unshaped_key.sh",
+    "Issue #709's archive bullet, its first read: _next_archive_chunk decodes the window's newest control value again "
+    "(it was decoded into a local nothing read), so a text_time key without the declared shape at the end of a window "
+    "raises on every tick and the partition is never covered. tests/389's first odd key catches it.",
+    [("    -- extend to the next distinct value past the boundary",
+      "    perform pgpm._col_to_native(cfg, v_probe_hi_col);\n    -- extend to the next distinct value past the boundary", 1)],
+)
+MUTATIONS["archive_chunk_next_distinct_unshaped"] = (
+    "bench/archive_chunk_unshaped_key.sh",
+    "Issue #709's archive bullet, its second read: the next distinct value past a window is read whatever its shape, "
+    "and decoded, so a text_time key without the declared shape just past a window raises on every tick. tests/389's "
+    "second odd key catches it.",
+    [("v_probe_hi_col, v_shaped_q,", "v_probe_hi_col, '',", 1)],
+)
+MUTATIONS["archive_chunk_unit_next_unshaped"] = (
+    "bench/archive_chunk_unshaped_key.sh",
+    "Issue #709's archive bullet, its third read: the first row past a native unit (the #513 extension past a run of "
+    "rows in one unit) is read whatever its shape, and decoded, so a text_time key without the declared shape just "
+    "past a burst raises on every tick. tests/389's third odd key catches it.",
+    [("                     v_shaped_q, cfg.control_column)", "                     '', cfg.control_column)", 1)],
+)
+MUTATIONS["coarse_frozen_counts_dropped"] = (
+    "bench/progress_coarse_frozen_built.sh",
+    "Issue #1038's first bullet: progress().coarse_frozen leaves out only a coarse partition detached by hand again, "
+    "so one dropped by hand, whose pgpm.part row stays attached, is counted as frozen history while "
+    "status().coarse_partitions does not count it. tests/390 catches it.",
+    [("      select count(*) into coarse_frozen from pgpm.part p\n"
+      "       where p.parent_table = r.parent_table and p.attached\n"
+      "         and pgpm._part_built(r.parent_table, p.child_oid, p.retiring_at)\n",
+      "      select count(*) into coarse_frozen from pgpm.part p\n"
+      "       where p.parent_table = r.parent_table and p.attached\n"
+      "         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)\n", 1)],
+)
+MUTATIONS["archive_ledger_live_index_dropped"] = (
+    "bench/idle_reads_indexed.sh",
+    "Issue #1219's defect: archive_ledger has no index over the rows not retired, so every archive step's "
+    "_mark_gone_chunks and #511 orphan query read every retired chunk of the parent, and an idle tick's cost grows "
+    "with the whole archive history. tests/391 part A catches it.",
+    [("create index if not exists archive_ledger_live_child_idx\n"
+      "  on pgpm.archive_ledger (parent_table, child_name) where retired_at is null;\n", "", 1)],
+)
+MUTATIONS["log_parent_action_index_dropped"] = (
+    "bench/idle_reads_indexed.sh",
+    "Issue #1038's last bullet: pgpm.log has no (parent_table, action) index, so _obtain_name's stand-in lookup reads "
+    "the whole log, which is never pruned, while obtain can hold ACCESS EXCLUSIVE on the parent. tests/391 part B "
+    "catches it.",
+    [("create index if not exists log_parent_action_idx on pgpm.log (parent_table, action);\n", "", 1)],
 )
 
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two

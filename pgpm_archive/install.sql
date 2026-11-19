@@ -143,17 +143,26 @@ alter table archive.object_key_claim add column if not exists rows_digest text;
 -- the endpoint they are handed through it too, so a row stored with the slash (by an install before #1269, or by
 -- hand) and a direct call spelled with it address the same object as the endpoint spelled without. A path prefix
 -- (Supabase Storage's /storage/v1/s3) is kept; null (AWS S3) stays null.
--- And without the scheme's default port (':80' after http://, ':443' after https://): the signers sign the
--- endpoint's authority as the Host, and the client (libcurl, through the http extension) leaves a default port
--- out of the Host it sends, so 'http://host:80' was refused 403 SignatureDoesNotMatch on every request. Only
--- those two spellings are dropped. Any other port is kept as written, a default port spelled another way
--- (':080', or a ':' with nothing after it) and a zero-padded one (':09000') included, though the client sends
--- those as numbers too: such an endpoint is not caught here and is refused by the store at the first request.
+-- And with its port spelled as the client sends it. The signers sign the endpoint's authority as the Host, and the
+-- client (libcurl, through the http extension) reads the port as a number: it sends a zero-padded one without the
+-- zeros ('http://host:09000' as 'host:9000') and leaves the scheme's default port out however it is spelled (':80',
+-- ':080' or an empty ':' after http://, ':443' after https://), so every such endpoint was refused 403
+-- SignatureDoesNotMatch on every request (#1327). So a port is written as its number, and the scheme's default
+-- port, or no port after the ':', is dropped. A port of all zeros is no port the client can send to, and is left as
+-- written. The host is what precedes the last ':' before the path, so an IPv6 literal ('[::1]') keeps its colons.
 create or replace function archive._s3_endpoint_canonical(p_endpoint text)
 returns text language plpgsql immutable set search_path = pg_catalog, pg_temp as $$
+declare v_m text[];
 begin
   p_endpoint := regexp_replace(p_endpoint, '/+$', '');
-  p_endpoint := regexp_replace(p_endpoint, '^(http://[^/]*):80(/|$)|^(https://[^/]*):443(/|$)', '\1\2\3\4');
+  v_m := regexp_match(p_endpoint, '^(https?)://([^/]*):([0-9]*)(/.*)?$');
+  if v_m is not null and v_m[3] !~ '^0+$' then
+    p_endpoint := v_m[1] || '://' || v_m[2]
+                  || case when v_m[3] = '' or (v_m[1] = 'http' and v_m[3]::numeric = 80)
+                                           or (v_m[1] = 'https' and v_m[3]::numeric = 443) then ''
+                          else ':' || v_m[3]::numeric::text end
+                  || coalesce(v_m[4], '');
+  end if;
   return p_endpoint;
 end;
 $$;

@@ -865,6 +865,11 @@ create table if not exists pgpm.log (
   rows         bigint,
   at           timestamptz not null default now()
 );
+-- The log is append-only and never pruned, and its readers ask by parent and action: _obtain_name's stand-in lookup
+-- (forget_detached_partition), status()'s archive_skips (skip_archive, archive_coverage_reset), the archive step's
+-- skip_archive_retired_range. With only the identity key each of them read the whole log, the stand-in lookup while
+-- obtain held ACCESS EXCLUSIVE on the parent (#1038).
+create index if not exists log_parent_action_idx on pgpm.log (parent_table, action);
 
 create table if not exists pgpm.dropped_fk (
   id                  bigint generated always as identity primary key,
@@ -2472,7 +2477,7 @@ $$;
 -- attached row asks this first: _enforce_write_blocks (no write block goes on the operator's table),
 -- _archive_step (it is not handed to the strategy, and no coverage is recorded for it) and the auto-regrain
 -- candidate scan (no capture or TRUNCATE guard goes on it, nothing is copied out of it), with
--- progress().coarse_frozen mirroring that scan. retire() refuses the same table (#652) and logs it
+-- progress().coarse_frozen leaving it out too (through _part_built). retire() refuses the same table (#652) and logs it
 -- fail_retain_drop on every call, which is why its row is LEFT, not forgotten as _cell_attached forgets a
 -- forward cell's: the row is what keeps that refusal counted in status().
 --
@@ -6146,6 +6151,11 @@ end $$;
 -- back whole.
 create index if not exists archive_ledger_retired_hi_key_idx
   on pgpm.archive_ledger (parent_table, (pgpm._native_order_key(hi))) where retired_at is not null;
+-- Its complement (#1219): the rows NOT retired, which every archive step reads first, through _mark_gone_chunks and
+-- the #511 orphan discard. Reached by the primary key they visited every retired row of the parent too, so an idle
+-- tick's cost grew with the whole archive history. Here for the same reason as the index above.
+create index if not exists archive_ledger_live_child_idx
+  on pgpm.archive_ledger (parent_table, child_name) where retired_at is null;
 
 -- A CHUNK THAT COVERS NOTHING IS DISCARDED AT INSTALL (#1439). No release before #454's contract check had
 -- _archive_contract_breach, so a strategy that returned covered_hi = lo (or below it) left a row whose range is
@@ -6250,8 +6260,8 @@ language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name;
   v_child_lo text; v_child_hi text; v_lo text;
-  v_avg numeric; v_batch int; v_batch_count int; v_probe_hi_col text; v_probe_hi text;
-  v_next_distinct_col text; v_stop text; v_unit text; v_cval_q text;
+  v_avg numeric; v_batch int; v_batch_count int; v_probe_hi_col text;
+  v_next_distinct_col text; v_stop text; v_unit text; v_cval_q text; v_shaped_q text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -6314,6 +6324,15 @@ begin
   v_cval_q := case when cfg.control_kind = 'time' and not pgpm._control_naive(p_parent, cfg.control_column)
                    then format('pgpm._ts_text(t.%I)', cfg.control_column)
                    else format('t.%I::text', cfg.control_column) end;
+  -- #709: a chunk ends at a value _col_to_native decodes, and a text_time key without the declared shape has no
+  -- native value: string bounds admit it (_frontier_native, #661, says how), and decoded at a boundary it raised
+  -- on every tick, so the step logged skip_archive each time and the partition was never covered nor retired. The
+  -- two reads that END a chunk skip such keys; chunks stay gapless in the column's order, so one travels inside
+  -- the chunk whose encoded bounds hold it. The window's newest value is only ever a literal, never decoded.
+  v_shaped_q := case when cfg.control_kind = 'text_time'
+                     then format(' and pgpm._text_time_shaped(t.%I::text, %L, %s, %s, %L)', cfg.control_column,
+                                 cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_alphabet)
+                     else '' end;
 
   -- The window's size and its newest control value, in one scan (a CTE read twice is materialised once).
   -- The newest value is read with ORDER BY ... DESC LIMIT 1 and NOT max(), and the tie extension below
@@ -6333,13 +6352,13 @@ begin
   if v_batch_count < v_batch then
     v_stop := v_child_hi;   -- the byte budget reaches past this child's own live end
   else
-    v_probe_hi := pgpm._col_to_native(cfg, v_probe_hi_col);
     -- extend to the next distinct value past the boundary, so hi never splits a run of ties (a
     -- child's own CHECK bounds every row here to < v_child_hi already, so this can never overshoot it)
     -- by-name-ok: sizes the chunk only: the rows a chunk covers are [lo, hi) of the strategy's own read, so a
     --   namesake read moves a boundary, never a row
-    execute format('select %s from %s t where t.%I > %L order by t.%I asc limit 1',
-                   v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column, v_probe_hi_col, cfg.control_column)
+    execute format('select %s from %s t where t.%I > %L%s order by t.%I asc limit 1',
+                   v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column, v_probe_hi_col, v_shaped_q,
+                   cfg.control_column)
       into v_next_distinct_col;
     v_stop := case when v_next_distinct_col is null then v_child_hi
                    else pgpm._col_to_native(cfg, v_next_distinct_col) end;
@@ -6367,12 +6386,12 @@ begin
                   else '1' end;
       -- by-name-ok: sizes the chunk only: the rows a chunk covers are [lo, hi) of the strategy's own read, so a
       --   namesake read moves a boundary, never a row
-      execute format('select %s from %s t where t.%I >= %L order by t.%I asc limit 1',
+      execute format('select %s from %s t where t.%I >= %L%s order by t.%I asc limit 1',
                      v_cval_q, pgpm._part_rel(p_parent, p_child), cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
                                   cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
-                     cfg.control_column)
+                     v_shaped_q, cfg.control_column)
         into v_next_distinct_col;
       v_stop := case when v_next_distinct_col is null then v_child_hi
                      else pgpm._col_to_native(cfg, v_next_distinct_col) end;
@@ -15812,7 +15831,8 @@ begin
   -- such cells, that one was "coarse" here and 'nosubdiv' in regrain_step, so it was the oldest candidate
   -- on every later tick, forever, and the coarse children behind it were never reached. With the second
   -- predicate here a child the target cannot split is skipped, not reselected: it stays as it is, and
-  -- stays counted in status().coarse_partitions. progress().coarse_frozen mirrors this test.
+  -- stays counted in status().coarse_partitions. progress().coarse_frozen mirrors this test, except that it
+  -- leaves out a coarse child dropped by hand, which this scan takes and regrain_step refuses as gone.
   --
   -- The search runs INSIDE the regrain step's handler (#590), not ahead of it: the grid floor below
   -- comes from pgpm._frontier_native, which reads the parent under the 200 ms lock_timeout, so while
@@ -17144,11 +17164,13 @@ begin
       -- (#515). With regrain_to null the second clause repeats the first, so every frozen coarse child
       -- counts, as before. A frozen coarse child a set regrain_to cannot split is not counted here, because
       -- it is not going to be worked; it stays in status().coarse_partitions, which counts by the grid's
-      -- step alone.
+      -- step alone. A row whose partition was detached (#705) or dropped by hand is not counted (#1038): it reads
+      -- the rows through _part_built, as status().coarse_partitions does, so the two cannot disagree about a cell
+      -- that is not there. (The candidate scan does take a dropped one, and refuses it as gone, skip_regrain.)
       v_floor := pgpm._grid_floor(r.control_kind, r.partition_step, r.partition_anchor, v_frontier, r.partition_tz);
       select count(*) into coarse_frozen from pgpm.part p
        where p.parent_table = r.parent_table and p.attached
-         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)   -- #705, as maintain asks
+         and pgpm._part_built(r.parent_table, p.child_oid, p.retiring_at)
          and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, r.partition_step, p.lo, r.partition_tz))
          and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, coalesce(r.regrain_to, r.partition_step), p.lo, r.partition_tz))
          and not pgpm._native_gt(r.control_kind, p.hi, v_floor);
@@ -17578,7 +17600,11 @@ begin
       'incoming_fk_orphans would count those rows alone');
     perform pgpm._refuse_filtered_reads(c.confrelid::regclass, 'count the orphans against',
       'a referencing row whose key those rows do not hold would be counted as an orphan');
-    select string_agg(format('r.%I = p.%I', fa.attname, pa.attname), ' and '),
+    -- #958: compared under the referenced column's collation when the two differ, as VALIDATE's own RI check
+    -- does; with two conflicting implicit collations the comparison raised instead of counting.
+    select string_agg(format('r.%I = p.%I', fa.attname, pa.attname)
+                      || case when pa.attcollation <> 0 and pa.attcollation <> fa.attcollation
+                              then ' collate ' || pa.attcollation::regcollation::text else '' end, ' and '),
            string_agg(format('r.%I is not null', fa.attname), ' and '),
            string_agg(format('r.%I is null', fa.attname), ' and ')
       into v_join_q, v_notnull_q, v_allnull_q
