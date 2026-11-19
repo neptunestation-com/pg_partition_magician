@@ -419,7 +419,7 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    fails every tick (stale credentials, a deleted bucket, a strategy's refusal): read the newest
    `skip_archive` row's `method` for the reason and the remedy (its `lo` names the partition), since no chunk of that
    partition is recorded until it is fixed.
-   One cause the upgrade cannot repair (#1467): on a time grid upgraded from v0.3.0 to v0.5.0, a custom
+   One cause the upgrade cannot repair: on a time grid upgraded from v0.3.0 to v0.5.0, a custom
    `archive_fn` may have left a ledger row at that `lo` whose `hi` is below it and written without a UTC offset, and
    the method says the ledger already records a chunk there. Check that the row's `s3_key` holds nothing you need,
    then delete that one row (`delete from pgpm.archive_ledger where parent_table = ... and lo = ...`); the next tick
