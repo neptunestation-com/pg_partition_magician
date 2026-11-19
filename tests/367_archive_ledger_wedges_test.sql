@@ -29,6 +29,8 @@
 --           does not bring back a skip older than the source's chunk.
 --   PART F  nor does the regrain's swap, whose fine partition at that lo has no chunk yet: a skip older than the
 --           partition now at a lo was logged against an earlier relation there.
+--   PART G  and a whole-step skip (lo null) the parent's chunk cleared stays cleared when the swap deletes that chunk,
+--           the parent's only one (#1468): the swap's archive_coverage_reset is a reset mark too.
 --
 -- ONE TRANSACTION HAS ONE now(), so a skip and a chunk this file writes would share an instant and a "since the last
 -- chunk" assertion would pass on the tie. Every tick that precedes another is moved back a minute before the next,
@@ -47,7 +49,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(42);
+select plan(47);
 
 create schema pgpm_t367;
 create table pgpm_t367.calls (parent regclass, p_child name, p_lo text, p_hi text);
@@ -331,5 +333,38 @@ select is((select count(*) from pgpm.archive_ledger where parent_table = 'public
   'F: LIVENESS: no chunk marks lo 0 now (the source''s went with it, the fine partition has none yet)');
 select is((select archive_skips from pgpm.status() where parent = 'public.ac367f'::regclass), 0::bigint,
   'F: archive_skips is 0: the one skip was logged against the source, before the fine partition existed');
+
+-- ============ PART G: the swap deletes the parent's only chunk (#1468) ============
+create table public.ac367g (id bigint primary key, payload text);
+insert into public.ac367g select g, 'p' || g from generate_series(81, 881) g;
+call pgpm.transmute('public.ac367g', 'id', 1000::bigint, p_retain => 15000, p_paused => false);
+update pgpm.part set created_at = created_at - interval '3 hours' where parent_table = 'public.ac367g'::regclass;
+insert into public.ac367g values (16000, 'frontier');
+select pgpm._enforce_write_blocks('public.ac367g');
+select pgpm.set_archive_fn('public.ac367g', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
+-- one transient whole-step skip, hours ago, then the chunk that cleared it
+insert into pgpm.log (parent_table, action, lo, hi, method, at)
+  values ('public.ac367g', 'skip_archive', null, null, 'credentials expired, long since renewed', now() - interval '2 hours');
+select pgpm._archive_step('public.ac367g');
+select is((select array_agg(lo) from pgpm.archive_ledger where parent_table = 'public.ac367g'::regclass),
+  array['0'], 'G: LIVENESS: the parent''s one chunk is at lo 0, the partition the regrain will replace');
+select is((select archive_skips from pgpm.status() where parent = 'public.ac367g'::regclass), 0::bigint,
+  'G: LIVENESS: the chunk cleared the whole-step skip');
+do $$
+declare r text; n int := 0;
+begin
+  loop
+    r := pgpm.regrain_step('public.ac367g', (select child_name from pgpm.part where parent_table = 'public.ac367g'::regclass
+                                              and lo = '0' and attached limit 1), '500', 100);
+    n := n + 1;
+    exit when r like 'swapped%' or n > 80;
+  end loop;
+end $$;
+select is((select count(*) from pgpm.archive_ledger where parent_table = 'public.ac367g'::regclass), 0::bigint,
+  'G: LIVENESS: the swap left the parent no chunk at all');
+select is((select count(*) from pgpm.log where parent_table = 'public.ac367g'::regclass and action = 'archive_coverage_reset'),
+  1::bigint, 'G: LIVENESS: and logged the one archive_coverage_reset that says so');
+select is((select archive_skips from pgpm.status() where parent = 'public.ac367g'::regclass), 0::bigint,
+  'G: archive_skips stays 0: the cleared whole-step skip does not come back when the chunk that cleared it goes');
 
 select * from finish();

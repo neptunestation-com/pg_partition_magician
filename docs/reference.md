@@ -3806,14 +3806,14 @@ One row per managed table. Beyond the static config it surfaces:
   stalled, and it is here so that check needs no second query.
 - `archive_skips` -- the longest run of `skip_archive` rows since a recorded archive chunk: the most any one
   partition has logged since that partition's last chunk, or, for a failure of the archive step as a whole
-  (`maintain()`'s, with no `lo`), since the parent's last chunk. Per partition, because at `archive_batch` above
-  1 a sibling can record a chunk every tick while one partition is refused every tick. A skip older than the
-  partition now at its `lo` (`pgpm.part.created_at`) is not counted: it was logged against an earlier relation
-  there, as after a regrain's swap. The archive step
-  logs one for a lock race or a transient error, which the next tick clears, and for an error that
-  recurs every tick, which stalls archiving and, with it, retention while `retain_backlog` reads as
-  catching up. Non-zero for a tick is normal; climbing is a stall, and the newest `skip_archive` row's
-  `method` says why.
+  (`maintain()`'s, with no `lo`), since the later of the parent's last chunk and its last
+  `archive_coverage_reset` (a regrain's swap deletes the source's chunks, and the skips they cleared stay
+  cleared). Per partition, because at `archive_batch` above 1 a sibling can record a chunk every tick while one
+  partition is refused every tick. A skip older than the partition now at its `lo` (`pgpm.part.created_at`) is
+  not counted: it was logged against an earlier relation there, as after a regrain's swap. The archive step logs
+  one for a lock race or a transient error, which the next tick clears, and for an error that recurs every tick,
+  which stalls archiving and, with it, retention while `retain_backlog` reads as catching up. Non-zero for a
+  tick is normal; climbing is a stall, and the newest `skip_archive` row's `method` says why.
 
 ### `progress`
 

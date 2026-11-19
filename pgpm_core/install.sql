@@ -16930,13 +16930,20 @@ begin
     -- every skip of that lo ever logged. Nor is a skip older than the attached partition now at the lo counted (its
     -- pgpm.part.created_at): it was logged against an earlier relation there, as after a regrain's swap, whose fine
     -- partition has no chunk yet and its source's are gone. The marks are computed once, not once per log row:
-    -- pgpm.log keeps every skip. A row with no lo is maintain()'s, for the archive step as a whole, and is counted since the parent's
-    -- last chunk. Exact action value: skip_archive_retired_range is logged once, and is not a retry.
+    -- pgpm.log keeps every skip. A row with no lo is maintain()'s, for the archive step as a whole, and is counted
+    -- since the later of the parent's last chunk and its last archive_coverage_reset (#1468): a regrain's swap deletes
+    -- the source's chunks, and when they were the parent's only ones a mark read from the ledger alone fell back to
+    -- -infinity and counted every whole-step skip those chunks had cleared. Exact action values:
+    -- skip_archive_retired_range is logged once, and is not a retry.
     select greatest(
              (select count(*) from pgpm.log g
                where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null
-                 and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l
-                                       where l.parent_table = r.parent_table), '-infinity'::timestamptz)),
+                 and g.at > coalesce(greatest(
+                                       (select max(l.archived_at) from pgpm.archive_ledger l
+                                         where l.parent_table = r.parent_table),
+                                       (select max(c.at) from pgpm.log c
+                                         where c.parent_table = r.parent_table and c.action = 'archive_coverage_reset')),
+                                     '-infinity'::timestamptz)),
              (select max(k.n) from (
                 select count(*) as n from pgpm.log g
                   join (select p.lo, greatest(max(l.archived_at), max(p.created_at) filter (where p.attached)) as mark

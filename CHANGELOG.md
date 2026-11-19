@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **`status().archive_skips` no longer brings back whole-step skips a chunk cleared when a regrain's swap deletes
+  the parent's only chunks** (#1468). The count of `maintain()`'s skips for the archive step as a whole (no `lo`)
+  ran from the parent's latest archive chunk, and the swap deletes the source's chunks, so a parent whose only
+  chunks were the source's read every past whole-step skip as a current stall until its fine partitions archived. It
+  now runs from the later of the latest chunk and the latest `archive_coverage_reset`, which the swap logs.
+  tests/367 part G; mutation `archive_skips_whole_step_reset_ignored`.
 - **Two archive ledger rows that wedged a partition for good are discarded, and a recurring `skip_archive` is
   counted** (#1439, #1440). The ledger is keyed `(parent_table, lo)`, so a row a partition's next chunk collides
   with stopped that partition being archived or retired, and at `archive_batch`'s default of 1 every partition of

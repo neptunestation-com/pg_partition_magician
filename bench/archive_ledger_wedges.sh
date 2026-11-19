@@ -9,7 +9,7 @@
 # left under names an operator swapped, which are still tracked (#1440). The file re-runs install.sql with \ir; this
 # wrapper hands it the copy under test as the psql variable `install`, as bench/install_keeps_dependent_views.sh does.
 #
-# FOURTEEN mutations are required to fail against it (bench/mutations/mutate.py):
+# FIFTEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   ledger_empty_chunk_kept        -- the install pass discards no row covering nothing. Part A.
 #   ledger_empty_equal_text_only   -- only a row whose hi is lo as written, not one below lo. Part A.
 #   ledger_empty_discards_retired  -- a retired row covering nothing is discarded too. Part A.
@@ -22,6 +22,8 @@
 #   archive_skips_uncounted        -- status() counts no skip_archive. Part C.
 #   archive_skips_never_reset      -- every skip_archive a partition ever logged is counted. Part C.
 #   archive_skips_whole_step_dropped -- maintain()'s skip for the step as a whole is not counted. Part C.
+#   archive_skips_whole_step_reset_ignored -- the whole-step mark ignores archive_coverage_reset, so a swap that
+#                                     deletes the parent's only chunks brings cleared skips back (#1468). Part G.
 #   archive_skips_parent_wide      -- a partition's skips reset on a sibling's chunk. Part D.
 #   archive_skips_mark_per_child   -- the mark is read per pgpm.part row, not per lo, so a regrain's
 #                                     copy at its source's lo counts every skip of it. Part E.
