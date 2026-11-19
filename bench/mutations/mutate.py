@@ -18019,6 +18019,54 @@ MUTATIONS["skip_archive_method_truncated"] = (
     [("        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));",
       "        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));", 1)],
 )
+# Issue #962 (A962-4): tests/100 judged each back-off bypass by a count, the top cell and a write at the top.
+_T100_CELLS = "select is((select string_agg(lo || '-' || hi, ',' order by lo::numeric) from pgpm.part\n"
+MUTATIONS["t100_bypass_cells_by_count"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#962 tests/100: the three ticks that bypass obtain's back-off on low headroom (case 2, case 4, odd obtain) "
+    "are judged by a count of attached partitions, and case 2 and the odd obtain by their top cell, with no write "
+    "into the first cell the bypass must build. All of that holds for #913's shifted-cell obtain (as many "
+    "partitions, the same top, a hole just past the old grid), so the file passed it. The guard runs the file "
+    "against that obtain (mutation obtain_backoff_bypass_shifts_cell).",
+    [("select plan(25);\n", "select plan(22);\n", 1),
+     (_T100_CELLS + "            where parent_table = 'public.ob'::regclass and attached),\n"
+      "  '0-1000,1000-2000,2000-3000,3000-4000,4000-5000,5000-6000,6000-7000,7000-8000,8000-9000,9000-10000',\n"
+      "  'case 2: only 1 partition ahead (< ceil(4/2)) -> obtain runs despite the back-off, creating [7000,8000) .. [9000,10000)');\n"
+      "select lives_ok($$ insert into public.ob (id, body) values (7500, 'first cell past the old top') $$,\n"
+      "  'case 2: a write at 7500, in the first cell past the pre-tick grid top of 7000, is accepted');\n",
+      "select is((select count(*)::int from pgpm.part where parent_table = 'public.ob'::regclass and attached), 10,\n"
+      "  'case 2: only 1 partition ahead (< ceil(4/2)) -> obtain runs despite the back-off, creating 3');\n", 1),
+     (_T100_CELLS + "            where parent_table = 'public.obh'::regclass and attached),\n"
+      "  '0-5000,5000-6000,6000-7000,7000-8000,8000-9000',\n"
+      "  'case 4: 1 step covered beyond the frontier (< ceil(4/2)) -> obtain runs despite the back-off, creating [6000,7000) .. [8000,9000)');\n"
+      "select lives_ok($$ insert into public.obh (id, body) values (6500, 'first cell past the old top') $$,\n"
+      "  'case 4: a write at 6500, in the first cell past the pre-tick grid top of 6000, is accepted');\n",
+      "select is((select count(*)::int from pgpm.part where parent_table = 'public.obh'::regclass and attached), 5,\n"
+      "  'case 4: 1 step covered beyond the frontier (< ceil(4/2)) -> obtain runs despite the back-off, creating 3');\n", 1),
+     (_T100_CELLS + "            where parent_table = 'public.obq'::regclass and attached),\n"
+      "  '0-1000,1000-2000,2000-3000,3000-4000,4000-5000,5000-6000',\n"
+      "  'odd obtain 3: 1 step of headroom is < ceil(3/2)=2 -> obtain runs despite the back-off, creating [4000,5000) and [5000,6000)');\n"
+      "select lives_ok($$ insert into public.obq (id, body) values (4500, 'first cell past the old top') $$,\n"
+      "  'odd obtain 3: a write at 4500, in the first cell past the pre-tick grid top of 4000, is accepted');\n",
+      "select is((select count(*)::int from pgpm.part where parent_table = 'public.obq'::regclass and attached), 6,\n"
+      "  'odd obtain 3: 1 step of headroom is < ceil(3/2)=2 -> obtain runs despite the back-off, creating 2');\n", 1)],
+)
+MUTATION_SRC["t100_bypass_cells_by_count"] = "tests/100_obtain_backoff_low_headroom_test.sql"
+# Issue #962 (A962-2): bench/obtain_backoff_headroom.sh's logs at fixed host paths, shared by concurrent runs.
+MUTATIONS["obtain_backoff_headroom_shared_logs"] = (
+    "bench/obtain_backoff_headroom_logs.sh",
+    "Pre-#962 bench/obtain_backoff_headroom.sh: its install and insert logs at the fixed host paths "
+    "/tmp/obh_install.log and /tmp/obh_insert.log, so two runs at once (discriminate.sh beside a perf run, two "
+    "shards) print whichever run wrote the file last. The guard holds two runs' failing installs at a barrier "
+    "until both have written, so the shared file shows one run the other's error every time.",
+    [(""">"$work/insert.log" 2>&1; then\n""", """>/tmp/obh_insert.log 2>&1; then\n""", 1),
+     ("""$(grep -m1 'ERROR' "$work/insert.log" | cut""", """$(grep -m1 'ERROR' /tmp/obh_insert.log | cut""", 1),
+     (""">"$work/install.log" 2>&1; then\n"""
+      """  echo "FAIL  install did not complete"; sed 's/^/      /' "$work/install.log"; exit 1\n""",
+      """>/tmp/obh_install.log 2>&1; then\n"""
+      """  echo "FAIL  install did not complete"; sed 's/^/      /' /tmp/obh_install.log; exit 1\n""", 1)],
+)
+MUTATION_SRC["obtain_backoff_headroom_shared_logs"] = "bench/obtain_backoff_headroom.sh"
 
 
 # Issue #1119: obtain, extend_to and maintain_obtain's back-off walk count a partition no pgpm.part row records

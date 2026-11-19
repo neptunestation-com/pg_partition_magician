@@ -13,6 +13,28 @@
 # drives it in production. It lives in bench/ alongside the sibling lock guards, which need a second
 # concurrent session observing a first one mid-operation that a single pgTAP file cannot provide.
 #
+# WHAT THE MUTANT NEEDS, AND WHAT TOOK IT AWAY (#871). The defect (mutation regrain_no_delta_analyze) is a
+# reconcile tick that plans against a delta with no row estimate. Autovacuum supplies one: the delta takes
+# tens of thousands of inserts with reltuples -1, which is past autoanalyze's threshold at once, so an
+# autoanalyze that lands between the UPDATE below and the measured tick plans the mutant exactly as the
+# fixed code plans itself, and the guard read 0 against its own defect on a CI runner. Measured: the mutant
+# with an ANALYZE of the delta before the tick reads 0 (a VACUUM alone, which sets reltuples but no column
+# statistics, still reads 150000), and with autovacuum_naptime 1s and a 3 s gap before the tick, the
+# autoanalyze lands every time and the guard passes the mutant. The odds were the gap over the naptime, so a
+# slow runner raised them. So autovacuum is turned off on the delta itself before it fills, and the check
+# carries its premises as LIVENESS witnesses: the delta went into the tick with no estimate of its rows and
+# no autoanalyze (before the tick or by the end of it), the counter sees a known scan of the delta from a
+# later transaction, and the tick ran a full batch over a delta of the size the UPDATE made. The fixed code
+# analyzes the delta itself (pgpm._analyze, which no reloption touches), which is the point: it must not
+# depend on autovacuum having got there first.
+#
+# Each session that does work forces its own statistics out before it returns (q below). A backend flushes
+# pending counters at most once a second while it runs and otherwise at exit, and its exit is not ordered
+# with the client's: psql returns once it has sent Terminate. pg_stat_force_next_flush() in the WORKING
+# session flushes before the ReadyForQuery the client waits for; in the reading session, where the guard
+# used to call it, it flushes nothing of the work. That lag did not reproduce here (0 of 40 reads behind,
+# at 0.5 CPU with four busy loops in the container), so it is ordering made explicit, not the CI cause.
+#
 # WHY COUNTERS AND NOT WALL CLOCK. Timing thresholds are flaky on shared CI runners. Scan counters are
 # exact and their expected value is zero, so the assertion needs no margin.
 #
@@ -22,10 +44,11 @@ C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:?install.sql}"
 ROWS=100000
 fail=0
 
-q() { docker exec "$C" psql -U postgres -d "$DB" -qtA -c "$1"; }
-# a counter read must be its own transaction, after forcing a flush of the previous one
-stat() { docker exec "$C" psql -U postgres -d "$DB" -qtA \
-           -c "select pg_stat_force_next_flush()" -c "$1" | tail -1; }
+# a working session: its statement, then its own counters flushed before the client returns (see the header)
+q() { docker exec "$C" psql -U postgres -d "$DB" -qtA -v ON_ERROR_STOP=1 \
+        -c "$1" -c '\o /dev/null' -c "select pg_stat_force_next_flush()"; }
+# a counter read: its own session, so a later transaction than every piece of work it measures
+stat() { docker exec "$C" psql -U postgres -d "$DB" -qtA -v ON_ERROR_STOP=1 -c "$1"; }
 
 check() { # <label> <actual> <limit> <context>
   if [ "$2" -le "$3" ]; then printf 'PASS  %-46s %s <= %s   (%s)\n' "$1" "$2" "$3" "$4"
@@ -50,6 +73,9 @@ FINE=$(( ROWS / 10 ))
 tick() { q "select pgpm.regrain_step('public.rp','$CHILD','$FINE',3000)"; }
 
 for _ in $(seq 1 6); do tick >/dev/null; done          # prepare + copy a few sub-ranges
+# the delta the prepare minted, by what pgpm recorded; autovacuum off on it before it fills (see the header)
+DELTA=$(q "select format('%I.%I', nsp, delta) from pgpm._regrain_capture_names('public.rp')")
+q "alter table $DELTA set (autovacuum_enabled = false)" >/dev/null
 HALF=$(( ROWS / 2 ))
 # a delta over copied rows; its row count is kept, because check 3 needs to know the updates happened
 UPD=$(q "with u as (update public.rp set payload='d' where id <= $HALF returning 1) select count(*) from u")
@@ -58,9 +84,37 @@ DN=$(q "select pgpm._regrain_delta_count('public.rp')")
 # --- 1. a reconcile tick must not scan the whole delta -------------------------------------------------
 # This is exactly the #272 regression: an eligibility predicate the planner cannot index turned each tick
 # into a seq scan of the entire delta, making the work O(delta^2 / batch).
-D0=$(stat "select seq_tup_read from pg_stat_all_tables where relname='rp_pgpm_regrain_delta'")
+# Premises first, each a LIVENESS witness, since a scan count near 0 is also what a check that observed
+# nothing reads (#871).
+witness() { # <label> <ok: 0|1> <detail>
+  if [ "$2" = 1 ]; then printf 'PASS  %-46s %s\n' "LIVENESS: $1" "$3"
+  else printf 'FAIL  %-46s %s\n' "LIVENESS: $1" "$3"; fail=1; fi
+}
+SEQ="select seq_tup_read from pg_stat_all_tables where relid = '$DELTA'::regclass"
+# <reltuples>/<manual analyzes>/<autoanalyzes> of the delta
+EST="select c.reltuples::bigint || '/' || s.analyze_count || '/' || s.autoanalyze_count
+       from pg_class c join pg_stat_all_tables s on s.relid = c.oid where c.oid = '$DELTA'::regclass"
+# the instrument: a known full scan of the delta, in a session of its own, moves the counter a later
+# transaction reads by exactly the rows it counted
+P0=$(stat "$SEQ")
+PN=$(q "set max_parallel_workers_per_gather = 0; set enable_indexscan = off; set enable_indexonlyscan = off;
+        set enable_bitmapscan = off; select count(*) from $DELTA")
+D0=$(stat "$SEQ")
+witness "the counter sees a known scan of the delta" "$([ $(( D0 - P0 )) = "$PN" ] && [ "$PN" = "$DN" ] && echo 1)" \
+  "a $PN-row scan moved seq_tup_read by $(( D0 - P0 )) (delta=$DN rows)"
+PRE=$(stat "$EST")
+# reltuples -1 (never analyzed) or 0 (the fixed code's own ANALYZE of the delta while it was still empty): either
+# way no estimate of the rows the UPDATE put there, and no autoanalyze has given it one
+witness "the delta enters the tick with no row estimate" \
+  "$([[ "$PRE" =~ ^-?[0-9]+/[0-9]+/0$ ]] && [ "${PRE%%/*}" -le 0 ] && echo 1)" "reltuples/analyzes/autoanalyzes $PRE"
 OUT=$(tick)
-D1=$(stat "select seq_tup_read from pg_stat_all_tables where relname='rp_pgpm_regrain_delta'")
+D1=$(stat "$SEQ")
+POST=$(stat "$EST")
+witness "no autoanalyze reached the delta by the tick" "$([ "${POST##*/}" = 0 ] && echo 1)" \
+  "reltuples/analyzes/autoanalyzes $POST after it"
+witness "the tick ran a full batch over the whole delta" \
+  "$([ "$OUT" = "reconciled:3000" ] && [ "$DN" = $(( 2 * UPD )) ] && echo 1)" \
+  "$OUT over $DN rows (each of the $UPD updates captures its OLD and NEW key)"
 check "reconcile tick does not scan the delta" "$(( D1 - D0 ))" "$(( DN / 4 ))" "$OUT, delta=$DN rows"
 
 # --- 2. the swap must not scan the fine children ------------------------------------------------------

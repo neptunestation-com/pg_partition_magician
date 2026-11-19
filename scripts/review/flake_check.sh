@@ -18,9 +18,6 @@
 #                      failure of either guard is a finding now, not a retry.
 #   registry_quota     a third-party image pull refused with toomanyrequests / Data limit exceeded, and
 #                      no test output at all (the job never ran a test)
-#   regrain_perf_discriminate  a discriminate shard whose ONLY non-discriminating guard is bench/regrain_perf.sh
-#                      against regrain_no_delta_analyze (issue #871: the delta scan counter is read before the
-#                      statistics collector flushes it on a loaded runner, so the mutant's seq scan reads as 0)
 #   runner_not_acquired  GitHub never gave the job a hosted runner: every non-success non-summary job of the
 #                      attempt carries the annotation "was not acquired by Runner of type hosted" or "was not
 #                      started because it repeatedly failed to be acquired", and no step of ours ran (the
@@ -126,10 +123,6 @@ while IFS=$'\t' read -r j status concl steps name; do
   fi
   if grep -qE "toomanyrequests|Data limit exceeded" <<<"$log" && ! grep -qE "^FAIL |not ok" <<<"$log"; then
     echo "job $j: known flake registry_quota (third-party image pull refused; no test ran)"
-  elif [ "$(grep -cE '^FAIL +bench/[^ ]+ PASSED against its own defect' <<<"$log")" = "1" ] \
-     && grep -qE '^FAIL +bench/regrain_perf\.sh PASSED against its own defect' <<<"$log" \
-     && grep -qE '^--- regrain_no_delta_analyze$' <<<"$log"; then
-    echo "job $j: known flake regrain_perf_discriminate (regrain_perf.sh's scan counter read before the collector flushed; the only non-discriminating guard in the shard; #871)"
   else
     echo "job $j ($name): UNKNOWN failure, not a flake this script knows; do not retry"
     rc=1

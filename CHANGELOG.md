@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **`bench/regrain_perf.sh` fails against its delta-analyze mutant on any runner** (#871). On a CI runner the guard
+  read a reconcile tick's scan of the delta as 0 against mutation `regrain_no_delta_analyze` and passed its own
+  defect. The cause was autovacuum: the delta takes 50000 inserts with no row estimate, which is past
+  autoanalyze's threshold at once, and an autoanalyze landing between the fixture's UPDATE and the measured tick
+  gives the mutant the estimate its missing ANALYZE should have, so it plans like the fixed code (measured: with
+  `autovacuum_naptime` 1 s and a 3 s gap before the tick, the old guard passed the mutant every time, reading 0).
+  The guard now turns autovacuum off on the delta itself before it fills, and witnesses its premises: the delta
+  enters the tick with no estimate of its rows and no autoanalyze by the end of it, a known scan of the delta
+  moves the counter a later transaction reads by exactly its rows, and the tick reconciles a full batch over the
+  50000-row delta the UPDATE made. Every working session also flushes its own statistics before it returns,
+  where the old reader-side `pg_stat_force_next_flush()` flushed nothing of the work. `scripts/review/flake_check.sh`
+  no longer retries the `regrain_perf_discriminate` signature, which would now hide a real failure.
+- **`tests/100` names the cells each back-off bypass builds, and `bench/obtain_backoff_headroom.sh` keeps its logs
+  to itself** (#962). The test judged the three ticks that bypass obtain's back-off on low headroom by a count of
+  partitions and the top cell, which hold for #913's shifted-cell obtain (a hole just past the old grid where every
+  write is refused), so it passed that defect. It now asserts the attached `[lo,hi)` cells in order and a write
+  into the first cell each bypass must build, and its premises read `LIVENESS:` as a wrapper's `starved()` reads
+  them; `bench/tests_fail_on_defect.sh` judges it against `obtain_backoff_bypass_shifts_cell`, with mutation
+  `t100_bypass_cells_by_count` putting the old checks back.
+  The guard wrote its install and insert logs to fixed host paths, so two runs at once printed each other's
+  errors; it now writes them to a directory of its own, proved by the new `bench/obtain_backoff_headroom_logs.sh`
+  (two runs held at a barrier until both have logged) and its mutation `obtain_backoff_headroom_shared_logs`.
 - **`uninstall.sql` refuses, naming them, while objects outside the `pgpm` schema depend on it** (#1040). Its
   `drop schema pgpm cascade` took every such object with it, silently: an operator's monitoring view over
   `pgpm.status()` in their own schema, a function of theirs returning `pgpm.archive_result`, a column default
