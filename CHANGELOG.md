@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **Two archive ledger rows that wedged a partition for good are discarded, and a recurring `skip_archive` is
+  counted** (#1439, #1440). The ledger is keyed `(parent_table, lo)`, so a row a partition's next chunk collides
+  with stopped that partition being archived or retired, and at `archive_batch`'s default of 1 every partition of
+  its parent behind it, logged `skip_archive` every tick. No release before #454's contract check refused a
+  strategy's `covered_hi` at or below the chunk's `lo`, so an older install could hold such a row long after the
+  strategy was corrected: re-running `install.sql` now deletes every unretired row whose `hi` is at or below its
+  `lo` (it covers no row), logged `archive_coverage_reset` once per partition. And an operator who swapped two
+  partitions' names, tables and `pgpm.part` rows, leaving the ledger behind, left rows under names still tracked,
+  which #511's discard by an untracked name never found: the archive step now also discards rows whose recorded
+  oid is not the oid `pgpm.part` records under their name, logged `archive_coverage_reset` naming that oid, and
+  each partition archives from its own `lo`. A `skip_archive` that recurs every tick (stale credentials, a deleted
+  bucket, a strategy's refusal) moved no counter of `status()`: the new column `status().archive_skips` counts
+  `skip_archive` rows since the parent's last recorded chunk, and the row's `method` keeps up to 1000 characters
+  of the error, where 200 cut a refusal before its remedy. The guide's rename recipe updates the rows before the
+  `ALTER`, in the order a waiting `retire` takes its locks, so it cannot deadlock against it, and its in-flight
+  rename note now includes the ledger. Guard `bench/archive_ledger_wedges.sh` runs `tests/367`, with seven
+  mutations.
 - **A retirement whose detach pgpm dispatched is no longer cleared on a reading of the job that cannot be trusted**
   (#1451). When retention stopped reaching a still-attached partition whose `pgpm_detach` job no longer held its
   detach, the recall cleared the retirement's mark at once. Two readings of "no longer held" were wrong, and the

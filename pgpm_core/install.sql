@@ -86,7 +86,7 @@ language sql immutable as $$
        'paused boolean, n_partitions bigint, coarse_partitions bigint, inflight_partitions bigint, '
        'newest_bound text, fks_suspended bigint, fks_unvalidated bigint, history_unregrained boolean, '
        'retain_drop_failures bigint, retain_backlog bigint, retain_detaching bigint, parent_missing boolean, '
-       'regrain_to text)',
+       'regrain_to text, archive_skips bigint)',
      0),
     ('pgpm.progress(regclass)',
      'p_parent regclass',
@@ -6075,6 +6075,38 @@ end $$;
 create index if not exists archive_ledger_retired_hi_key_idx
   on pgpm.archive_ledger (parent_table, (pgpm._native_order_key(hi))) where retired_at is not null;
 
+-- A CHUNK THAT COVERS NOTHING IS DISCARDED AT INSTALL (#1439). No release before #454's contract check had
+-- _archive_contract_breach, so a strategy that returned covered_hi = lo (or below it) left a row whose range is
+-- empty. Its partition's next chunk starts at the same lo, and every tick then refused it on the ledger's primary
+-- key (or, since #975, as a chunk already recorded), logged skip_archive: the partition was never archived or
+-- retired, and at archive_batch's default of 1 nor were the parent's partitions behind it, long after the strategy
+-- was corrected. The check refuses a new one, so only an older install's row is found here. It records no row of the
+-- partition, so discarding it loses nothing, and the partition archives from its own lo. A retired row stays: it is
+-- the record of a dropped relation, never read as coverage. A bound that names no instant by itself (#1336) is
+-- compared only as written. Logged archive_coverage_reset, once per partition.
+do $$
+declare r record;
+begin
+  for r in
+    with empty as (
+      delete from pgpm.archive_ledger l
+       using pgpm.config c
+       where c.parent_table = l.parent_table and l.retired_at is null
+         and (l.hi = l.lo
+              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)
+                      then not pgpm._native_gt(c.control_kind, l.hi, l.lo) else false end)
+      returning l.parent_table, l.child_name, l.lo)
+    select parent_table, child_name, count(*) as chunks, string_agg(lo, ', ' order by lo) as los
+      from empty group by parent_table, child_name
+  loop
+    insert into pgpm.log (parent_table, action, lo, method, rows)
+      values (r.parent_table, 'archive_coverage_reset', split_part(r.los, ', ', 1),
+              format('%s archived chunk(s) recorded for %s covered nothing (a hi at or below lo, at lo %s), which an older pgpm let a strategy record and which kept the partition''s first chunk from ever being recorded; discarded, and it archives from its own lo',
+                     r.chunks, coalesce(quote_ident(r.child_name), 'a partition'), r.los),
+              r.chunks);
+  end loop;
+end $$;
+
 -- picks the next chunk to archive within ONE child: resumes from wherever pgpm.archive_ledger's
 -- coverage of THIS child left off (or the child's own lo, on the first call), estimates how many
 -- rows fit config.archive_byte_budget via a sampled average row width (config.archive_probe_sample
@@ -6818,33 +6850,53 @@ begin
   -- because the step below does not archive a partition over a retired chunk's range. Nor is a chunk whose
   -- relation no longer exists, whoever dropped it: those are marked retired first (pgpm._mark_gone_chunks).
   perform pgpm._mark_gone_chunks(p_parent);
+  -- A NAME THAT NOW TRACKS ANOTHER RELATION IS THE SAME CASE (#1440). Two partitions whose names an operator swapped
+  -- (tables and pgpm.part rows, the ledger left behind) are each still tracked, so the test by name alone found no
+  -- orphan, and each one's re-archive from its own lo collided with the other's rows on the primary key every tick. A
+  -- row records the relation it was read from (child_oid, #1141); one under a tracked name whose partition records
+  -- another oid is coverage of a relation that name no longer means, discarded as above, those rows only (stale_oid).
+  -- A row or a pgpm.part row with no oid is judged by its name, as before.
+  --
   -- The orphans first, materialized (#973). One whose bound names no instant by itself (#1336, _native_named) is never
   -- cast: it cannot be shown to overlap nothing, so it is discarded, the side that loses no row.
   for r in execute format(
     'with orphan as materialized (select l.parent_table, l.child_name, l.lo, l.hi,
-                                         pgpm._native_named(%3$L, l.lo) and pgpm._native_named(%3$L, l.hi) as named
+                                         pgpm._native_named(%3$L, l.lo) and pgpm._native_named(%3$L, l.hi) as named,
+                                         case when exists (select 1 from pgpm.part p
+                                                            where p.parent_table = l.parent_table and p.child_name = l.child_name)
+                                              then l.child_oid end as stale_oid
                                     from pgpm.archive_ledger l
                                    where l.parent_table = %2$L::regclass
                                      and l.child_name is not null
                                      and l.retired_at is null
                                      and not exists (select 1 from pgpm.part p
-                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name))
-     select o.child_name, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
+                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name
+                                                        and (l.child_oid is null or p.child_oid is null
+                                                             or p.child_oid = l.child_oid)))
+     select o.child_name, o.stale_oid, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
             coalesce(pgpm._typed_text(max(case when o.named then o.hi::%1$s end)), max(o.hi)) as hi
        from orphan o
       where case when o.named then exists (select 1 from pgpm.part t
                                             where t.parent_table = o.parent_table
                                               and o.lo::%1$s < t.hi::%1$s and o.hi::%1$s > t.lo::%1$s)
                  else true end
-      group by o.child_name',
+      group by o.child_name, o.stale_oid',
     v_ncast, p_parent::text, cfg.control_kind)
   loop
-    -- by name, as the query above grouped: a retired chunk under the same name stays (#1141)
-    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;
+    -- by name, as the query above grouped: a retired chunk under the same name stays (#1141), and under a tracked
+    -- name only the rows of the relation it no longer means (#1440)
+    delete from pgpm.archive_ledger
+     where parent_table = p_parent and child_name = r.child_name and retired_at is null
+       and (r.stale_oid is null or child_oid = r.stale_oid);
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,
-              format('%s archived chunk(s) were recorded for %I.%I, which is no longer a tracked partition of %s, over a range a tracked partition now holds; nothing guarded that coverage across the change, so it is discarded and the partition holding the range archives from its own lo',
-                     r.chunks, v_nsp, r.child_name, p_parent::text));
+              case when r.stale_oid is null then
+                format('%s archived chunk(s) were recorded for %I.%I, which is no longer a tracked partition of %s, over a range a tracked partition now holds; nothing guarded that coverage across the change, so it is discarded and the partition holding the range archives from its own lo',
+                       r.chunks, v_nsp, r.child_name, p_parent::text)
+              else
+                format('%s archived chunk(s) were recorded for %I.%I as relation oid %s, but pgpm.part records another relation under that name now (a rename or a swap that left pgpm.archive_ledger behind), over a range a tracked partition now holds; nothing guarded that coverage across the change, so it is discarded and the partition holding the range archives from its own lo',
+                       r.chunks, v_nsp, r.child_name, r.stale_oid)
+              end);
   end loop;
 
   -- A PARTITION OVER A RETIRED CHUNK'S RANGE IS NOT ARCHIVED (#1141; pgpm._over_retired_chunks says why). It
@@ -7002,7 +7054,7 @@ begin
       v_count := v_count + 1;
     exception when others then
       insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));   -- #1439: a refusal's reason and remedy, whole
     end;
   end loop;
   return v_count;
@@ -15622,7 +15674,7 @@ begin
     v_archived := pgpm._archive_step(p_parent);
   exception when others then
     v_note := v_note || ' archive_deferred';
-    insert into pgpm.log (parent_table, action, method) values (p_parent, 'skip_archive', left(sqlerrm, 200));
+    insert into pgpm.log (parent_table, action, method) values (p_parent, 'skip_archive', left(sqlerrm, 1000));   -- #1439
   end;
 
   -- BOUNDARY (#279): make a whole tick's archived bytes durable before anything else runs. Chunked
@@ -16723,16 +16775,17 @@ $$;
 -- be read from pgpm.config separately to answer it -- easy to forget next to the more visible counters.
 --
 -- The redesign widened the return shape with coarse_partitions + history_unregrained (REDESIGN.md section
--- 14), again for parent_missing (#296), and again for regrain_to (#343). CREATE OR REPLACE cannot widen it,
--- so a widening changes its row in pgpm._surface_shapes() too, and _surface_prepare() drops the old shape
--- at the top of the file (#983: only then, so an operator's view over an unchanged status() survives).
+-- 14), again for parent_missing (#296), again for regrain_to (#343), and again for archive_skips (#1439).
+-- CREATE OR REPLACE cannot widen it, so a widening changes its row in pgpm._surface_shapes() too, and
+-- _surface_prepare() drops the old shape at the top of the file (#983: only then, so an operator's view over an
+-- unchanged status() survives).
 create or replace function pgpm.status()
 returns table (
   parent regclass, control_kind text, partition_step text, obtain int, retain text,
   paused boolean, n_partitions bigint, coarse_partitions bigint, inflight_partitions bigint,
   newest_bound text,
   fks_suspended bigint, fks_unvalidated bigint, history_unregrained boolean, retain_drop_failures bigint,
-  retain_backlog bigint, retain_detaching bigint, parent_missing boolean, regrain_to text
+  retain_backlog bigint, retain_detaching bigint, parent_missing boolean, regrain_to text, archive_skips bigint
 )
 language plpgsql as $$
 declare
@@ -16741,7 +16794,7 @@ declare
 
   v_fks_susp bigint; v_fks_unval bigint;
   v_last_retain_id bigint; v_drop_fails bigint; v_detaching bigint;
-  v_retain_boundary text; v_retain_backlog bigint;
+  v_retain_boundary text; v_retain_backlog bigint; v_skips bigint;
 begin
   for r in select * from pgpm.config loop
     r := pgpm._control_followed(r);
@@ -16824,6 +16877,16 @@ begin
     -- max(control) READ FROM THE RELATION. With the relation gone there is no honest answer, and 0 would
     -- read as "nothing is eligible" -- a claim status() cannot make. This is also the one branch that
     -- would raise, via _retain_boundary -> _frontier_native, so skipping it is what keeps status() alive.
+    -- archive_skips (#1439): skip_archive rows since the parent's last recorded chunk. The archive step logs one for a
+    -- lock race or a transient error, which the next tick clears, and for an error that recurs every tick (stale
+    -- credentials, a deleted bucket, a strategy's refusal), which no counter above moved: archiving and, with it,
+    -- retention stalled while retain_backlog read as catching up. Non-zero for a tick is normal; climbing is a stall,
+    -- and method says why. A chunk is recorded in pgpm.archive_ledger, not logged, so its archived_at is the mark.
+    -- Exact action value: skip_archive_retired_range is logged once, and is not a retry.
+    select count(*) into v_skips from pgpm.log
+      where parent_table = r.parent_table and action = 'skip_archive'
+        and at > coalesce((select max(archived_at) from pgpm.archive_ledger where parent_table = r.parent_table),
+                          '-infinity'::timestamptz);
     v_retain_backlog := case when v_missing then null else 0 end;
     -- #451: _retain_boundary refuses a hand-edited negative retain (see there). status() is what an
     -- operator reads to find that out, so it stays alive and reports the backlog as null for that table,
@@ -16845,7 +16908,7 @@ begin
     newest_bound := v_new;
     fks_suspended := v_fks_susp; fks_unvalidated := v_fks_unval; retain_drop_failures := v_drop_fails;
     retain_backlog := v_retain_backlog; retain_detaching := v_detaching;
-    parent_missing := v_missing; regrain_to := r.regrain_to;
+    parent_missing := v_missing; regrain_to := r.regrain_to; archive_skips := v_skips;
     return next;
   end loop;
 end;
