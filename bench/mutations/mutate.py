@@ -15035,7 +15035,7 @@ MUTATIONS["flake_check_log_without_escape_flag"] = (
     "bench/review_tooling_verdicts.sh",
     "flake_check.sh before 2026-10-14: the job log is read with a bare `gh api .../logs`, which gh 2.100 "
     "refuses to print when the body holds terminal escape sequences, so on such a machine no log reads and "
-    "no signature can match. One clause, the flag's detection. The guard's (e) catches it (the restore_fk_lock "
+    "no signature can match. One clause, the flag's detection. The guard's (e) catches it (the registry_quota "
     "flake not recognised under gh 2.100).",
     [('case "$(gh api --help 2>/dev/null)" in *--allow-escape-sequences*) LOG_FLAG=(--allow-escape-sequences);; esac\n',
       '', 1)],

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **Two lock guards stop failing correct code on a slow runner** (#1456, #1408, #1066, #556).
+  `bench/restore_fk_lock.sh` counted probe writes to the managed parent that timed out at a fixed 50 ms, so on
+  a GitHub runner where the fixed restore's own short hold reached 95 to 167 ms it failed correct code. It now
+  measures what #263's bar names, coupling to data size: it restores the key against a referencing table of
+  250k rows and one of 4M rows, five rounds each, and requires the parent's blocked span (the longest probe
+  write overlapping a restore) to grow, from the small table to the large, by less than half of what the
+  extra rows take to scan on the same runner. A uniformly slow runner scales both sides, and the pre-#265 inline
+  VALIDATE still fails it. `bench/regrain_outgoing_fk_lock.sh` failed for a different reason, exactly 20
+  timeouts every time: an autovacuum worker on the unvacuumed copy held the swap's ATTACH, with the parent
+  already locked, until `deadlock_timeout` cancelled it a second later. The guard now vacuums the copy before
+  the swap and records that no worker was on the fixture as it began, and its 50 ms count gave way to the
+  same runner-scaled form: the longest wait must stay under half this runner's time for the FK scan the
+  pre-#348 ATTACH ran. The `lock_guard_probe` flake signature in `scripts/review/flake_check.sh` is retired
+  with the assertion it matched.
 - **`status().archive_skips` no longer brings back whole-step skips a chunk cleared when a regrain's swap deletes
   the parent's only chunks** (#1468). The count of `maintain()`'s skips for the archive step as a whole (no `lo`)
   ran from the parent's latest archive chunk, and the swap deletes the source's chunks, so a parent whose only

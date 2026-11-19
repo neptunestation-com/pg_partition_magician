@@ -329,12 +329,9 @@ STUB
 chmod +x "$work/bin/gh"
 E=$'\033'
 {
-  echo "2026-10-13T23:14:00.1Z ##[group]Run ./test.sh perf"
-  echo "2026-10-13T23:14:00.2Z ${E}[36;1m./test.sh perf --shard=2/4${E}[0m"
-  echo "2026-10-13T23:14:09.0Z PASS  LIVENESS: the probe was writing before the restore began   12 writes"
-  echo "2026-10-13T23:14:09.0Z PASS  LIVENESS: attempts overlapped the restore's own window   3 overlapped"
-  echo "2026-10-13T23:14:09.0Z PASS  the FK was actually re-added   yes"
-  echo "2026-10-13T23:14:09.0Z FAIL  writes to the MANAGED PARENT are not blocked   got 1, want 0"
+  echo "2026-10-13T23:14:00.1Z ##[group]Run ./test.sh archive"
+  echo "2026-10-13T23:14:00.2Z ${E}[36;1m./test.sh archive${E}[0m"
+  echo "2026-10-13T23:14:09.0Z Error response from daemon: toomanyrequests: You have reached your pull rate limit"
 } > "$work/flake.log"
 {
   echo "2026-10-13T23:14:00.2Z ${E}[36;1m./test.sh perf --shard=2/4${E}[0m"
@@ -346,10 +343,10 @@ fc() { PATH="$work/bin:$PATH" GH_STUB=$1 GH_LOG=$2 bash "$R/flake_check.sh" 4242
 out=$(PATH="$work/bin:$PATH" GH_STUB=new GH_LOG="$work/flake.log" gh api repos/o/r/actions/jobs/101/logs 2>/dev/null); rc=$?
 check "$([ "$rc" != 0 ] && [ -z "$out" ] && echo 0 || echo 1)" "LIVENESS: (e) the stub, as gh 2.100, prints nothing for the bare read" "exit $rc, ${#out} bytes"
 out=$(fc new "$work/flake.log"); rc=$?
-check "$([ "$rc" = 0 ] && grep -q "known flake lock_guard_probe" <<<"$out" && echo 0 || echo 1)" \
-  "(e) under gh 2.100 the restore_fk_lock flake is recognised" "exit $rc: ${out:0:70}"
+check "$([ "$rc" = 0 ] && grep -q "known flake registry_quota" <<<"$out" && echo 0 || echo 1)" \
+  "(e) under gh 2.100 the registry_quota flake is recognised" "exit $rc: ${out:0:70}"
 out=$(fc old "$work/flake.log"); rc=$?
-check "$([ "$rc" = 0 ] && grep -q "known flake lock_guard_probe" <<<"$out" && echo 0 || echo 1)" \
+check "$([ "$rc" = 0 ] && grep -q "known flake registry_quota" <<<"$out" && echo 0 || echo 1)" \
   "(e) under an older gh the same flake is recognised" "exit $rc: ${out:0:70}"
 out=$(fc new "$work/real.log"); rc=$?
 check "$([ "$rc" = 1 ] && grep -q "UNKNOWN failure" <<<"$out" && echo 0 || echo 1)" \
