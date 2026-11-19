@@ -6082,8 +6082,11 @@ create index if not exists archive_ledger_retired_hi_key_idx
 -- retired, and at archive_batch's default of 1 nor were the parent's partitions behind it, long after the strategy
 -- was corrected. The check refuses a new one, so only an older install's row is found here. It records no row of the
 -- partition, so discarding it loses nothing, and the partition archives from its own lo. A retired row stays: it is
--- the record of a dropped relation, never read as coverage. A bound that names no instant by itself (#1336) is
--- compared only as written. Logged archive_coverage_reset, once per partition.
+-- the record of a dropped relation, never read as coverage. Bounds are compared by their order key, which reads
+-- only a bound that names one value in every session (#1336) and never raises: an older install can hold a hi that
+-- is not a value of the column at all (reference.md, the archive step's contract check), and a cast of it here
+-- aborted the whole install, the repair included. Any other pair is compared only as written. Logged
+-- archive_coverage_reset, once per partition.
 do $$
 declare r record;
 begin
@@ -6092,9 +6095,7 @@ begin
       delete from pgpm.archive_ledger l
        using pgpm.config c
        where c.parent_table = l.parent_table and l.retired_at is null
-         and (l.hi = l.lo
-              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)
-                      then not pgpm._native_gt(c.control_kind, l.hi, l.lo) else false end)
+         and (l.hi = l.lo or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))
       returning l.parent_table, l.child_name, l.lo)
     select parent_table, child_name, count(*) as chunks, string_agg(lo, ', ' order by lo) as los
       from empty group by parent_table, child_name
@@ -16877,16 +16878,31 @@ begin
     -- max(control) READ FROM THE RELATION. With the relation gone there is no honest answer, and 0 would
     -- read as "nothing is eligible" -- a claim status() cannot make. This is also the one branch that
     -- would raise, via _retain_boundary -> _frontier_native, so skipping it is what keeps status() alive.
-    -- archive_skips (#1439): skip_archive rows since the parent's last recorded chunk. The archive step logs one for a
-    -- lock race or a transient error, which the next tick clears, and for an error that recurs every tick (stale
+    -- archive_skips (#1439): the longest run of skip_archive rows since a recorded chunk. The archive step logs one for
+    -- a lock race or a transient error, which the next tick clears, and for an error that recurs every tick (stale
     -- credentials, a deleted bucket, a strategy's refusal), which no counter above moved: archiving and, with it,
     -- retention stalled while retain_backlog read as catching up. Non-zero for a tick is normal; climbing is a stall,
     -- and method says why. A chunk is recorded in pgpm.archive_ledger, not logged, so its archived_at is the mark.
-    -- Exact action value: skip_archive_retired_range is logged once, and is not a retry.
-    select count(*) into v_skips from pgpm.log
-      where parent_table = r.parent_table and action = 'skip_archive'
-        and at > coalesce((select max(archived_at) from pgpm.archive_ledger where parent_table = r.parent_table),
-                          '-infinity'::timestamptz);
+    -- The run is counted PER PARTITION: a row the archive step logs for a partition carries the partition's own lo,
+    -- and is counted since that partition's last chunk, because at archive_batch above 1 a sibling records chunks
+    -- every tick while one partition is refused every tick, and a parent-wide mark read that stall as 0 for as long
+    -- as the sibling had chunks left. A row with no lo is maintain()'s, for the archive step as a whole, and is
+    -- counted since the parent's last chunk. Exact action value: skip_archive_retired_range is logged once, and is
+    -- not a retry.
+    select greatest(
+             (select count(*) from pgpm.log g
+               where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null
+                 and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l
+                                       where l.parent_table = r.parent_table), '-infinity'::timestamptz)),
+             (select max(k.n) from (
+                select count(*) as n from pgpm.log g
+                  join pgpm.part p on p.parent_table = g.parent_table and p.lo = g.lo
+                 where g.parent_table = r.parent_table and g.action = 'skip_archive'
+                   and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l
+                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),
+                                       '-infinity'::timestamptz)
+                 group by p.child_name) k))
+      into v_skips;
     v_retain_backlog := case when v_missing then null else 0 end;
     -- #451: _retain_boundary refuses a hand-edited negative retain (see there). status() is what an
     -- operator reads to find that out, so it stays alive and reports the backlog as null for that table,

@@ -17777,26 +17777,33 @@ MUTATIONS["ledger_empty_chunk_kept"] = (
     "partition's first chunk collides with it every tick after the upgrade. The install pass's delete matches nothing. "
     "tests/367 part A catches it.",
     [("       where c.parent_table = l.parent_table and l.retired_at is null\n"
-      "         and (l.hi = l.lo\n",
+      "         and (l.hi = l.lo",
       "       where c.parent_table = l.parent_table and l.retired_at is null and false\n"
-      "         and (l.hi = l.lo\n", 1)],
+      "         and (l.hi = l.lo", 1)],
 )
 MUTATIONS["ledger_empty_equal_text_only"] = (
     "bench/archive_ledger_wedges.sh",
     "The install pass discards only a row whose hi is lo as written, so one whose hi is below lo (no release before #454 "
     "refused that either) still wedges its partition. One clause. tests/367 part A catches it.",
-    [("              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n"
-      "                      then not pgpm._native_gt(c.control_kind, l.hi, l.lo) else false end)",
-      "              or false)", 1)],
+    [(" or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))", ")", 1)],
+)
+MUTATIONS["ledger_empty_cast_aborts"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass compares an id grid's bounds by casting them, as #1466's first head did, so an older install's "
+    "ledger row whose hi is not a number (reference.md's contract check names the shape) aborts the whole install, "
+    "the repair included. tests/367 part A catches it.",
+    [(" or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))",
+      "\n              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n"
+      "                      then not pgpm._native_gt(c.control_kind, l.hi, l.lo) else false end)", 1)],
 )
 MUTATIONS["ledger_empty_discards_retired"] = (
     "bench/archive_ledger_wedges.sh",
     "The install pass discards a retired row covering nothing too, the record of a dropped relation's chunks, which "
     "#1141 keeps. One clause. tests/367 part A catches it.",
     [("       where c.parent_table = l.parent_table and l.retired_at is null\n"
-      "         and (l.hi = l.lo\n",
+      "         and (l.hi = l.lo",
       "       where c.parent_table = l.parent_table\n"
-      "         and (l.hi = l.lo\n", 1)],
+      "         and (l.hi = l.lo", 1)],
 )
 MUTATIONS["ledger_swap_by_name_only"] = (
     "bench/archive_ledger_wedges.sh",
@@ -17812,16 +17819,31 @@ MUTATIONS["archive_skips_uncounted"] = (
     "bench/archive_ledger_wedges.sh",
     "Issue #1439's second bullet: status() counts no skip_archive, so a strategy that fails every tick stalls archiving "
     "and retention with no counter moving. tests/367 part C catches it.",
-    [("      where parent_table = r.parent_table and action = 'skip_archive'\n",
-      "      where parent_table = r.parent_table and action = 'skip_archive' and false\n", 1)],
+    [("      into v_skips;\n", "      into v_skips;\n    v_skips := 0;\n", 1)],
 )
 MUTATIONS["archive_skips_never_reset"] = (
     "bench/archive_ledger_wedges.sh",
-    "archive_skips counts every skip_archive ever logged, so a stall that cleared still reads as one. The window since the "
-    "last recorded chunk removed. tests/367 part C catches it.",
-    [("        and at > coalesce((select max(archived_at) from pgpm.archive_ledger where parent_table = r.parent_table),\n"
-      "                          '-infinity'::timestamptz);\n",
-      "        and at > '-infinity'::timestamptz;\n", 1)],
+    "archive_skips counts every skip_archive a partition ever logged, so a stall that cleared still reads as one. The "
+    "window since the partition's last recorded chunk removed. tests/367 part C catches it.",
+    [("                   and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l\n"
+      "                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),\n"
+      "                                       '-infinity'::timestamptz)\n",
+      "", 1)],
+)
+MUTATIONS["archive_skips_parent_wide"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips counts a partition's skips since ANY chunk of the parent, as #1466's first head did, so at "
+    "archive_batch above 1 a partition refused every tick reads 0 for as long as a sibling records chunks. One clause. "
+    "tests/367 part D catches it.",
+    [("                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),\n",
+      "                                         where l.parent_table = p.parent_table),\n", 1)],
+)
+MUTATIONS["archive_skips_whole_step_dropped"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips leaves out maintain()'s skip_archive for the archive step as a whole (no lo), so a step that raises "
+    "before any partition, every tick, moves no counter. tests/367 part C catches it.",
+    [("               where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null\n",
+      "               where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null and false\n", 1)],
 )
 MUTATIONS["skip_archive_method_truncated"] = (
     "bench/archive_ledger_wedges.sh",

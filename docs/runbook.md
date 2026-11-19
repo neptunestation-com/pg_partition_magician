@@ -417,7 +417,8 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
 
    `paused = true` means maintenance is doing nothing. A climbing `archive_skips` means the archive step
    fails every tick (stale credentials, a deleted bucket, a strategy's refusal): read the newest
-   `skip_archive` row's `method` for the reason and the remedy, since no chunk is recorded until it is fixed.
+   `skip_archive` row's `method` for the reason and the remedy (its `lo` names the partition), since no chunk of that
+   partition is recorded until it is fixed.
    A flat `retain_backlog` with `retain_drop_failures` and `archive_skips`
    also flat at zero, and `archive_fn` set, means chunked archiving simply hasn't caught up yet for the
    partitions at the head of the backlog -- not a failure, just run more maintenance ticks (or check

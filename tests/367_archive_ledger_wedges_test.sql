@@ -13,13 +13,19 @@
 --
 -- THE CONTRACT.
 --   PART A  re-running install.sql discards every unretired row that covers nothing (hi = lo, or below it), logged
---           archive_coverage_reset, and the partition archives from its own lo. A row that covers something, and a
---           retired row, stay.
+--           archive_coverage_reset, and the partition archives from its own lo. A row that covers something, a
+--           retired row, and a row whose hi is not a number (an older pgpm recorded one) stay, and the install goes on.
 --   PART B  a row under a tracked name whose partition records another oid is discarded by the archive step, those
 --           rows only, logged archive_coverage_reset naming the oid, and both swapped partitions archive from their
 --           own lo; a row under a tracked name with the partition's own oid stays.
---   PART C  status().archive_skips counts skip_archive rows since the parent's last recorded chunk: it climbs while a
---           strategy fails every tick and is 0 again once a chunk is recorded. method keeps the whole reason.
+--   PART C  status().archive_skips counts skip_archive rows since the last recorded chunk: it climbs while a strategy
+--           fails every tick and is 0 again once a chunk is recorded; a skip of the archive step as a whole (no lo)
+--           counts since the parent's last chunk. method keeps the whole reason.
+--   PART D  the count is per partition: one refused every tick while a sibling records a chunk every tick (archive_batch
+--           2) still climbs.
+--
+-- ONE TRANSACTION HAS ONE now(), so a skip and a chunk this file writes would share an instant and a "since the last
+-- chunk" assertion would pass on the tie. Every tick that precedes another is moved back a minute before the next.
 --
 -- install.sql is read with \ir, relative to this file; the psql variable `install` overrides the path, which
 -- bench/archive_ledger_wedges.sh uses to hand it a mutant.
@@ -33,7 +39,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(27);
+select plan(32);
 
 create schema pgpm_t367;
 create table pgpm_t367.calls (parent regclass, p_child name, p_lo text, p_hi text);
@@ -81,6 +87,12 @@ select child_name as c_child, child_oid as c_oid from pgpm.part where parent_tab
 select pgpm._enforce_write_blocks(p) from unnest(array['public.ac367a', 'public.ac367b', 'public.ac367c']::regclass[]) p;
 select pgpm.set_archive_fn(p, 'pgpm_t367.full(regclass,name,text,text)'::regprocedure)
   from unnest(array['public.ac367a', 'public.ac367b', 'public.ac367c']::regclass[]) p;
+select pgpm_t367.mk('ac367n', array[41]);
+call pgpm.transmute('public.ac367n', 'id', 1000::bigint, p_retain => 19000, p_paused => false);
+select child_name as n_child, child_oid as n_oid from pgpm.part where parent_table = 'public.ac367n'::regclass and lo = '0' \gset
+-- a row whose hi is not a value of the column, which an older archive step recorded (reference.md, the contract check)
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid) values
+  ('public.ac367n', '0', 'not-a-number', :'n_child', 0, :n_oid);
 -- what an install older than #454's check could leave: a at lo, b below it; c a real partial chunk; and a retired
 -- row covering nothing, the record of a dropped relation
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid) values
@@ -93,12 +105,16 @@ insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived
 select is(pgpm._archive_step('public.ac367a'), 0, 'A: LIVENESS: before the upgrade, a''s first chunk is not recorded');
 select ok(exists (select 1 from pgpm.log where parent_table = 'public.ac367a'::regclass and action = 'skip_archive' and lo = '0'),
   'A: LIVENESS: it is refused as skip_archive (the empty row wedges it)');
+update pgpm.log set at = at - interval '1 minute' where parent_table = 'public.ac367a'::regclass and action = 'skip_archive';
 
 \ir :install
 
 select is(pgpm_t367.ledger('public.ac367a'), array['ac367a_gone:7000-7000:retired'],
   'A: re-running install.sql discarded a''s row covering nothing, and kept the retired one');
 select is(pgpm_t367.ledger('public.ac367b'), '{}'::text[], 'A: and b''s row below its lo');
+select is(pgpm_t367.ledger('public.ac367n'), array[format('%s:0-not-a-number:live', :'n_child')],
+  'A: a row whose hi is not a number is compared as written and kept, and the install went on');
+delete from pgpm.archive_ledger where parent_table = 'public.ac367n'::regclass;
 select is(pgpm_t367.ledger('public.ac367c'), array[format('%s:0-400:live', :'c_child')], 'A: c''s partial chunk stays');
 select is((select array_agg(parent_table::text || ':' || rows order by parent_table::text) from pgpm.log where action = 'archive_coverage_reset'),
   array['ac367a:1', 'ac367b:1'], 'A: logged archive_coverage_reset once for a and once for b, one chunk each');
@@ -177,11 +193,58 @@ select is((select retain_drop_failures from pgpm.status() where parent = 'public
 select ok((select bool_and(method ~ 'REMEDY-AT-THE-END: rotate the credentials$') from pgpm.log
             where parent_table = 'public.ac367k'::regclass and action = 'skip_archive'),
   'C: method keeps the whole reason, remedy included');
+update pgpm.log set at = at - interval '1 minute' where parent_table = 'public.ac367k'::regclass and action = 'skip_archive';
 select pgpm.set_archive_fn('public.ac367k', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
 select is(pgpm._archive_step('public.ac367k'), 1, 'C: LIVENESS: a corrected strategy records a chunk');
 select is((select archive_skips from pgpm.status() where parent = 'public.ac367k'::regclass), 0::bigint,
   'C: archive_skips is 0 again');
+-- maintain()'s skip_archive for the archive step as a whole, as its handler writes it: no lo
+update pgpm.archive_ledger set archived_at = archived_at - interval '1 minute' where parent_table = 'public.ac367k'::regclass;
+insert into pgpm.log (parent_table, action, method)
+  select 'public.ac367k', 'skip_archive', 'the archive step failed: ' || g from generate_series(1, 3) g;
+select is((select archive_skips from pgpm.status() where parent = 'public.ac367k'::regclass), 3::bigint,
+  'C: three skips of the archive step as a whole since the parent''s last chunk count 3');
 select is((select archive_skips from pgpm.status() where parent = 'public.ac367a'::regclass), 0::bigint,
   'C: a''s skip before its upgrade is older than its recorded chunk, so not counted');
+
+-- ============ PART D: one partition refused every tick while a sibling records chunks ============
+-- refuses the first partition's chunks; archives a sibling's 100 ids at a time, so it has a chunk left every tick
+create function pgpm_t367.sibling(p_parent regclass, p_child name, p_lo text, p_hi text)
+returns pgpm.archive_result language plpgsql as $$
+declare v pgpm.archive_result;
+begin
+  insert into pgpm_t367.calls values (p_parent, p_child, p_lo, p_hi);
+  if p_lo::numeric < 1000 then
+    raise exception 'the bucket refused the upload of %', p_child;
+  end if;
+  v.covered_hi := least(p_lo::numeric + 100, p_hi::numeric)::text;
+  execute format('select count(*) from %s where id >= %s and id < %s', p_parent, p_lo, v.covered_hi) into v.rows_archived;
+  return v;
+end $$;
+create table public.ac367d (id bigint primary key, payload text);
+insert into public.ac367d select g, 'p' || g from unnest(array[51, 52, 53, 54, 55, 56, 57]) g;
+call pgpm.transmute('public.ac367d', 'id', 1000::bigint, p_retain => 17000, p_paused => false);
+insert into public.ac367d select g, 'p' || g from unnest(array[1001, 1102, 1203]) g;
+insert into public.ac367d values (20000, 'frontier');
+select child_name as d1 from pgpm.part where parent_table = 'public.ac367d'::regclass and lo = '1000' \gset
+update pgpm.config set archive_batch = 2 where parent_table = 'public.ac367d'::regclass;
+select pgpm._enforce_write_blocks('public.ac367d');
+select pgpm.set_archive_fn('public.ac367d', 'pgpm_t367.sibling(regclass,name,text,text)'::regprocedure);
+-- three ticks, each moved back a minute before the next
+do $$
+begin
+  for i in 1 .. 3 loop
+    perform pgpm._archive_step('public.ac367d');
+    update pgpm.log set at = at - interval '1 minute' where parent_table = 'public.ac367d'::regclass;
+    update pgpm.archive_ledger set archived_at = archived_at - interval '1 minute' where parent_table = 'public.ac367d'::regclass;
+  end loop;
+end $$;
+select is((select count(*) from pgpm.log where parent_table = 'public.ac367d'::regclass and action = 'skip_archive' and lo = '0'),
+  3::bigint, 'D: LIVENESS: the first partition was refused on every tick');
+select is((select array_agg(lo order by lo::numeric) from pgpm.archive_ledger
+            where parent_table = 'public.ac367d'::regclass and child_name = :'d1'),
+  array['1000', '1100', '1200'], 'D: LIVENESS: the sibling recorded a chunk on every tick, and has chunks left');
+select is((select archive_skips from pgpm.status() where parent = 'public.ac367d'::regclass), 3::bigint,
+  'D: archive_skips counts the refused partition''s three skips, whatever its sibling records');
 
 select * from finish();
