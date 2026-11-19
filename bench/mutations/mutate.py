@@ -17785,10 +17785,10 @@ MUTATIONS["ledger_empty_chunk_kept"] = (
     "Issue #1439's defect: nothing discards a row covering nothing that an install older than #454's check left, so the "
     "partition's first chunk collides with it every tick after the upgrade. The install pass's delete matches nothing. "
     "tests/367 part A catches it.",
-    [("       where c.parent_table = l.parent_table and l.retired_at is null\n"
-      "         and (l.hi = l.lo",
-      "       where c.parent_table = l.parent_table and l.retired_at is null and false\n"
-      "         and (l.hi = l.lo", 1)],
+    [("       where c.parent_table = l.parent_table\n"
+      "         and (l.retired_at is null\n",
+      "       where c.parent_table = l.parent_table and false\n"
+      "         and (l.retired_at is null\n", 1)],
 )
 MUTATIONS["ledger_empty_equal_text_only"] = (
     "bench/archive_ledger_wedges.sh",
@@ -17809,10 +17809,18 @@ MUTATIONS["ledger_empty_discards_retired"] = (
     "bench/archive_ledger_wedges.sh",
     "The install pass discards a retired row covering nothing too, the record of a dropped relation's chunks, which "
     "#1141 keeps. One clause. tests/367 part A catches it.",
-    [("       where c.parent_table = l.parent_table and l.retired_at is null\n"
-      "         and (l.hi = l.lo",
-      "       where c.parent_table = l.parent_table\n"
-      "         and (l.hi = l.lo", 1)],
+    [("         and (l.retired_at is null\n              or exists (select 1 from pgpm.part p\n",
+      "         and (true\n              or exists (select 1 from pgpm.part p\n", 1)],
+)
+MUTATIONS["ledger_empty_retired_wedge_kept"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass keeps every retired row covering nothing, as #1466's third head did, so an install older than "
+    "v0.6.0, whose oid backfill marks every chunk retired (the empty one included), keeps the wedge after the upgrade: "
+    "its partition's first chunk meets the row on the primary key every tick. One clause. tests/367 part A catches it.",
+    [("                          where p.parent_table = l.parent_table and p.attached\n"
+      "                            and (p.lo = l.lo\n",
+      "                          where p.parent_table = l.parent_table and p.attached and false\n"
+      "                            and (p.lo = l.lo\n", 1)],
 )
 MUTATIONS["ledger_swap_by_name_only"] = (
     "bench/archive_ledger_wedges.sh",
@@ -17849,7 +17857,7 @@ MUTATIONS["archive_skips_mark_per_log_row"] = (
     "archive_skips reads each skip_archive row's mark with a subquery of its own, as #1466's second head did, so one "
     "status() call scans pgpm.archive_ledger once per skip pgpm.log keeps: seconds per call during the very stall it "
     "reports. The once-per-call marks put back as a per-row subquery.",
-    [("                  join (select p.lo, max(l.archived_at) as mark\n"
+    [("                  join (select p.lo, greatest(max(l.archived_at), max(p.created_at) filter (where p.attached)) as mark\n"
       "                          from pgpm.part p\n"
       "                          left join pgpm.archive_ledger l\n"
       "                            on l.parent_table = p.parent_table and l.child_name = p.child_name\n"
@@ -17862,6 +17870,14 @@ MUTATIONS["archive_skips_mark_per_log_row"] = (
       "                   and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l\n"
       "                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),\n"
       "                                       '-infinity'::timestamptz)\n", 1)],
+)
+MUTATIONS["archive_skips_mark_ignores_creation"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips reads a lo's mark from its chunks alone, as #1466's third head did, so after a regrain's swap, whose "
+    "fine partition at the source's lo has no chunk yet and the source's are gone, a skip logged against the source "
+    "long before counts again. tests/367 part F catches it.",
+    [("greatest(max(l.archived_at), max(p.created_at) filter (where p.attached)) as mark",
+      "max(l.archived_at) as mark", 1)],
 )
 MUTATIONS["archive_skips_mark_per_child"] = (
     "bench/archive_ledger_wedges.sh",

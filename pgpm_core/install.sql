@@ -6082,7 +6082,12 @@ create index if not exists archive_ledger_retired_hi_key_idx
 -- retired, and at archive_batch's default of 1 nor were the parent's partitions behind it, long after the strategy
 -- was corrected. The check refuses a new one, so only an older install's row is found here. It records no row of the
 -- partition, so discarding it loses nothing, and the partition archives from its own lo. A retired row stays: it is
--- the record of a dropped relation, never read as coverage. Bounds are compared by their order key, which reads
+-- the record of a dropped relation, never read as coverage. Unless a partition pgpm tracks holds its lo: an install
+-- older than v0.6.0 recorded no oid when it created a partition, so this upgrade's oid backfill
+-- (_backfill_chunk_oids, an adopted anchor) has just marked every one of its chunks retired, the empty one included,
+-- and an empty range holds no partition (_over_retired_chunks), so the partition's first chunk met that row on the
+-- primary key every tick, as before. The partition still holds its rows and archives them again to the same object
+-- key, so that row is discarded too; a retired empty row at a lo no partition holds stays as a record. Bounds are compared by their order key, which reads
 -- only a bound that names one value in every session (#1336) and never raises: an older install can hold a hi that
 -- is not a value of the column at all (reference.md, the archive step's contract check), and a cast of it here
 -- aborted the whole install, the repair included. Any other pair is compared only as written. Logged
@@ -6094,7 +6099,13 @@ begin
     with empty as (
       delete from pgpm.archive_ledger l
        using pgpm.config c
-       where c.parent_table = l.parent_table and l.retired_at is null
+       where c.parent_table = l.parent_table
+         and (l.retired_at is null
+              or exists (select 1 from pgpm.part p
+                          where p.parent_table = l.parent_table and p.attached
+                            and (p.lo = l.lo
+                                 or coalesce(pgpm._native_order_key(p.lo) <= pgpm._native_order_key(l.lo)
+                                             and pgpm._native_order_key(l.lo) < pgpm._native_order_key(p.hi), false))))
          and (l.hi = l.lo or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))
       returning l.parent_table, l.child_name, l.lo)
     select parent_table, child_name, count(*) as chunks, string_agg(lo, ', ' order by lo) as los
@@ -16888,8 +16899,10 @@ begin
     -- every tick while one partition is refused every tick, and a parent-wide mark read that stall as 0 for as long
     -- as the sibling had chunks left. The mark is per lo, the latest chunk of any pgpm.part row at it, because a
     -- regrain's unattached copy shares its source's lo and has no chunk of its own, and read per child it counted
-    -- every skip of that lo ever logged. The marks are computed once, not once per log row: pgpm.log keeps every
-    -- skip. A row with no lo is maintain()'s, for the archive step as a whole, and is counted since the parent's
+    -- every skip of that lo ever logged. Nor is a skip older than the attached partition now at the lo counted (its
+    -- pgpm.part.created_at): it was logged against an earlier relation there, as after a regrain's swap, whose fine
+    -- partition has no chunk yet and its source's are gone. The marks are computed once, not once per log row:
+    -- pgpm.log keeps every skip. A row with no lo is maintain()'s, for the archive step as a whole, and is counted since the parent's
     -- last chunk. Exact action value: skip_archive_retired_range is logged once, and is not a retry.
     select greatest(
              (select count(*) from pgpm.log g
@@ -16898,7 +16911,7 @@ begin
                                        where l.parent_table = r.parent_table), '-infinity'::timestamptz)),
              (select max(k.n) from (
                 select count(*) as n from pgpm.log g
-                  join (select p.lo, max(l.archived_at) as mark
+                  join (select p.lo, greatest(max(l.archived_at), max(p.created_at) filter (where p.attached)) as mark
                           from pgpm.part p
                           left join pgpm.archive_ledger l
                             on l.parent_table = p.parent_table and l.child_name = p.child_name

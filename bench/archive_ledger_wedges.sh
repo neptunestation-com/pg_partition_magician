@@ -9,11 +9,13 @@
 # left under names an operator swapped, which are still tracked (#1440). The file re-runs install.sql with \ir; this
 # wrapper hands it the copy under test as the psql variable `install`, as bench/install_keeps_dependent_views.sh does.
 #
-# ELEVEN mutations are required to fail against it (bench/mutations/mutate.py):
+# THIRTEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   ledger_empty_chunk_kept        -- the install pass discards no row covering nothing. Part A.
 #   ledger_empty_equal_text_only   -- only a row whose hi is lo as written, not one below lo. Part A.
 #   ledger_empty_discards_retired  -- a retired row covering nothing is discarded too. Part A.
 #   ledger_empty_cast_aborts       -- the bounds are cast, so a non-numeric hi aborts the install. Part A.
+#   ledger_empty_retired_wedge_kept -- a retired empty row at a lo a partition holds is kept, so an install
+#                                     older than v0.6.0 (its upgrade marks every chunk retired) stays wedged. Part A.
 #   ledger_swap_by_name_only       -- the orphan discard asks only whether the name is tracked. Part B.
 #   archive_skips_uncounted        -- status() counts no skip_archive. Part C.
 #   archive_skips_never_reset      -- every skip_archive a partition ever logged is counted. Part C.
@@ -21,6 +23,8 @@
 #   archive_skips_parent_wide      -- a partition's skips reset on a sibling's chunk. Part D.
 #   archive_skips_mark_per_child   -- the mark is read per pgpm.part row, not per lo, so a regrain's
 #                                     copy at its source's lo counts every skip of it. Part E.
+#   archive_skips_mark_ignores_creation -- the mark is the lo's chunks alone, so after a regrain's swap a skip
+#                                     logged against the source counts again. Part F.
 #   skip_archive_method_truncated  -- the skip's method is cut at 200 characters again. Part C.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's

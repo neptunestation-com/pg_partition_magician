@@ -2970,7 +2970,8 @@ is "no progress", which recorded as a `(lo, lo)` ledger row wedged the ledger fo
 resumed from `max(hi) = lo`, handed the strategy the same chunk, and collided on the ledger's primary
 key, every tick from then on. A row like that an earlier pgpm recorded (no release before this check
 had it) is discarded when `install.sql` is re-run: every unretired row whose `hi` is at or below its
-`lo` covers no row, so the upgrade deletes it, logged once per partition as `archive_coverage_reset`,
+`lo` covers no row, so the upgrade deletes it (and a retired one at a `lo` a partition holds, since an install older
+than v0.6.0 has every chunk marked retired by the upgrade's oid backfill, the empty one included), logged once per partition as `archive_coverage_reset`,
 and the partition archives from its own `lo`. A null `covered_hi` is refused for the same reason (a
 null `hi` is not a watermark). And a value that is not a native value at all is refused here rather than left in the
 text `hi` column, where every later coverage check would have raised, and `maintain()` would have
@@ -3800,7 +3801,9 @@ One row per managed table. Beyond the static config it surfaces:
 - `archive_skips` -- the longest run of `skip_archive` rows since a recorded archive chunk: the most any one
   partition has logged since that partition's last chunk, or, for a failure of the archive step as a whole
   (`maintain()`'s, with no `lo`), since the parent's last chunk. Per partition, because at `archive_batch` above
-  1 a sibling can record a chunk every tick while one partition is refused every tick. The archive step
+  1 a sibling can record a chunk every tick while one partition is refused every tick. A skip older than the
+  partition now at its `lo` (`pgpm.part.created_at`) is not counted: it was logged against an earlier relation
+  there, as after a regrain's swap. The archive step
   logs one for a lock race or a transient error, which the next tick clears, and for an error that
   recurs every tick, which stalls archiving and, with it, retention while `retain_backlog` reads as
   catching up. Non-zero for a tick is normal; climbing is a stall, and the newest `skip_archive` row's
