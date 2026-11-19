@@ -161,10 +161,25 @@ wait_run() { # <run_id>: until the run's latest attempt completes; 1 on timeout
   echo "  run $1 did not complete in ${LAND_WAIT_RUN_MIN:-90} min"; return 1
 }
 
-wait_checks() { # <pr>: 0 green, 5 a check failed (prints the failing run id to $FAILED_RUN), 1 timeout
-  local pr=$1 json s n i
+wait_checks() { # <pr>: 0 green, 5 a check failed (prints the failing run id to $FAILED_RUN), 1 timeout,
+                 # 2 gh could not read the checks five polls in a row (its error in $CHECKS_ERROR)
+  local pr=$1 json s n i err errs=0
   for i in $(seq 1 "$WAIT_CHECKS"); do
-    json=$(gh pr checks "$pr" --repo "$REPO" --json bucket,link 2>/dev/null) || json="[]"
+    # #1449: gh's error was discarded and read as "no checks yet", so a gh that cannot read checks at all (one too
+    # old for --json, an expired token) waited out the whole timeout printing n=0. gh pr checks also exits non-zero
+    # while checks are pending, so its exit code decides nothing: stdout that parses as a list is the answer, gh's
+    # own "no checks reported" is an empty list, and anything else is an error, said every poll and fatal at five.
+    err=$(mktemp); json=$(gh pr checks "$pr" --repo "$REPO" --json bucket,link 2>"$err")
+    if ! jq -e 'type == "array"' <<<"$json" >/dev/null 2>&1; then
+      if grep -q 'no checks reported' "$err"; then json="[]"
+      else
+        errs=$((errs + 1)); CHECKS_ERROR=$(head -c 300 "$err" | tr '\n' ' '); rm -f "$err"
+        say "  #$pr checks unreadable ($errs of 5): ${CHECKS_ERROR:-gh printed nothing}"
+        [ $errs -lt 5 ] || return 2
+        sleep 30; continue
+      fi
+    fi
+    rm -f "$err"; errs=0
     n=$(jq 'length' <<<"$json")
     s=$(jq -r 'map(.bucket) | group_by(.) | map("\(.[0]):\(length)") | join(" ")' <<<"$json")
     say "  #$pr checks n=$n $s"
@@ -279,6 +294,7 @@ ensure_green() { # <pr>: wait for the head's checks, rerunning a known flake; ex
       gh run rerun "$FAILED_RUN" --repo "$REPO" --failed || { echo "STOPPED at #$PR: rerun refused"; exit 4; }
       sleep 90; continue
     fi
+    [ $rc -ne 2 ] || { echo "STOPPED at #$PR: gh cannot read its checks: $CHECKS_ERROR"; exit 5; }
     [ $rc -eq 0 ] || { echo "STOPPED at #$PR: checks did not complete in ${LAND_WAIT_CHECKS_MIN:-60} min (rerun)"; exit 6; }
     return 0
   done

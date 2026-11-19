@@ -564,5 +564,52 @@ out=$(fcj "$work/real.log" "$(job0 completed '"failure"' '1,2,3')" "$ann"); rc=$
 check "$([ "$rc" = 1 ] && ! grep -q "known flake" <<<"$out" && echo 0 || echo 1)" \
   "(i) the annotation on a job whose steps ran: not a flake" "exit $rc: ${out:0:70}"
 
+# ---------------------------------------------------------------- (j) land.sh's check reading
+#   #1449: wait_checks read `gh pr checks --json` with `2>/dev/null || json="[]"`, so any gh error was "no checks
+#   yet": on 2026-11-13 a gh too old for `pr checks --json` printed n=0 for thirty minutes against a head with 40
+#   green checks and the run exited 6, "rerun", with the error discarded. Driven through land.sh's own
+#   wait_checks and ensure_green with a stub gh in four modes. The controls: green checks pass; gh's own "no checks
+#   reported" (a head CI has not reached yet) is still an empty list, not an error; and pending checks, for which
+#   gh exits 8 with a valid list, are read as pending, so the error test is the output, not the exit code.
+#     land_checks_error_read_as_empty    any gh error read as an empty list again
+#     land_checks_exit_code_as_error     a non-zero exit read as an error, so pending checks stop the run
+cfn=""
+for f in say wait_checks ensure_green; do cfn+="$(lfn "$f")"$'\n'; done
+if ! grep -q '^wait_checks() *{' <<<"$cfn" || ! grep -q '^ensure_green() *{' <<<"$cfn"; then
+  bad "fixture: land.sh defines wait_checks() and ensure_green()" "not found"
+else
+  gh() {   # gh pr checks <pr> --repo r --json bucket,link, answering as $CHK says
+    [ "$1 $2" = "pr checks" ] || { echo "stub gh: unknown command $1 $2" >&2; return 1; }
+    echo poll >> "$calls"
+    case "$CHK" in
+      green)    echo '[{"bucket":"pass","link":"https://x/runs/1/job/1"},{"bucket":"pass","link":"https://x/runs/1/job/2"}]';;
+      pending)  echo '[{"bucket":"pass","link":"https://x/runs/1/job/1"},{"bucket":"pending","link":"https://x/runs/1/job/2"}]'; return 8;;
+      none)     echo "no checks reported on the 'fix/x' branch" >&2; return 1;;
+      oldgh)    echo 'unknown flag: --json' >&2; echo 'Usage:  gh pr checks [<number> | <url> | <branch>] [flags]' >&2; return 1;;
+    esac
+  }
+  sleep() { :; }
+  eval "$cfn"
+  REPO=o/r; MIN=2; export REPO MIN
+  run_wc() { : > "$calls"; WAIT_CHECKS=$1; out=$( (wait_checks 1449) 2>&1 ); rc=$?; polls=$(grep -c . "$calls"); }
+  CHK=green; run_wc 3
+  check "$([ "$rc" = 0 ] && [ "$polls" = 1 ] && echo 0 || echo 1)" "LIVENESS: (j) green checks pass on the first poll" "exit $rc, $polls poll(s)"
+  CHK=none; run_wc 3
+  check "$([ "$rc" = 1 ] && [ "$polls" = 3 ] && grep -q 'checks n=0' <<<"$out" && ! grep -q unreadable <<<"$out" && echo 0 || echo 1)" \
+    "(j) gh's 'no checks reported' is an empty list, waited on, not an error" "exit $rc, $polls poll(s)"
+  CHK=pending; run_wc 3
+  check "$([ "$rc" = 1 ] && grep -q 'pending:1' <<<"$out" && ! grep -q unreadable <<<"$out" && echo 0 || echo 1)" \
+    "(j) pending checks (gh exits 8 with a list) are read as pending" "exit $rc: $(grep -m1 'checks n=' <<<"$out" | cut -c1-50)"
+  CHK=oldgh; run_wc 30
+  check "$([ "$rc" = 2 ] && [ "$polls" = 5 ] && echo 0 || echo 1)" \
+    "(j) a gh that cannot read checks stops wait_checks after five polls" "exit $rc, $polls poll(s) of 30"
+  check "$(grep -q 'unreadable (1 of 5): unknown flag: --json' <<<"$out" && echo 0 || echo 1)" \
+    "(j) every unreadable poll names gh's own error" "$(grep -m1 unreadable <<<"$out" | cut -c1-60)"
+  : > "$calls"; WAIT_CHECKS=30; out=$( (ensure_green 1449) 2>&1 ); rc=$?
+  check "$([ "$rc" = 5 ] && grep -q 'STOPPED at #1449: gh cannot read its checks: unknown flag: --json' <<<"$out" && echo 0 || echo 1)" \
+    "(j) ensure_green stops with exit 5 and gh's error, not a timeout" "exit $rc: $(grep -m1 STOPPED <<<"$out" | cut -c1-60)"
+  unset -f gh sleep
+fi
+
 if [ "$fail" = 0 ]; then echo "review_tooling_verdicts: PASS"; else echo "review_tooling_verdicts: FAIL"; fi
 exit "$fail"

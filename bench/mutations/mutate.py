@@ -15066,6 +15066,24 @@ MUTATIONS["land_enqueue_ignores_threads"] = (
     [('  threads_clear "$1"\n', '', 1)],
 )
 MUTATION_SRC["land_enqueue_ignores_threads"] = "scripts/review/land.sh"
+MUTATIONS["land_checks_error_read_as_empty"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Issue #1449's defect: wait_checks reads any gh error as an empty list of checks, so a gh that cannot read "
+    "checks at all (one too old for --json, as on 2026-11-13) waits out the whole timeout printing n=0 and the "
+    "error is never seen. The guard's (j) catches it (no exit 2 after five polls, no stop naming gh's error).",
+    [("    if ! jq -e 'type == \"array\"' <<<\"$json\" >/dev/null 2>&1; then\n",
+      "    if ! jq -e 'type == \"array\"' <<<\"$json\" >/dev/null 2>&1; then json=\"[]\"; fi\n    if false; then\n", 1)],
+)
+MUTATION_SRC["land_checks_error_read_as_empty"] = "scripts/review/land.sh"
+MUTATIONS["land_checks_exit_code_as_error"] = (
+    "bench/review_tooling_verdicts.sh",
+    "The obvious fix for #1449, wrong: gh's exit code read as the error, but gh pr checks exits 8 while checks "
+    "are pending, so every landing that waits on running checks stops as unreadable. The guard's (j) catches it "
+    "(pending checks reported unreadable).",
+    [('    err=$(mktemp); json=$(gh pr checks "$pr" --repo "$REPO" --json bucket,link 2>"$err")\n',
+      '    err=$(mktemp); json=$(gh pr checks "$pr" --repo "$REPO" --json bucket,link 2>"$err") || json=""\n', 1)],
+)
+MUTATION_SRC["land_checks_exit_code_as_error"] = "scripts/review/land.sh"
 MUTATIONS["land_threads_first_page_only"] = (
     "bench/review_tooling_verdicts.sh",
     "land.sh's thread check reading only the first page of review threads (first:100 truncates silently, "
