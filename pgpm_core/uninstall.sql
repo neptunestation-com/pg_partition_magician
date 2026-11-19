@@ -38,6 +38,13 @@
 --     back NOT VALID (enforcing every new write), and a WARNING names each key pgpm tracked
 --     that is still NOT VALID, since nothing will validate it once pgpm is gone.
 --
+-- Refused, dropping nothing:
+--   * while anything outside schema pgpm depends on an object in it: a view of the operator's over
+--     pgpm.status() or pgpm.log, a function of theirs taking or returning a pgpm type, a column of one, a
+--     default, constraint or policy calling a pgpm function. The schema drop's CASCADE would take each
+--     with it, so the error names every one; drop them and re-run. pgpm's own triggers on the partitions
+--     it manages are not among them.
+--
 -- Left in place, on purpose:
 --   * every transmuted table, still a partitioned table under its original name, with
 --     all of its partitions (the monolith, the forward grid, any fine children a regrain
@@ -128,8 +135,52 @@ do $$
 declare
   r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
   v_nsp name; v_delta name; v_fnsp name; v_copies_q text; v_delta_oid oid; v_fn_oid oid;
+  v_dependants_q text;   -- #1040: what outside pgpm the schema drop would take with it, named for the refusal
 begin
   if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
+
+  -- #1040: `drop schema pgpm cascade` takes everything that depends on an object in pgpm, wherever it lives: a view
+  -- of the operator's over pgpm.status() or pgpm.log in their own schema, a function of theirs taking or returning a
+  -- pgpm type (an archive strategy returns pgpm.archive_result), a column of such a type, a default, a constraint or
+  -- a policy calling a pgpm function. None of them is pgpm's to remove, and the cascade dropped every one silently.
+  -- So the script REFUSES while any exists, naming each, as install.sql refuses a function change a view depends on
+  -- (#983), and drops nothing. Only direct dependants are named: one built on them goes with them, and dropping the
+  -- named one by hand says so. pgpm's own triggers on the partitions it manages (pgpm_write_block,
+  -- pgpm_regrain_truncate_guard: a pgpm_ trigger whose function is pgpm's) are the schema drop's to take, as the
+  -- header says. Asked first, from the catalog alone, so it holds against any installed release.
+  select string_agg(distinct x.what, ', ') into v_dependants_q
+    from (select case when d.classid = 'pg_rewrite'::regclass
+                      then (select case c.relkind when 'm' then 'materialized view ' else 'view ' end
+                                   || format('%I.%I', n.nspname, c.relname)
+                              from pg_rewrite w join pg_class c on c.oid = w.ev_class
+                              join pg_namespace n on n.oid = c.relnamespace where w.oid = d.objid)
+                      else pg_describe_object(d.classid, d.objid, d.objsubid) end as what,
+                 case d.classid
+                   when 'pg_rewrite'::regclass then (select c.relnamespace from pg_rewrite w join pg_class c on c.oid = w.ev_class where w.oid = d.objid)
+                   when 'pg_attrdef'::regclass then (select c.relnamespace from pg_attrdef a join pg_class c on c.oid = a.adrelid where a.oid = d.objid)
+                   when 'pg_trigger'::regclass then (select c.relnamespace from pg_trigger t join pg_class c on c.oid = t.tgrelid where t.oid = d.objid)
+                   when 'pg_policy'::regclass then (select c.relnamespace from pg_policy p join pg_class c on c.oid = p.polrelid where p.oid = d.objid)
+                   when 'pg_constraint'::regclass then (select c.connamespace from pg_constraint c where c.oid = d.objid)
+                   when 'pg_class'::regclass then (select c.relnamespace from pg_class c where c.oid = d.objid)
+                   when 'pg_proc'::regclass then (select p.pronamespace from pg_proc p where p.oid = d.objid)
+                   when 'pg_type'::regclass then (select t.typnamespace from pg_type t where t.oid = d.objid)
+                 end as nsp
+            from pg_depend d
+           where d.deptype = 'n'
+             and ((d.refclassid = 'pg_proc'::regclass and d.refobjid in (select p.oid from pg_proc p where p.pronamespace = 'pgpm'::regnamespace))
+               or (d.refclassid = 'pg_class'::regclass and d.refobjid in (select c.oid from pg_class c where c.relnamespace = 'pgpm'::regnamespace))
+               or (d.refclassid = 'pg_type'::regclass and d.refobjid in (select t.oid from pg_type t where t.typnamespace = 'pgpm'::regnamespace)))
+             and not (d.classid = 'pg_trigger'::regclass
+                      and exists (select 1 from pg_trigger t where t.oid = d.objid and t.tgfoid = d.refobjid
+                                                               and starts_with(t.tgname, 'pgpm_')))) x
+   where x.nsp is distinct from 'pgpm'::regnamespace;
+  if v_dependants_q is not null then
+    raise exception using errcode = 'dependent_objects_still_exist', message = format(
+      'pg_partition_magician: refusing to uninstall: dropping schema pgpm would also drop %s, which depend on pgpm '
+      'and are not pgpm''s to remove. Nothing has been dropped. Save each one''s definition (a view''s: select '
+      'pg_get_viewdef(''<view>''::regclass, true)), drop it, run this script again, then recreate it without pgpm.',
+      v_dependants_q);
+  end if;
 
   -- Drop regrain's change capture from every managed parent's schema. The delta table and its
   -- trigger function are deliberately persistent per parent (a completed regrain keeps them for the

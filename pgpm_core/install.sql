@@ -3985,7 +3985,12 @@ $$;
 -- records. A partition of the operator's own partitioned table is named (PR #1436 round 6, V-02). Defined here, ahead of _disown_retirement, which
 -- the install pass below runs at install time; the trigger function is looked up by to_regprocedure for the same
 -- reason.
-create or replace function pgpm._stale_write_block_note(p_rel oid)
+-- _stale_write_block_lift: the sentence itself, for any p_rel carrying pgpm's own trigger, with no judgement of whose
+-- the table is; null when it carries none. _stale_write_block_note asks it under the conditions above, and
+-- _install_write_block for an unanchored row's stranger (#1415): a partition of the managed parent over another range
+-- than the row's, under the row's name, which an install older than #1392 blocked by that name alone. It is no row's
+-- partition (another row carries another name), so the managed-parent rule above does not make its block pgpm's.
+create or replace function pgpm._stale_write_block_lift(p_rel oid)
 returns text language sql stable as $$
   select format('%1$s carries a write block (trigger pgpm_write_block) that pgpm will not lift, since it cannot tell a block an older pgpm put on a table it never managed from one kept on a table detached by hand; if %1$s is a table pgpm never managed, lift it: drop trigger if exists pgpm_write_block on %1$s;',
                 format('%I.%I', n.nspname, c.relname))
@@ -3993,6 +3998,12 @@ returns text language sql stable as $$
    where c.oid = p_rel
      and exists (select 1 from pg_trigger t where t.tgrelid = c.oid and t.tgname = 'pgpm_write_block'
                     and t.tgfoid = to_regprocedure('pgpm._write_block_raise()'))
+$$;
+create or replace function pgpm._stale_write_block_note(p_rel oid)
+returns text language sql stable as $$
+  select pgpm._stale_write_block_lift(c.oid)
+    from pg_class c
+   where c.oid = p_rel
      and not exists (select 1 from pg_inherits i join pgpm.config f on f.parent_table = i.inhparent
                       where i.inhrelid = c.oid)
      and not exists (select 1 from pgpm.part p
@@ -5541,10 +5552,17 @@ begin
   end if;
   if found and r.child_oid is null   -- #1365: a row with no oid of its own, by its range (a mark's oid shadows nothing)
      and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
+    -- #1415: an install older than #1392 blocked the stranger by the name; that block is named, with its lift, as
+    -- the identity refusal above names one (_stale_write_block_lift), unless a row records the table as its own
+    v_now := to_regclass(format('%I.%I', v_nsp, p_child));   -- part-row-by-name: the stranger just judged, named in the note
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
-              format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
-                     v_nsp, p_child, p_parent, r.lo, r.hi));
+              format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it%s',
+                     v_nsp, p_child, p_parent, r.lo, r.hi,
+                     coalesce('. ' || (select pgpm._stale_write_block_lift(v_now::oid)
+                                        where not exists (select 1 from pgpm.part p
+                                                           where v_now::oid in (p.child_oid, p.retiring_oid, p.detach_dispatched_oid))),
+                              '')));
     return;
   end if;
 
@@ -7657,7 +7675,8 @@ begin
   -- from then until the writer commits the delta keeps that name and nothing else can take it. LOCK TABLE
   -- resolves the name again after any wait, so a lock that landed on another relation (the name moved
   -- while it waited) fails the re-check, and so does one refused because that relation is not the
-  -- writer's to lock or because the name is gone (caught, in a subtransaction: the error is the signal,
+  -- writer's to lock, is of a kind LOCK TABLE refuses (a materialized view, a sequence or an index given the
+  -- freed name: 42809, #1061), or because the name is gone (caught, in a subtransaction: the error is the signal,
   -- not the outcome). The fast path, while the minted name still leads to the delta: the static LOCK and
   -- insert, which keep their cached plans (and the insert is the body text the #969 upgrade proof above
   -- recognises a pgpm-minted capture by). Otherwise the oid is rendered to the delta's current name
@@ -7681,7 +7700,7 @@ begin
       if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
         begin
           lock table only %I.%I in row exclusive mode;
-        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+        exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
           null;
         end;
         if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
@@ -7703,7 +7722,7 @@ begin
         end if;
         begin
           execute ''lock table only '' || n || '' in row exclusive mode'';
-        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+        exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
           if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
             raise;
           end if;
@@ -10753,12 +10772,14 @@ begin
 end;
 $$;
 
--- regrain_history(): convenience -- regrain the oldest coarse child (the monolith: the smallest-lo attached
--- partition) to p_target_step (default: the configured partition_step). Hierarchical regraining is just
--- repeated regrain() calls with chosen steps.
+-- regrain_history(): convenience -- regrain the oldest coarse child (at first the monolith) to p_target_step
+-- (default: the configured partition_step). Hierarchical regraining is just repeated regrain() calls with chosen
+-- steps. "Coarse" is regrain_step's own 'nosubdiv' test, the one maintain's candidate scan asks (#515): the target
+-- subdivides it (#1244). The smallest-lo attached partition alone was a fine child once one pass had split the
+-- first coarse one, and the call refused on it while coarse children remained behind it.
 create or replace function pgpm.regrain_history(p_parent regclass, p_target_step text default null)
 returns int language plpgsql as $$
-declare cfg pgpm.config; v_ncast text; v_mon name;
+declare cfg pgpm.config; v_ncast text; v_mon name; v_step text;
 begin
   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) is not
   perform pgpm._refuse_null_arguments('regrain_history', json_build_object('p_parent', p_parent));
@@ -10767,9 +10788,18 @@ begin
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_ncast := pgpm._native_type(cfg.control_kind);
-  execute format('select child_name from pgpm.part where parent_table = %L::regclass and attached order by lo::%s asc limit 1',
-                 p_parent::text, v_ncast) into v_mon;
-  if v_mon is null then raise exception 'pg_partition_magician: % has no partitions to regrain', p_parent; end if;
+  v_step := coalesce(p_target_step, cfg.partition_step);
+  perform pgpm._regrain_step_forward(p_parent, v_step);   -- a step the test below cannot place, refused as regrain_step refuses it
+  execute format('select child_name from pgpm.part p where p.parent_table = %L::regclass and p.attached'
+                 || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L)) order by p.lo::%s asc limit 1',
+                 p_parent::text, cfg.control_kind, cfg.control_kind, v_step, cfg.partition_tz, v_ncast) into v_mon;
+  if v_mon is null then
+    if not exists (select 1 from pgpm.part where parent_table = p_parent and attached) then
+      raise exception 'pg_partition_magician: % has no partitions to regrain', p_parent;
+    end if;
+    raise exception 'pg_partition_magician: % has no partition the target step % subdivides: every attached partition is already at that grain or finer, so there is nothing coarser to regrain',
+      p_parent, v_step;
+  end if;
   return pgpm.regrain(p_parent, v_mon, p_target_step);
 end;
 $$;
@@ -14591,6 +14621,7 @@ declare
   v_ix_oids oid[] := '{}'; v_ix_names name[] := '{}';   -- #830: monolith index oids, and the parent copies' names
   v_ri "char"; v_ri_idx oid;   -- #815: the parent's replica identity, and the monolith's index under its identity index
   v_key_names name[]; v_key_mons name[];   -- #828: every such pair, the key's and each unique constraint's
+  v_detach_cmds_q text[];   -- #954: the detach each retirement of this parent's would have armed
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('untransmute', json_build_object('p_parent', p_parent));
@@ -14862,6 +14893,14 @@ begin
   -- child of the same name finds coverage without its block and discards it (archive_coverage_reset).
   -- _remove_write_block resolves by name and is drop-if-exists, so on a never-blocked monolith it is a no-op.
   perform pgpm._remove_write_block(p_parent, v_mon);
+
+  -- #954: a forward partition retention reached and retire() handed to pg_cron is still attached until the detach
+  -- runs, and its row goes with the rest below; the armed job would then re-run that detach against the restored
+  -- table on every pg_cron tick. Rendered here, where p_parent still names the parent, as retire() rendered it, and
+  -- disarmed after the deletes only if the job still holds one of them (forget_missing's #893, one call away).
+  select array_agg(pgpm._detach_cmd(p_parent, pgpm._child_nsp(p_parent, p.child_name), p.child_name))
+    into v_detach_cmds_q
+    from pgpm.part p where p.parent_table = p_parent and p.retiring_at is not null;
 
   -- And the CHECK a concurrent detach left (#1438). DETACH ... CONCURRENTLY adds one to the table it takes out,
   -- duplicating the partition constraint, and a re-attach by hand (the ATTACH a released retirement's
@@ -15213,6 +15252,7 @@ begin
   delete from pgpm.part where parent_table = p_parent;
   delete from pgpm.regrain_lock where parent_table = p_parent;   -- #554
   delete from pgpm.config where parent_table = p_parent;
+  perform pgpm._idle_detach_job(c) from unnest(v_detach_cmds_q) c where c is not null;   -- #954
   insert into pgpm.log (parent_table, action) values (v_restored, 'untransmute');
 
   return v_restored;
@@ -15534,10 +15574,13 @@ begin
   cfg.retain := p_retain;
   v_new_boundary := pgpm._retain_boundary(cfg);
 
+  -- #1134: a table the operator DETACHed by hand still has an attached row, but retire() never drops it (#652), so
+  -- it is not one the tick "would drop": skipped here as maintain()'s steps skip it.
   if v_new_boundary is not null then
     select p.child_name into v_hit
       from pgpm.part p
      where p.parent_table = p_parent and p.attached
+       and not pgpm._part_detached_by_hand(p_parent, p.child_oid, p.retiring_at)
        and (v_old_boundary is null or pgpm._native_gt(cfg.control_kind, p.hi, v_old_boundary))
        and not pgpm._native_gt(cfg.control_kind, p.hi, v_new_boundary)
      order by p.lo

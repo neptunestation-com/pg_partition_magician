@@ -177,6 +177,14 @@ partitions and rows. Nothing else pgpm made remains in your schema, with one exc
 names: a never-cut-over copy whose hypertable you have since dropped, because it may hold the only copy
 of those rows. A copy made by 0.6.0 or earlier carries no record; drop it yourself.
 
+Uninstall **refuses**, and removes nothing, while anything outside the `pgpm` schema depends on it: a view of
+yours over `pgpm.status()` or `pgpm.log` in your own schema, a function of yours taking or returning a `pgpm` type
+(an archive strategy returns `pgpm.archive_result`), a column of such a type, or a default, constraint or policy
+calling a `pgpm` function. Dropping the schema would take each of them with it. The error (SQLSTATE `2BP01`) names
+every one: save its definition (`select pg_get_viewdef('<view>'::regclass, true)` for a view), drop it, run the
+script again, then recreate it without `pgpm` if you still need it. A view you put inside the `pgpm` schema goes
+with the schema.
+
 Uninstall also puts back every incoming foreign key that `transmute(..., p_incoming_fks => 'preserve')`
 dropped and pgpm has not restored yet (a paused table's keys wait for a maintenance tick that never
 comes), the same way a tick would: `NOT VALID`, so it enforces every new write, and a `WARNING` gives the
@@ -507,7 +515,8 @@ live write still lands in it. The monolith freezes once the frontier crosses `B`
 select pgpm.regrain_history('public.events');   -- split the oldest coarse child to the configured step
 ```
 
-`regrain_history` regrains the oldest coarse child (the monolith) to the configured partition step. For a
+`regrain_history` regrains the oldest coarse child (at first the monolith: the oldest partition the target step
+subdivides) to the configured partition step. For a
 hierarchical split (monolith to per-year to per-month, to bound the transient disk on a tight volume),
 call `pgpm.regrain(parent, child, target_step)` with chosen steps.
 

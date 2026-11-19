@@ -174,10 +174,17 @@ WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid, p.retiring_oid
   end if;
   if found and r.child_oid is null   -- #1365: a row with no oid of its own, by its range (a mark's oid shadows nothing)
      and pgpm._unanchored_stranger(p_parent, to_regclass(format('%I.%I', v_nsp, p_child)), r.lo, r.hi) then   -- part-row-by-name: names the stranger
+    -- #1415: an install older than #1392 blocked the stranger by the name; that block is named, with its lift, as
+    -- the identity refusal above names one (_stale_write_block_lift), unless a row records the table as its own
+    v_now := to_regclass(format('%I.%I', v_nsp, p_child));   -- part-row-by-name: the stranger just judged, named in the note
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_write_block_identity', r.lo, r.hi,
-              format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it',
-                     v_nsp, p_child, p_parent, r.lo, r.hi));
+              format('%I.%I is a partition of %s over another range than this row''s [%s, %s), and the row records no oid of its own; refusing to write-block it%s',
+                     v_nsp, p_child, p_parent, r.lo, r.hi,
+                     coalesce('. ' || (select pgpm._stale_write_block_lift(v_now::oid)
+                                        where not exists (select 1 from pgpm.part p
+                                                           where v_now::oid in (p.child_oid, p.retiring_oid, p.detach_dispatched_oid))),
+                              '')));
     return;
   end if;
 
@@ -11253,7 +11260,7 @@ CAPTURE_HELD_CORE = """  execute format('create function %I.%I() returns trigger
       if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
         begin
           lock table only %I.%I in row exclusive mode;
-        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+        exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
           null;
         end;
         if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
@@ -11275,7 +11282,7 @@ CAPTURE_HELD_CORE = """  execute format('create function %I.%I() returns trigger
         end if;
         begin
           execute ''lock table only '' || n || '' in row exclusive mode'';
-        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+        exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
           if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
             raise;
           end if;
@@ -17475,7 +17482,8 @@ MUTATIONS["write_block_note_silent"] = (
     "remedy says how to lift a block an older tick laid. A tick refuses and releases in one pass, so a single site's "
     "silence leaves the other naming it; this is the mutation that restores the issue's acceptance claims. One "
     "clause. tests/364 parts B, G, I and K catch it.",
-    [("   where c.oid = p_rel\n", "   where c.oid = p_rel and false\n", 1)],
+    [("   where c.oid = p_rel\n     and not exists (select 1 from pg_inherits i join pgpm.config f",
+      "   where c.oid = p_rel and false\n     and not exists (select 1 from pg_inherits i join pgpm.config f", 1)],
 )
 MUTATIONS["write_block_note_names_partition"] = (
     "bench/write_block_reads_mark.sh",
@@ -18210,6 +18218,86 @@ MUTATIONS["hypertable_drain_batch_unchecked"] = (
 )
 MUTATION_SRC["hypertable_drain_batch_unchecked"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_batch_unchecked"] = "timescale"
+
+# Issues #1134, #954 and #1415 (bullet 4): set_retain's would-drop guard skips a table detached by hand, untransmute
+# disarms the detach its forgotten retirements armed (only theirs), and the refusal to write-block an unanchored row's
+# stranger names the block an older install put on it. bench/retain_edges_tap.sh runs tests/382, 383 and 387.
+MUTATIONS["set_retain_counts_hand_detached"] = (
+    "bench/retain_edges_tap.sh",
+    "Issue #1134's defect: set_retain's would-drop guard reads pgpm.part.attached alone, so a tightening whose only "
+    "newly reached partition is one the operator detached by hand is refused, naming it. tests/382 catches it.",
+    [("       and not pgpm._part_detached_by_hand(p_parent, p.child_oid, p.retiring_at)\n"
+      "       and (v_old_boundary is null or pgpm._native_gt(cfg.control_kind, p.hi, v_old_boundary))\n",
+      "       and (v_old_boundary is null or pgpm._native_gt(cfg.control_kind, p.hi, v_old_boundary))\n", 1)],
+)
+MUTATIONS["untransmute_leaves_detach_armed"] = (
+    "bench/retain_edges_tap.sh",
+    "Issue #954's defect: untransmute deletes a retiring row and leaves pgpm_detach armed with its detach, which "
+    "pg_cron re-runs against the restored table on every tick. tests/383 part A catches it.",
+    [("  perform pgpm._idle_detach_job(c) from unnest(v_detach_cmds_q) c where c is not null;   -- #954\n", "", 1)],
+)
+MUTATIONS["untransmute_disarms_any_detach"] = (
+    "bench/retain_edges_tap.sh",
+    "untransmute returns pgpm_detach to idle whatever it holds, so another table's dispatched detach is never run. "
+    "tests/383 part B catches it.",
+    [("  perform pgpm._idle_detach_job(c) from unnest(v_detach_cmds_q) c where c is not null;   -- #954\n",
+      "  perform pgpm._idle_detach_job(null);   -- #954\n", 1)],
+)
+MUTATIONS["write_block_stranger_block_unnamed"] = (
+    "bench/retain_edges_tap.sh",
+    "Issue #1415 bullet 4's defect: the refusal to write-block an unanchored row's stranger says only that it refuses, "
+    "naming neither the block an older install put on the table nor the statement that lifts it. tests/387 catches it.",
+    [("                     coalesce('. ' || (select pgpm._stale_write_block_lift(v_now::oid)\n",
+      "                     coalesce('. ' || (select null::text\n", 1)],
+)
+# Issue #1244: regrain_history regrains the oldest coarse child, one the target subdivides.
+# bench/regrain_history_coarse_child.sh runs tests/384.
+MUTATIONS["regrain_history_smallest_lo"] = (
+    "bench/regrain_history_coarse_child.sh",
+    "Issue #1244's defect: regrain_history takes the smallest-lo attached partition with no subdivision test, so after "
+    "one hierarchical pass it refuses on a fine child while a coarse one remains. tests/384 catches it.",
+    [("                 || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L)) order by p.lo::%s asc limit 1',\n",
+      "                 || ' and (%L, %L, %L, %L) is not null order by p.lo::%s asc limit 1',\n", 1)],
+)
+# Issue #1061 (the core capture): both of the capture function's locks treat a freed name given to a relation LOCK
+# TABLE refuses (42809) as the name having moved. bench/regrain_capture_lock_wrong_kind.sh runs tests/385.
+MUTATIONS["regrain_capture_fast_lock_misses_42809"] = (
+    "bench/regrain_capture_lock_wrong_kind.sh",
+    "Issue #1061's defect on the fast path: its static LOCK's handler does not catch wrong_object_type, so a write "
+    "queued behind a rename dies when a materialized view or a sequence takes the freed name. tests/385 e385, f385.",
+    [("          lock table only %I.%I in row exclusive mode;\n"
+      "        exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then\n",
+      "          lock table only %I.%I in row exclusive mode;\n"
+      "        exception when undefined_table or invalid_schema_name or insufficient_privilege then\n", 1)],
+)
+MUTATIONS["regrain_capture_loop_lock_misses_42809"] = (
+    "bench/regrain_capture_lock_wrong_kind.sh",
+    "Issue #1061's defect in the loop: the dynamic LOCK on the name rendered from the delta's oid does not catch "
+    "wrong_object_type, so a write that rendered the name before a second rename dies. tests/385 g385.",
+    [("          execute ''lock table only '' || n || '' in row exclusive mode'';\n"
+      "        exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then\n",
+      "          execute ''lock table only '' || n || '' in row exclusive mode'';\n"
+      "        exception when undefined_table or invalid_schema_name or insufficient_privilege then\n", 1)],
+)
+# Issue #1040: uninstall.sql refuses while objects outside schema pgpm depend on it, and names none of pgpm's own
+# triggers. bench/uninstall_keeps_dependants.sh runs tests/386.
+MUTATIONS["uninstall_drops_dependants"] = (
+    "bench/uninstall_keeps_dependants.sh",
+    "Issue #1040's defect: no refusal, so the schema drop's CASCADE takes the operator's views over pgpm, their "
+    "strategy function and their column's default. tests/386 part A catches it.",
+    [("  if v_dependants_q is not null then\n    raise exception using errcode = 'dependent_objects_still_exist'",
+      "  if false then\n    raise exception using errcode = 'dependent_objects_still_exist'", 1)],
+)
+MUTATION_SRC["uninstall_drops_dependants"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_names_pgpm_triggers"] = (
+    "bench/uninstall_keeps_dependants.sh",
+    "The refusal names pgpm's own triggers on the partitions it manages (pgpm_regrain_truncate_guard, pgpm_write_block) "
+    "as dependants, so an uninstall with a regrain in flight or a write block in place refuses for good. tests/386 "
+    "part B catches it.",
+    [("                                                               and starts_with(t.tgname, 'pgpm_')))) x\n",
+      "                                                               and false))) x\n", 1)],
+)
+MUTATION_SRC["uninstall_names_pgpm_triggers"] = "pgpm_core/uninstall.sql"
 
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two
 # lines of an anchor. See main().

@@ -1409,6 +1409,10 @@ run_perf() {
     "bench/transmute_state_reads.sh pgpm_perf459"
     "bench/resume_claim_zone.sh pgpm_perf460"
     "bench/transmute_regrain_batch_positive.sh pgpm_perf461"
+    "bench/retain_edges_tap.sh pgpm_perf462"
+    "bench/regrain_capture_lock_wrong_kind.sh pgpm_perf463"
+    "bench/uninstall_keeps_dependants.sh pgpm_perf464"
+    "bench/regrain_history_coarse_child.sh pgpm_perf465"
   )
   local selected=()
   local n=${#guards[@]} idx

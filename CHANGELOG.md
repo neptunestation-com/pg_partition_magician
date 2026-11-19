@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+- **`uninstall.sql` refuses, naming them, while objects outside the `pgpm` schema depend on it** (#1040). Its
+  `drop schema pgpm cascade` took every such object with it, silently: an operator's monitoring view over
+  `pgpm.status()` in their own schema, a function of theirs returning `pgpm.archive_result`, a column default
+  calling a `pgpm` function. It now refuses first (SQLSTATE `2BP01`), drops nothing, and names each direct
+  dependant with the remedy, as `install.sql` refuses a change a view depends on (#983). pgpm's own triggers on the
+  partitions it manages are not named. tests/386; mutations `uninstall_drops_dependants`,
+  `uninstall_names_pgpm_triggers`.
+- **`untransmute` returns `pgpm_detach` to idle when it forgets a retirement that armed it** (#954). A referenced
+  forward partition's retirement leaves it attached until pg_cron runs the detach; `untransmute` deleted the row and
+  left the job armed, so pg_cron re-ran the detach against the restored table on every tick. The job is now idled
+  only while it still holds one of the reversed table's detaches, as `forget_missing` does (#893). tests/383;
+  mutations `untransmute_leaves_detach_armed`, `untransmute_disarms_any_detach`.
+- **`set_retain` no longer refuses a tightening that reaches only a table you detached by hand** (#1134). Its
+  would-drop guard read `pgpm.part.attached` alone and named the operator's table as one the next tick "would drop",
+  although `retire` never drops it. tests/382; mutation `set_retain_counts_hand_detached`.
+- **`regrain_history` regrains the oldest coarse child, one the target step subdivides** (#1244). It took the
+  smallest-`lo` partition, so after one hierarchical pass it refused on a fine child while a coarse one remained.
+  With nothing coarse left it now says so. tests/384; mutation `regrain_history_smallest_lo`.
+- **The regrain capture follows its delta when the freed name goes to a materialized view or a sequence** (#1061,
+  the core capture). Both of the capture's locks caught a name that moved (42P01, 3F000, 42501) but not
+  `wrong_object_type` (42809), which `LOCK TABLE` raises on such a relation, so a write queued behind the
+  operator's rename died instead of writing the delta where it now is. A capture minted before this release keeps
+  its handler until the next run re-mints it. tests/385; mutations `regrain_capture_fast_lock_misses_42809`,
+  `regrain_capture_loop_lock_misses_42809`.
+- **The write-block step names an older install's block on an unanchored row's stranger** (#1415). A row with no
+  oid of its own is refused the block when a partition of the parent over another range carries its name, but an
+  install older than #1392 had blocked that table by the name, and the refusal said only "refusing to write-block
+  it". It now names the block and the statement that lifts it, as the anchored refusal does (#1435); pgpm still does
+  not lift it itself. tests/387; mutation `write_block_stranger_block_unnamed`.
 - **A REPLICA IDENTITY USING INDEX whose index was dropped is carried as `NOTHING` by `transmute` and handed back as
   `NOTHING` by `untransmute`** (#1036). PostgreSQL lets `DROP INDEX` remove a table's identity index and treats the
   table as `NOTHING`; step 9d refused such a table as one whose identity index "was not carried onto the
