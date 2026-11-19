@@ -591,7 +591,7 @@ else
   sleep() { :; }
   eval "$cfn"
   REPO=o/r; MIN=2; export REPO MIN
-  run_wc() { : > "$calls"; WAIT_CHECKS=$1; out=$( (wait_checks 1449) 2>&1 ); rc=$?; polls=$(grep -c . "$calls"); }
+  run_wc() { : > "$calls"; WAIT_CHECKS=$1; export WAIT_CHECKS; out=$( (wait_checks 1449) 2>&1 ); rc=$?; polls=$(grep -c . "$calls"); }
   CHK=green; run_wc 3
   check "$([ "$rc" = 0 ] && [ "$polls" = 1 ] && echo 0 || echo 1)" "LIVENESS: (j) green checks pass on the first poll" "exit $rc, $polls poll(s)"
   CHK=none; run_wc 3
