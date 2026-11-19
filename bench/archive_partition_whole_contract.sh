@@ -13,7 +13,7 @@
 # path, which the test file reads through its archive_whole_script psql variable; pgpm_core is always the
 # tree's own.
 #
-# THREE mutations are required to fail against it (bench/mutations/mutate.py):
+# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
 #   archive_whole_contract_unchecked        -- the script records the strategy's covered_hi unchecked again,
 #                                              the pre-fix shape. Parts A and B.
 #   archive_whole_partial_compared_as_text  -- partial or whole decided by text inequality again, so a whole
@@ -24,6 +24,8 @@
 #   archive_whole_rls_unrefused             -- the strategy runs under the caller's row-level security again
 #                                              (#873's refusal removed), so a FORCE RLS owner's call archives
 #                                              the visible rows and retire() drops the hidden ones. Part E.
+#   archive_whole_skip_method_truncated     -- the refusal's skip_archive keeps 200 characters again, cutting
+#                                              its remedy (#1439). Part E.
 #
 # A copy of the script that does not even load is not a catch: that is reported as a `fixture:` failure,
 # which bench/discriminate.sh reads as a starved fixture rather than as discrimination.

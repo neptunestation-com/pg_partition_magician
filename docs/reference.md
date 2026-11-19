@@ -2974,8 +2974,12 @@ returned `covered_hi` against the `[p_lo, p_hi)` it passed: it must be a native 
 Each bound closes a different hole. Past `p_hi` is the drop with nothing archived. At or below `p_lo`
 is "no progress", which recorded as a `(lo, lo)` ledger row wedged the ledger for good: the next tick
 resumed from `max(hi) = lo`, handed the strategy the same chunk, and collided on the ledger's primary
-key, every tick from then on. A null `covered_hi` is refused for the same reason (a null `hi` is not a
-watermark). And a value that is not a native value at all is refused here rather than left in the
+key, every tick from then on. A row like that an earlier pgpm recorded (no release before this check
+had it) is discarded when `install.sql` is re-run: every unretired row whose `hi` is at or below its
+`lo` covers no row, so the upgrade deletes it (and a retired one at a `lo` a partition holds, since an install older
+than v0.6.0 has every chunk marked retired by the upgrade's oid backfill, the empty one included), logged once per partition as `archive_coverage_reset`,
+and the partition archives from its own `lo`. A null `covered_hi` is refused for the same reason (a
+null `hi` is not a watermark). And a value that is not a native value at all is refused here rather than left in the
 text `hi` column, where every later coverage check would have raised, and `maintain()` would have
 reported that as a `skip_archive` deferral, tick after tick, for what is a permanent strategy bug.
 
@@ -3743,7 +3747,7 @@ pgpm.status() returns table (
   paused boolean, n_partitions bigint, coarse_partitions bigint, inflight_partitions bigint,
   newest_bound text, fks_suspended bigint, fks_unvalidated bigint,
   history_unregrained boolean, retain_drop_failures bigint, retain_backlog bigint,
-  retain_detaching bigint, parent_missing boolean, regrain_to text
+  retain_detaching bigint, parent_missing boolean, regrain_to text, archive_skips bigint
 )
 ```
 
@@ -3800,6 +3804,16 @@ One row per managed table. Beyond the static config it surfaces:
 - `regrain_to` -- the auto-regrain target step (`config.regrain_to`), null when auto-regrain is off.
   Whether the history is being split at all is the first thing to check when `coarse_partitions` looks
   stalled, and it is here so that check needs no second query.
+- `archive_skips` -- the longest run of `skip_archive` rows since a recorded archive chunk: the most any one
+  partition has logged since that partition's last chunk, or, for a failure of the archive step as a whole
+  (`maintain()`'s, with no `lo`), since the parent's last chunk. Per partition, because at `archive_batch` above
+  1 a sibling can record a chunk every tick while one partition is refused every tick. A skip older than the
+  partition now at its `lo` (`pgpm.part.created_at`) is not counted: it was logged against an earlier relation
+  there, as after a regrain's swap. The archive step
+  logs one for a lock race or a transient error, which the next tick clears, and for an error that
+  recurs every tick, which stalls archiving and, with it, retention while `retain_backlog` reads as
+  catching up. Non-zero for a tick is normal; climbing is a stall, and the newest `skip_archive` row's
+  `method` says why.
 
 ### `progress`
 
@@ -4231,7 +4245,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `warn_replica_identity_nothing` | a partition was minted (by `obtain`, `extend_to` or a regrain's swap) for a parent whose `REPLICA IDENTITY USING INDEX` index was dropped, a state PostgreSQL treats as `NOTHING`, so the partition took `NOTHING` (see the replica identity paragraph under `transmute`). Logged at most once per transaction for the parent; `method` names the first such partition. Each one keeps `NOTHING` after the parent is given an identity again, so give it the identity by hand |
 | `warn_grid_off_unit` | re-running `install.sql` (the upgrade) found a `time` grid an install from before `transmute` held a time grid to its control column could register: one whose registered `partition_anchor` or `partition_step` is not a whole multiple of what the column keeps (a `date` grid anchored other than 00:00 UTC, a `timestamptz(0)` grid anchored off the second): on a fixed step (days, hours) every partition `obtain` mints is attached at other bounds than `pgpm.part` records and every regrain is refused, while on a whole number of months, whose bounds fall at midnight on the 1st of a month whatever the anchor's time, every partition is attached at the bounds `pgpm.part` records and only a regrain toward a fixed step (which counts its fine cells from the anchor) is refused, and `method` says which; or a `date` or `timestamp` grid recorded in a zone other than UTC, whose bounds sit at that zone's midnight and on which every regrain toward a fixed step is refused (see [`set_regrain`](#set_regrain)). `method` names what is off and the remedy, a reconversion that `untransmute` can make only while every row is in the monolith (see the remedy under `set_regrain`). Logged once per grid; every run of `install.sql` that finds it also raises it as a `WARNING` |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
-| `skip_obtain` / `skip_retain` / `skip_retain_crossing` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason). `skip_retain_crossing`: a tick could not check whether a foreign key refuses a dispatched detach retention no longer reaches, and checks again next tick |
+| `skip_obtain` / `skip_retain` / `skip_retain_crossing` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason, up to 1000 characters for `skip_archive`). A `skip_archive` that recurs every tick is not transient (stale credentials, a deleted bucket, a strategy's refusal): `status().archive_skips` counts the longest run of them since a recorded chunk. `skip_retain_crossing`: a tick could not check whether a foreign key refuses a dispatched detach retention no longer reaches, and checks again next tick |
 | `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout |
 | `write_block_reenable` | a partition's retention write block was found disabled, `ENABLE REPLICA` or origin-only and was put back `ENABLE ALWAYS` (see [`maintain`](#maintain)); `method` names the partition and the state it found. Logged once per re-enable |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |

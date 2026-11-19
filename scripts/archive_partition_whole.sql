@@ -179,7 +179,7 @@ begin
       'the partition would be archived from those rows alone, and retention would drop the others with the partition');
   exception when raise_exception then
     insert into pgpm.log (parent_table, action, lo, hi, method)
-      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));   -- #1439, as _archive_step's handler
     return format('%s: REFUSING to archive it: %s', r.child_name, sqlerrm);
   end;
 

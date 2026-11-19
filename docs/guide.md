@@ -754,24 +754,29 @@ row, which would leave it attached and never archived or retired. If you do need
 `pgpm.part.child_name` and `pgpm.archive_ledger.child_name` in the same transaction: a rename does
 not change an oid, so the recorded identity is still right afterwards, and the ledger matches a
 partition's archived chunks by name, so carrying the name keeps its coverage attached and archiving
-resumes from where it left off. That is exactly what `regrain`'s own transitional rename does.
+resumes from where it left off. That is exactly what `regrain`'s own transitional rename does. Update
+the rows **before** the `ALTER`: `retire` takes the partition's `pgpm.part` row before its lock on the
+partition, so a transaction that renames first and updates after can deadlock against a `retire` waiting
+on the partition, and one of the two is cancelled (`40P01`).
 
 ```sql
 begin;
-alter table public.events_p2026_03 rename to events_2026_03_history;
 update pgpm.part          set child_name = 'events_2026_03_history'
  where parent_table = 'public.events'::regclass and child_name = 'events_p2026_03';
 update pgpm.archive_ledger set child_name = 'events_2026_03_history'
  where parent_table = 'public.events'::regclass and child_name = 'events_p2026_03';
+alter table public.events_p2026_03 rename to events_2026_03_history;
 commit;
 ```
 
 If the ledger is left behind (the procedure as this guide used to document it), pgpm does not wedge on
-it:
-the next archive tick finds coverage under a name that is no longer a tracked partition, over a
+it. The next archive tick finds coverage under a name that is no longer a tracked partition, over a
 range the renamed partition holds, discards it (logged once as `archive_coverage_reset`, with the
-old name in `method`) and archives the partition again from its `lo`. Nothing is lost either way;
-the difference is whether the chunks already exported are exported a second time.
+old name in `method`) and archives the partition again from its `lo`. The same holds when the name is
+still tracked but by another relation, as after swapping two partitions' names: each chunk records the
+oid of the relation it was read from, and chunks whose oid is not the one `pgpm.part` records under
+their name are discarded the same way, with that oid in `method`. Nothing is lost either way; the
+difference is whether the chunks already exported are exported a second time.
 
 **Moving the table to another schema is safe.** `ALTER TABLE public.events SET SCHEMA history` moves
 the managed table only: its partitions stay in `public`, and the partitions pgpm creates afterwards go in
@@ -976,8 +981,10 @@ both oids in `method`, and a retirement that stays wedged until you sort the nam
 dropped table. `status().retain_detaching` tells you when a retirement is in flight. The same refusal
 guards the ordinary one-step `DROP`, against the oid recorded when the partition was created, so a
 substituted name is refused on every retirement path. If you genuinely need to rename a partition, update
-`pgpm.part.child_name` in the same transaction: a rename does not change an oid, so the recorded identity
-stays right, which is exactly what `regrain`'s own transitional rename does.
+`pgpm.part.child_name` and `pgpm.archive_ledger.child_name` in the same transaction, before the `ALTER`,
+as in the recipe above: a rename does not change an oid, so the recorded identity stays right, which is
+exactly what `regrain`'s own transitional rename does, and updating first takes the locks in the order a
+waiting `retire` takes them.
 
 One rename is read as a decision rather than a mistake: renaming a partition **after** pgpm's detach has
 taken it out of the parent, without updating `pgpm.part`, makes the table yours. If retention then stops

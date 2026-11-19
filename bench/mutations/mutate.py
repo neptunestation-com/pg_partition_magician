@@ -675,33 +675,53 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
   -- because the step below does not archive a partition over a retired chunk's range. Nor is a chunk whose
   -- relation no longer exists, whoever dropped it: those are marked retired first (pgpm._mark_gone_chunks).
   perform pgpm._mark_gone_chunks(p_parent);
+  -- A NAME THAT NOW TRACKS ANOTHER RELATION IS THE SAME CASE (#1440). Two partitions whose names an operator swapped
+  -- (tables and pgpm.part rows, the ledger left behind) are each still tracked, so the test by name alone found no
+  -- orphan, and each one's re-archive from its own lo collided with the other's rows on the primary key every tick. A
+  -- row records the relation it was read from (child_oid, #1141); one under a tracked name whose partition records
+  -- another oid is coverage of a relation that name no longer means, discarded as above, those rows only (stale_oid).
+  -- A row or a pgpm.part row with no oid is judged by its name, as before.
+  --
   -- The orphans first, materialized (#973). One whose bound names no instant by itself (#1336, _native_named) is never
   -- cast: it cannot be shown to overlap nothing, so it is discarded, the side that loses no row.
   for r in execute format(
     'with orphan as materialized (select l.parent_table, l.child_name, l.lo, l.hi,
-                                         pgpm._native_named(%3$L, l.lo) and pgpm._native_named(%3$L, l.hi) as named
+                                         pgpm._native_named(%3$L, l.lo) and pgpm._native_named(%3$L, l.hi) as named,
+                                         case when exists (select 1 from pgpm.part p
+                                                            where p.parent_table = l.parent_table and p.child_name = l.child_name)
+                                              then l.child_oid end as stale_oid
                                     from pgpm.archive_ledger l
                                    where l.parent_table = %2$L::regclass
                                      and l.child_name is not null
                                      and l.retired_at is null
                                      and not exists (select 1 from pgpm.part p
-                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name))
-     select o.child_name, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
+                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name
+                                                        and (l.child_oid is null or p.child_oid is null
+                                                             or p.child_oid = l.child_oid)))
+     select o.child_name, o.stale_oid, count(*) as chunks, coalesce(pgpm._typed_text(min(case when o.named then o.lo::%1$s end)), min(o.lo)) as lo,
             coalesce(pgpm._typed_text(max(case when o.named then o.hi::%1$s end)), max(o.hi)) as hi
        from orphan o
       where case when o.named then exists (select 1 from pgpm.part t
                                             where t.parent_table = o.parent_table
                                               and o.lo::%1$s < t.hi::%1$s and o.hi::%1$s > t.lo::%1$s)
                  else true end
-      group by o.child_name',
+      group by o.child_name, o.stale_oid',
     v_ncast, p_parent::text, cfg.control_kind)
   loop
-    -- by name, as the query above grouped: a retired chunk under the same name stays (#1141)
-    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;
+    -- by name, as the query above grouped: a retired chunk under the same name stays (#1141), and under a tracked
+    -- name only the rows of the relation it no longer means (#1440)
+    delete from pgpm.archive_ledger
+     where parent_table = p_parent and child_name = r.child_name and retired_at is null
+       and (r.stale_oid is null or child_oid = r.stale_oid);
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,
-              format('%s archived chunk(s) were recorded for %I.%I, which is no longer a tracked partition of %s, over a range a tracked partition now holds; nothing guarded that coverage across the change, so it is discarded and the partition holding the range archives from its own lo',
-                     r.chunks, v_nsp, r.child_name, p_parent::text));
+              case when r.stale_oid is null then
+                format('%s archived chunk(s) were recorded for %I.%I, which is no longer a tracked partition of %s, over a range a tracked partition now holds; nothing guarded that coverage across the change, so it is discarded and the partition holding the range archives from its own lo',
+                       r.chunks, v_nsp, r.child_name, p_parent::text)
+              else
+                format('%s archived chunk(s) were recorded for %I.%I as relation oid %s, but pgpm.part records another relation under that name now (a rename or a swap that left pgpm.archive_ledger behind), over a range a tracked partition now holds; nothing guarded that coverage across the change, so it is discarded and the partition holding the range archives from its own lo',
+                       r.chunks, v_nsp, r.child_name, r.stale_oid)
+              end);
   end loop;
 
 """
@@ -8362,7 +8382,7 @@ select ok(
         "retirements, and A handed to the strategy twice.",
         [("    exception when others then\n"
           "      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
-          "        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));\n"
+          "        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));   -- #1439: a refusal's reason and remedy, whole\n"
           "    end;\n"
           "  end loop;\n"
           "  return v_count;\n",
@@ -10786,6 +10806,15 @@ MUTATIONS["archive_whole_contract_unchecked"] = (
 """, "", 1)],
 )
 MUTATION_SRC["archive_whole_contract_unchecked"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_whole_skip_method_truncated"] = (
+    "bench/archive_partition_whole_contract.sh",
+    "scripts/archive_partition_whole.sql's row-level-security refusal keeps 200 characters of the error in its "
+    "skip_archive row again, where _archive_step's handler keeps 1000 (#1439), cutting the reason before its remedy "
+    "(run it as a role with BYPASSRLS). tests/286 part E catches it.",
+    [("      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));   -- #1439, as _archive_step's handler",
+      "      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));", 1)],
+)
+MUTATION_SRC["archive_whole_skip_method_truncated"] = "scripts/archive_partition_whole.sql"
 MUTATIONS["archive_whole_partial_compared_as_text"] = (
     "bench/archive_partition_whole_contract.sh",
     "Pre-#1030 scripts/archive_partition_whole.sql: partial or whole is decided by text inequality between "
@@ -10822,7 +10851,7 @@ MUTATIONS["archive_whole_rls_unrefused"] = (
       'the partition would be archived from those rows alone, and retention would drop the others with the partition');
   exception when raise_exception then
     insert into pgpm.log (parent_table, action, lo, hi, method)
-      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));   -- #1439, as _archive_step's handler
     return format('%s: REFUSING to archive it: %s', r.child_name, sqlerrm);
   end;
 
@@ -12370,12 +12399,10 @@ MUTATIONS["archive_retired_orphan_discard"] = (
       "                                     and not exists (select 1 from pgpm.part p\n",
       "                                     and l.child_name is not null\n"
       "                                     and not exists (select 1 from pgpm.part p\n", 1),
-     ("    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;\n"
-      "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
-      "      values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,\n",
-      "    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name;\n"
-      "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
-      "      values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,\n", 1)],
+     ("     where parent_table = p_parent and child_name = r.child_name and retired_at is null\n"
+      "       and (r.stale_oid is null or child_oid = r.stale_oid);\n",
+      "     where parent_table = p_parent and child_name = r.child_name\n"
+      "       and (r.stale_oid is null or child_oid = r.stale_oid);\n", 1)],
 )
 MUTATIONS["archive_retired_adopt_discard"] = (
     _G1141,
@@ -12624,12 +12651,10 @@ MUTATIONS["archive_retired_orphan_delete_unfiltered"] = (
     "_archive_step's orphan discard selects only unretired chunks but deletes every chunk under the orphan's name, so "
     "a retired chunk recorded under a name a later partition took (and then lost to a rename) is deleted with that "
     "partition's coverage. One clause. tests/309 part M catches it.",
-    [("    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;\n"
-      "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
-      "      values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,\n",
-      "    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name;\n"
-      "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
-      "      values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,\n", 1)],
+    [("     where parent_table = p_parent and child_name = r.child_name and retired_at is null\n"
+      "       and (r.stale_oid is null or child_oid = r.stale_oid);\n",
+      "     where parent_table = p_parent and child_name = r.child_name\n"
+      "       and (r.stale_oid is null or child_oid = r.stale_oid);\n", 1)],
 )
 MUTATIONS["archive_retired_backfill_untimed"] = (
     _G1141,
@@ -12830,8 +12855,8 @@ MUTATIONS["archive_orphan_discard_unnamed_kept"] = (
     "Pre-#1336 orphan discard (#511): an orphan whose bound names no instant is kept unless a reading shows it "
     "overlapping, so from Pacific/Kiritimati one reaching into the monolith on any western reading is left to collide "
     "with the partition's own first chunk. One value. tests/346 part E catches it.",
-    [("                 else true end\n      group by o.child_name',\n",
-      "                 else false end\n      group by o.child_name',\n", 1)],
+    [("                 else true end\n      group by o.child_name, o.stale_oid',\n",
+      "                 else false end\n      group by o.child_name, o.stale_oid',\n", 1)],
 )
 MUTATIONS["mark_retired_chunks_unplaced_live_marked"] = (
     _G1336,
@@ -17801,6 +17826,141 @@ MUTATIONS["retire_default_after_crossing"] = (
     [("      if v_default is not null and not v_pending then\n",
       "      if v_default is not null and not v_pending\n"
       "         and coalesce(array_length(pgpm._crossing_keys(p_parent, r.lo, r.hi), 1), 0) = 0 then\n", 1)],
+)
+# Issues #1439 and #1440: archive ledger rows that wedge a partition for good are discarded (a row covering nothing at
+# install, a row under a tracked name whose partition records another oid in the archive step), and status() counts a
+# skip_archive that recurs. bench/archive_ledger_wedges.sh runs tests/367 against the mutant.
+MUTATIONS["ledger_empty_chunk_kept"] = (
+    "bench/archive_ledger_wedges.sh",
+    "Issue #1439's defect: nothing discards a row covering nothing that an install older than #454's check left, so the "
+    "partition's first chunk collides with it every tick after the upgrade. The install pass's delete matches nothing. "
+    "tests/367 part A catches it.",
+    [("       where c.parent_table = l.parent_table\n"
+      "         and (l.retired_at is null\n",
+      "       where c.parent_table = l.parent_table and false\n"
+      "         and (l.retired_at is null\n", 1)],
+)
+MUTATIONS["ledger_empty_equal_text_only"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass discards only a row whose hi is lo as written, so one whose hi is below lo (no release before #454 "
+    "refused that either) still wedges its partition. One clause. tests/367 part A catches it.",
+    [("\n              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n                      then coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false)\n                      else false end)", ")", 1)],
+)
+MUTATIONS["ledger_empty_cast_aborts"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass compares an id grid's bounds by casting them, as #1466's first head did, so an older install's "
+    "ledger row whose hi is not a number (reference.md's contract check names the shape) aborts the whole install, "
+    "the repair included. tests/367 part A catches it.",
+    [("\n              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n                      then coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false)\n                      else false end)",
+      "\n              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n"
+      "                      then not pgpm._native_gt(c.control_kind, l.hi, l.lo) else false end)", 1)],
+)
+MUTATIONS["ledger_empty_kind_unguarded"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass compares a row's bounds by their order keys without asking whether each names a value of the "
+    "parent's kind, as #1466's fourth head did, so a time bound written as digits ('20300101') compares as a number "
+    "and a retired chunk covering years, at a lo a partition holds, is discarded as empty: the record of the only "
+    "copy of a dropped relation's rows. tests/367 part A catches it.",
+    [("              or case when pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)\n"
+      "                      then coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false)\n"
+      "                      else false end)",
+      "              or coalesce(pgpm._native_order_key(l.hi) <= pgpm._native_order_key(l.lo), false))", 1)],
+)
+MUTATIONS["ledger_empty_discards_retired"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass discards a retired row covering nothing too, the record of a dropped relation's chunks, which "
+    "#1141 keeps. One clause. tests/367 part A catches it.",
+    [("         and (l.retired_at is null\n              or exists (select 1 from pgpm.part p\n",
+      "         and (true\n              or exists (select 1 from pgpm.part p\n", 1)],
+)
+MUTATIONS["ledger_empty_retired_wedge_kept"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The install pass keeps every retired row covering nothing, as #1466's third head did, so an install older than "
+    "v0.6.0, whose oid backfill marks every chunk retired (the empty one included), keeps the wedge after the upgrade: "
+    "its partition's first chunk meets the row on the primary key every tick. One clause. tests/367 part A catches it.",
+    [("                          where p.parent_table = l.parent_table and p.attached\n"
+      "                            and (p.lo = l.lo\n",
+      "                          where p.parent_table = l.parent_table and p.attached and false\n"
+      "                            and (p.lo = l.lo\n", 1)],
+)
+MUTATIONS["ledger_swap_by_name_only"] = (
+    "bench/archive_ledger_wedges.sh",
+    "Issue #1440's defect: the archive step's orphan discard asks only whether a row's name is tracked, so after a name "
+    "swap that left the ledger behind each partition's re-archive collides with the other's rows every tick. The oid "
+    "clause removed. tests/367 part B catches it.",
+    [("                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
+      "                                                        and (l.child_oid is null or p.child_oid is null\n"
+      "                                                             or p.child_oid = l.child_oid)))\n",
+      "                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name))\n", 1)],
+)
+MUTATIONS["archive_skips_uncounted"] = (
+    "bench/archive_ledger_wedges.sh",
+    "Issue #1439's second bullet: status() counts no skip_archive, so a strategy that fails every tick stalls archiving "
+    "and retention with no counter moving. tests/367 part C catches it.",
+    [("      into v_skips;\n", "      into v_skips;\n    v_skips := 0;\n", 1)],
+)
+MUTATIONS["archive_skips_never_reset"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips counts every skip_archive a partition ever logged, so a stall that cleared still reads as one. The "
+    "window since the partition's last recorded chunk removed. tests/367 part C catches it.",
+    [("                   and g.at > coalesce(m.mark, '-infinity'::timestamptz)\n", "", 1)],
+)
+MUTATIONS["archive_skips_parent_wide"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips counts a partition's skips since ANY chunk of the parent, as #1466's first head did, so at "
+    "archive_batch above 1 a partition refused every tick reads 0 for as long as a sibling records chunks. One clause. "
+    "tests/367 part D catches it.",
+    [("                            on l.parent_table = p.parent_table and l.child_name = p.child_name\n",
+      "                            on l.parent_table = p.parent_table\n", 1)],
+)
+MUTATIONS["archive_skips_mark_per_log_row"] = (
+    "bench/archive_skips_scans.sh",
+    "archive_skips reads each skip_archive row's mark with a subquery of its own, as #1466's second head did, so one "
+    "status() call scans pgpm.archive_ledger once per skip pgpm.log keeps: seconds per call during the very stall it "
+    "reports. The once-per-call marks put back as a per-row subquery.",
+    [("                  join (select p.lo, greatest(max(l.archived_at), max(p.created_at) filter (where p.attached)) as mark\n"
+      "                          from pgpm.part p\n"
+      "                          left join pgpm.archive_ledger l\n"
+      "                            on l.parent_table = p.parent_table and l.child_name = p.child_name\n"
+      "                         where p.parent_table = r.parent_table\n"
+      "                         group by p.lo) m on m.lo = g.lo\n"
+      "                 where g.parent_table = r.parent_table and g.action = 'skip_archive'\n"
+      "                   and g.at > coalesce(m.mark, '-infinity'::timestamptz)\n",
+      "                  join pgpm.part p on p.parent_table = g.parent_table and p.lo = g.lo\n"
+      "                 where g.parent_table = r.parent_table and g.action = 'skip_archive'\n"
+      "                   and g.at > coalesce((select max(l.archived_at) from pgpm.archive_ledger l\n"
+      "                                         where l.parent_table = p.parent_table and l.child_name = p.child_name),\n"
+      "                                       '-infinity'::timestamptz)\n", 1)],
+)
+MUTATIONS["archive_skips_mark_ignores_creation"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips reads a lo's mark from its chunks alone, as #1466's third head did, so after a regrain's swap, whose "
+    "fine partition at the source's lo has no chunk yet and the source's are gone, a skip logged against the source "
+    "long before counts again. tests/367 part F catches it.",
+    [("greatest(max(l.archived_at), max(p.created_at) filter (where p.attached)) as mark",
+      "max(l.archived_at) as mark", 1)],
+)
+MUTATIONS["archive_skips_mark_per_child"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips reads a partition's mark per pgpm.part row rather than per lo, as #1466's second head did, so a "
+    "regrain's unattached copy, which shares its source's lo and has no chunk, counts every skip of that lo ever "
+    "logged: starting a regrain makes archive_skips climb with no new skip. tests/367 part E catches it.",
+    [("                         group by p.lo) m on m.lo = g.lo\n",
+      "                         group by p.lo, p.child_name) m on m.lo = g.lo\n", 1)],
+)
+MUTATIONS["archive_skips_whole_step_dropped"] = (
+    "bench/archive_ledger_wedges.sh",
+    "archive_skips leaves out maintain()'s skip_archive for the archive step as a whole (no lo), so a step that raises "
+    "before any partition, every tick, moves no counter. tests/367 part C catches it.",
+    [("               where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null\n",
+      "               where g.parent_table = r.parent_table and g.action = 'skip_archive' and g.lo is null and false\n", 1)],
+)
+MUTATIONS["skip_archive_method_truncated"] = (
+    "bench/archive_ledger_wedges.sh",
+    "The archive step's skip_archive keeps 200 characters of the error again, cutting a refusal before its remedy. "
+    "tests/367 part C catches it.",
+    [("        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));",
+      "        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));", 1)],
 )
 
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two

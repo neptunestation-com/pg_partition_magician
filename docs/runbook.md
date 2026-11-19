@@ -410,12 +410,21 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
 1. Confirm the policy is set and that maintenance can act on it:
 
    ```sql
-   select parent, paused, retain_backlog, retain_drop_failures, retain_detaching
+   select parent, paused, retain_backlog, retain_drop_failures, retain_detaching, archive_skips
      from pgpm.status() where parent = 'public.events'::regclass;
    select retain, retain_batch, archive_fn from pgpm.config where parent_table = 'public.events'::regclass;
    ```
 
-   `paused = true` means maintenance is doing nothing. A flat `retain_backlog` with `retain_drop_failures`
+   `paused = true` means maintenance is doing nothing. A climbing `archive_skips` means the archive step
+   fails every tick (stale credentials, a deleted bucket, a strategy's refusal): read the newest
+   `skip_archive` row's `method` for the reason and the remedy (its `lo` names the partition), since no chunk of that
+   partition is recorded until it is fixed.
+   One cause the upgrade cannot repair: on a time grid upgraded from v0.3.0 to v0.5.0, a custom
+   `archive_fn` may have left a ledger row at that `lo` whose `hi` is below it and written without a UTC offset, and
+   the method says the ledger already records a chunk there. Check that the row's `s3_key` holds nothing you need,
+   then delete that one row (`delete from pgpm.archive_ledger where parent_table = ... and lo = ...`); the next tick
+   archives the partition.
+   A flat `retain_backlog` with `retain_drop_failures` and `archive_skips`
    also flat at zero, and `archive_fn` set, means chunked archiving simply hasn't caught up yet for the
    partitions at the head of the backlog -- not a failure, just run more maintenance ticks (or check
    `pgpm.archive_ledger`/`pgpm._archive_fully_covered` for that child directly). The one exception that more
