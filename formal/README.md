@@ -18,6 +18,7 @@ session's actions break an invariant pgpm promises? The program behind it is
 | `specs/CustodyLive.cfg` | `NoLostRowLive` under fairness, on the detach path: a retirement retention stops reaching is released to the operator. Must check clean. |
 | `specs/Custody-asisC2.cfg` | The one-step path without hypothesis H_C2. Must be **violated** (DropOnlyCovered): it keeps claim C2 on record. |
 | `specs/CustodyFK-asisC3.cfg` | The detach path without hypothesis H_C3. Must be **violated** (NoLostRow): it keeps claim C3 on record. |
+| `specs/CustodyFK-asisC4.cfg` | The detach path without hypothesis H_C4. Must be **violated** (ResolveByRecord): it keeps claim C4 on record. |
 | `mutations/mutate.py` | Retrodiction: puts each historical Tier 1/2 custody defect's mechanism back and requires TLC to catch it. |
 | `tlc.sh` | Runs TLC from a pinned jar (by sha256) on a pinned JRE image (by digest). |
 | `../scripts/formal/trace_diff.py` | Compacts a TLC counterexample to the actions taken and what each one changed. |
@@ -72,7 +73,7 @@ The spec headers list every abstraction, and a missing one would be a defect in 
 
 A counterexample from the unmutated spec that reads as a real defect becomes a **claim**. Claims are listed
 in `docs/formal/record.md` and reproduced against PostgreSQL in Phase 2, never by the author of the spec. While a
-claim stands, the default configs assume the guard that would close it (`Hypotheses = {"H_C2", "H_C3"}`), so the
+claim stands, the default configs assume the guard that would close it (`Hypotheses = {"H_C2", "H_C3", "H_C4"}`), so the
 rest of the design is still checked. Each claim has an as-shipped config that leaves its hypothesis out, and the
 track requires it to keep failing. When the code closes a claim, its hypothesis goes and its counterexample
 becomes a mutation: claim C1 (#1438) was closed by #1452, and `M1438landed` now keeps it on record.

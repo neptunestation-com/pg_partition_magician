@@ -47,8 +47,9 @@
 (*     mark (otherMark) on a paused parent that can never progress. A run *)
 (*     launched with a command is not yet in the parent's lock queue: an   *)
 (*     operator's ATTACH can land before it (claim C3, hypothesis H_C3).   *)
-(*     A run sent with a command the job no longer holds (pg_cron's cache) *)
-(*     is K9.                                                              *)
+(*     pg_cron launches from its launcher's cache of the job (jobCache),   *)
+(*     which a separate step refreshes, so a run can carry a command the   *)
+(*     job no longer holds (#1451).                                        *)
 (*  C6 maintain's per-table steps are separate actions in any order; the   *)
 (*     order inside one tick is not relied on by any contract modelled.    *)
 (*  C7 One retire() is in flight at a time; it is two steps (resolve, then *)
@@ -94,7 +95,15 @@ CONSTANTS
 (*        of a landed retirement idles the job and spells the ATTACH, and a *)
 (*        run pg_cron launched before the idle, its worker not yet queued   *)
 (*        on the parent's lock, detaches the table again once the operator  *)
-(*        has put it back, with nothing recording it.                       *)
+(*        has put it back, with nothing recording it. So does one launched  *)
+(*        after the ATTACH, by a launcher that has not yet re-read the job. *)
+(*  H_C4  A run launched with a command the job no longer held, which no    *)
+(*        live retirement owned, detaches only the relation that command    *)
+(*        was dispatched for. As shipped nothing makes it: pgpm returns     *)
+(*        the job to idle (forget_missing, retire after its DROP or its     *)
+(*        release), and in the second before pg_cron re-reads the job, a    *)
+(*        run launched with the old command detaches whatever partition     *)
+(*        now has that name, with nothing recording it.                     *)
 (*                                                                         *)
 (* KNOWN GAPS. The independent fidelity read (docs/formal/record.md) found  *)
 (* these places where the spec is narrower than the contracts. Each one     *)
@@ -124,11 +133,12 @@ CONSTANTS
 (*     and oret shapes.                                                     *)
 (*  K9 The recall reads the job exactly: whether cron.job holds the detach *)
 (*     is never misread, and a launched run is visible to its in-flight    *)
-(*     check (G724) from launch. pg_cron's command cache (a run launched   *)
-(*     after an uncommitted or unrefreshed idle still carries the detach)  *)
-(*     and a caller that cannot read the job (pg_cron shows it only to its *)
-(*     owner) are not modelled. Both are how #1451 clears a mark under an  *)
-(*     armed detach, so a clean check says nothing about it.               *)
+(*     check (G724) from launch. pg_cron's command cache is modelled (C5): *)
+(*     #1451's path 1, M1451. Still not modelled: a caller that cannot     *)
+(*     read the job (pg_cron shows it only to its owner, #1451's path 2),  *)
+(*     an idle not yet committed (each step is one committed transaction), *)
+(*     and time: the recall's minute after a confirmed idle reading is     *)
+(*     taken to outlast the launcher's refresh, so G1451 reads the cache.  *)
 (*                                                                         *)
 (***************************************************************************)
 
@@ -144,6 +154,8 @@ VARIABLES
     jobRun,    \* the command text a launched pgpm_detach run carries, or NoRun
     jobOid,    \* the relation that run marked pending, or 0
     jobFor,    \* the relation the launched run's command was dispatched for (0: no live retirement owned it)
+    jobCache,  \* the job as pg_cron's launcher last read it (its command cache), or NoJob
+    jobStale,  \* the relation a launched run's command was dispatched for, when the job no longer held it at launch; else 0
     rgCopy,    \* [Slots -> Oids \cup {0}]: an in-flight regrain copy of the slot
     rt,        \* retire() in flight: [s, o, z] or NoRt
     otherMark, \* another (paused) parent's mark: "none" or "undisp"
@@ -162,7 +174,7 @@ VARIABLES
     stuckSlot, \* retire() refused for a detach slot held only by a mark that cannot progress
     heldOwn    \* the upgrade marked retired the chunk of a partition whose block attributes it (#1160)
 
-custVars == <<part, led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt,
+custVars == <<part, led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt,
               otherMark, upgraded, arc>>
 ghostVars == <<badDrop, copied, lostDrop, wrongTgt, collided, falseRef, wasted, raised, silent,
                stuckSlot, heldOwn>>
@@ -331,6 +343,7 @@ DropRel(o) ==
     /\ rloc' = [r \in Rows |-> IF rloc[r] = o THEN 0 ELSE rloc[r]]
 
 JobHolds(n, nm) == Cmd(job) = [n |-> n, nm |-> nm]
+CacheHolds(n, nm) == Cmd(jobCache) = [n |-> n, nm |-> nm]
 IdleIfHolds(n, nm) == job' = IF JobHolds(n, nm) THEN NoJob ELSE job
 
 -----------------------------------------------------------------------------
@@ -352,7 +365,7 @@ InitCommon ==
     /\ rpos = RowPos
     /\ parentNsp = "a" /\ parentEx = TRUE /\ epoch2 = FALSE
     /\ opOwned = {} /\ liveDet = {} /\ envLeft = EnvBudget
-    /\ arc = NoArc /\ claimed = {} /\ job = NoJob /\ jobRun = NoRun /\ jobOid = 0 /\ jobFor = 0
+    /\ arc = NoArc /\ claimed = {} /\ job = NoJob /\ jobCache = NoJob /\ jobStale = 0 /\ jobRun = NoRun /\ jobOid = 0 /\ jobFor = 0
     /\ rgCopy = [s \in Slots |-> 0] /\ rt = NoRt
     /\ badDrop = FALSE /\ lostDrop = {} /\ wrongTgt = FALSE /\ collided = FALSE
     /\ falseRef = FALSE /\ wasted = FALSE /\ raised = FALSE /\ silent = FALSE /\ stuckSlot = FALSE /\ heldOwn = FALSE
@@ -475,7 +488,7 @@ WriteBlockStep(s, z) ==
             THEN /\ rel' = [rel EXCEPT ![o].trig = "none"] /\ UNCHANGED <<led, falseRef>>
             ELSE UNCHANGED <<rel, led, falseRef>>
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet, envLeft>>
-    /\ UNCHANGED <<part, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED <<badDrop, copied, lostDrop, wrongTgt, collided, wasted, raised, silent, stuckSlot, heldOwn>>
 
 -----------------------------------------------------------------------------
@@ -538,7 +551,7 @@ ArchiveStep(z) ==
                  ELSE /\ arc' = [s |-> s, o |-> o, lo |-> lo, a |-> a, z |-> z, A0 |-> A, pre |-> led[lo].ex]
                       /\ UNCHANGED <<led, obj, claimed, rel, raised, collided, falseRef, wasted, silent>>
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet, envLeft>>
-    /\ UNCHANGED <<part, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded>>
+    /\ UNCHANGED <<part, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded>>
     /\ UNCHANGED <<badDrop, copied, lostDrop, wrongTgt, stuckSlot, heldOwn>>
 
 \* After the strategy returns, the step asks the catalog once more and records the
@@ -568,7 +581,7 @@ ArchFinish ==
                   THEN /\ collided' = (collided \/ arc.pre) /\ UNCHANGED led
                   ELSE /\ led' = [led EXCEPT ![lo] = LedRow(Canon(lo), Recorded(c, z), part[s].name, o, A)]
                        /\ UNCHANGED collided
-    /\ UNCHANGED <<baseVars, part, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark,
+    /\ UNCHANGED <<baseVars, part, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark,
                    upgraded, rel>>
     /\ UNCHANGED <<badDrop, copied, lostDrop, wrongTgt, falseRef, wasted, raised, silent, stuckSlot, heldOwn>>
 
@@ -597,7 +610,7 @@ RetireBegin(s, z) ==
        ELSE /\ rt' = [s |-> s, o |-> PartRel(s), z |-> z]
             /\ UNCHANGED <<falseRef, job, part, opOwned>>
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft,
-                   led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy,
+                   led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy,
                    otherMark, upgraded, arc>>
     /\ UNCHANGED <<badDrop, copied, lostDrop, wrongTgt, collided, wasted, raised, silent, stuckSlot, heldOwn>>
 
@@ -620,7 +633,7 @@ TrueBusy(s) ==
     \/ otherMark = "disp"
 
 KeepRetire == UNCHANGED <<rpos, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft,
-                          obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, otherMark, upgraded, arc>>
+                          obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, jobCache, jobStale, otherMark, upgraded, arc>>
 
 \* The drop itself, in the one transaction: reclaim an in-flight regrain's
 \* copy (#519), DROP, mark the chunks retired, delete the pgpm.part row.
@@ -696,17 +709,21 @@ RetireEnd ==
 (* re-resolves the name in its own session (reference.md "What retire      *)
 (* checks a partition's identity against").                                *)
 
-\* pg_cron launches a run with the command the job holds at that moment; the
-\* run is independent of the job from then on, so returning the job to idle
-\* does not stop a run already launched (the #724 race).
+\* pg_cron launches a run with the command its launcher has cached, which is
+\* the job as it stood at the launcher's last refresh, not necessarily as it
+\* stands now (#1451): a run launched after the job returned to idle, before
+\* the launcher re-read it, still carries the detach. The run is independent
+\* of the job from then on, so returning the job to idle does not stop a run
+\* already launched (the #724 race).
 \* A run whose ALTER TABLE names no existing table errors at once, so a launched
 \* run is one queued on an existing parent (epoch 1, or the namesake of epoch 2).
 JobLaunch ==
-    /\ cronOK /\ job # NoJob /\ jobRun = NoRun /\ (parentEx \/ epoch2)
-    /\ jobRun' = Cmd(job)
+    /\ cronOK /\ jobCache # NoJob /\ jobRun = NoRun /\ (parentEx \/ epoch2)
+    /\ jobRun' = Cmd(jobCache)
+    /\ jobStale' = IF jobCache # job THEN jobCache.o ELSE 0
     \* the relation whose dispatch armed the command, while a live retirement still owns it
-    /\ jobFor' = IF \E s \in Slots : part[s].pr /\ part[s].ret /\ part[s].disp = job.o THEN job.o ELSE 0
-    /\ UNCHANGED <<baseVars, part, led, obj, claimed, horizon, archOn, cronOK, job, jobOid, rgCopy, rt,
+    /\ jobFor' = IF \E s \in Slots : part[s].pr /\ part[s].ret /\ part[s].disp = jobCache.o THEN jobCache.o ELSE 0
+    /\ UNCHANGED <<baseVars, part, led, obj, claimed, horizon, archOn, cronOK, job, jobCache, jobOid, rgCopy, rt,
                    otherMark, upgraded, arc, ghostVars>>
 
 \* The run's first transaction: the DETACH ... CONCURRENTLY statement resolves
@@ -726,6 +743,9 @@ JobPhase1 ==
     /\ jobRun # NoRun /\ jobOid = 0
     /\ LET x == Resolve(jobRun.n, jobRun.nm) IN
        IF x # 0 /\ rel[x].par # 0 /\ ~rel[x].pend /\ x \notin liveDet
+          \* H_C4 (claim C4): a run launched with a command the job no longer held, which no
+          \* live retirement owned, detaches only the relation that command was dispatched for
+          /\ ("H_C4" \notin Hypotheses \/ jobStale = 0 \/ jobFor # 0 \/ x = jobStale)
        THEN LET mine == \E s \in Slots : part[s].pr /\ part[s].disp = x
                 substitute == jobFor # 0 /\ x # jobFor IN
             /\ rel' = [rel EXCEPT ![x].pend = TRUE]
@@ -733,30 +753,39 @@ JobPhase1 ==
             /\ jobOid' = x
             /\ wrongTgt' = (wrongTgt \/ (~mine /\ ~substitute))
             /\ opOwned' = IF ~mine /\ substitute THEN opOwned \cup {x} ELSE opOwned
-            /\ UNCHANGED <<jobRun, jobFor>>
-       ELSE /\ jobRun' = NoRun /\ jobFor' = 0                   \* the run errors
+            /\ UNCHANGED <<jobRun, jobFor, jobStale>>
+       ELSE /\ jobRun' = NoRun /\ jobFor' = 0 /\ jobStale' = 0   \* the run errors
             /\ UNCHANGED <<rel, liveDet, jobOid, wrongTgt, opOwned>>
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, envLeft>>
-    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, jobCache, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED <<badDrop, copied, lostDrop, collided, falseRef, wasted, raised, silent, stuckSlot, heldOwn>>
 
 \* Second transaction: the detach completes.
 JobPhase2 ==
     /\ jobOid # 0 /\ jobOid \in liveDet /\ Pending(jobOid)
     /\ rel' = [rel EXCEPT ![jobOid].par = 0, ![jobOid].pend = FALSE]
-    /\ jobRun' = NoRun /\ jobOid' = 0 /\ jobFor' = 0 /\ liveDet' = liveDet \ {jobOid}
+    /\ jobRun' = NoRun /\ jobOid' = 0 /\ jobFor' = 0 /\ jobStale' = 0 /\ liveDet' = liveDet \ {jobOid}
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, envLeft>>
-    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, jobCache, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 \* A run whose session died (CrashDetacher) or whose partition was finalized
 \* under it ends.
 JobEnd ==
     /\ jobOid # 0 /\ (jobOid \notin liveDet \/ ~Pending(jobOid))
-    /\ jobRun' = NoRun /\ jobOid' = 0 /\ jobFor' = 0 /\ liveDet' = liveDet \ {jobOid}
+    /\ jobRun' = NoRun /\ jobOid' = 0 /\ jobFor' = 0 /\ jobStale' = 0 /\ liveDet' = liveDet \ {jobOid}
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, envLeft>>
-    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, jobCache, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
+
+\* The launcher re-reads the job (pg_cron invalidates its cache when cron.job
+\* changes and reloads it on its next loop, about a second after the change
+\* commits). Until then it launches the command it read last.
+CacheRefresh ==
+    /\ jobCache # job
+    /\ jobCache' = job
+    /\ UNCHANGED <<baseVars, part, led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobStale, rgCopy, rt,
+                   otherMark, upgraded, arc, ghostVars>>
 
 -----------------------------------------------------------------------------
 (* _detach_reap (reference.md `_detach_reap`): finishes an ABANDONED       *)
@@ -770,7 +799,7 @@ DetachReap(x) ==
     /\ part' = [s \in Slots |-> IF part[s].pr /\ part[s].ret /\ part[s].rOid = x /\ ~PgpmHolds(s, x)
                                 THEN [part[s] EXCEPT !.ret = FALSE, !.rOid = 0] ELSE part[s]]
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet, envLeft>>
-    /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -784,6 +813,10 @@ RecallArmed(o) == JobHolds(rel[o].nsp, rel[o].name)  \* @guard G1438
 \* #1438: pgpm's own landed detach is released to the operator with its rows, never
 \* attached back (a launched run may still carry the detach and take it out again)
 RecallReleasesLanded == TRUE  \* @guard G1438
+\* #1451: a mark whose job reads idle is cleared only a minute after a confirmed
+\* idle reading, which the launcher's refresh (about a second) never outlasts:
+\* read here as the wait outlasting the refresh, the cache no longer holding it
+RecallWaited(o) == ~CacheHolds(rel[o].nsp, rel[o].name)  \* @guard G1451
 
 Recall(s, z) ==
     /\ upgraded /\ parentEx /\ part[s].pr /\ part[s].ret /\ ~Eligible(s, z)
@@ -797,7 +830,7 @@ Recall(s, z) ==
        \* still attached and armed: no step, the detach lands (#1438; a foreign key or
        \* a DEFAULT partition that refuses it is logged, not modelled). Not armed: the
        \* mark is cleared once no detach of it is running (#724)
-       \/ /\ o # 0 /\ Attached(o, 1) /\ ~RecallArmed(o)
+       \/ /\ o # 0 /\ Attached(o, 1) /\ ~RecallArmed(o) /\ RecallWaited(o)
           /\ IF jobRun # [n |-> rel[o].nsp, nm |-> rel[o].name] /\ o \notin liveDet  \* @guard G724
              THEN part' = [part EXCEPT ![s].ret = FALSE, ![s].rOid = 0, ![s].disp = 0]
              ELSE UNCHANGED part
@@ -816,7 +849,7 @@ Recall(s, z) ==
                   /\ rel' = [rel EXCEPT ![o].par = 1, ![o].slot = s]
                   /\ UNCHANGED opOwned
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft>>
-    /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -850,7 +883,7 @@ ScriptArchive(z) ==
                      /\ UNCHANGED collided
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<part, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED <<badDrop, copied, lostDrop, wrongTgt, falseRef, wasted, raised, silent, stuckSlot, heldOwn>>
 
 \* A direct call of the strategy ("OC"): the documented manual path, reading
@@ -863,14 +896,14 @@ DirectStrategy(lo, hi) ==
          /\ claimed' = claimed \cup {Key(lo)}
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<part, led, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 SetArchiveFn ==
     /\ Env("OC") /\ ~archOn /\ archOn' = TRUE
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<part, led, obj, claimed, horizon, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, obj, claimed, horizon, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -882,7 +915,7 @@ OpIdleJob ==
     /\ Env("IJ") /\ cronOK /\ job # NoJob /\ job' = NoJob
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -890,13 +923,13 @@ OpIdleJob ==
 
 Age ==
     /\ "T" \in EnvGroups /\ horizon < 4 /\ horizon' = horizon + 1
-    /\ UNCHANGED <<baseVars, part, led, obj, claimed, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt,
+    /\ UNCHANGED <<baseVars, part, led, obj, claimed, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt,
                    otherMark, upgraded, arc, ghostVars>>
 Loosen ==
     /\ Env("T") /\ horizon > 0 /\ horizon' = horizon - 1
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<part, led, obj, claimed, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, obj, claimed, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -923,7 +956,7 @@ Upgrade ==
                     /\ part[SlotOf(l)].pr /\ part[SlotOf(l)].oid # 0
                     /\ rel[part[SlotOf(l)].oid].ex /\ rel[part[SlotOf(l)].oid].name = led[l].name
                     /\ rel[part[SlotOf(l)].oid].trig \in {"always", "origin"})
-    /\ UNCHANGED <<baseVars, part, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt,
+    /\ UNCHANGED <<baseVars, part, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt,
                    otherMark, arc, badDrop, copied, lostDrop, wrongTgt, collided, falseRef, wasted, raised, silent,
                    stuckSlot>>
 
@@ -939,7 +972,7 @@ RegrainStart(s) ==
          /\ rgCopy' = [rgCopy EXCEPT ![s] = c]
     /\ Spend
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 \* The swap, one transaction: the copy takes the source's rows, name and slot;
@@ -958,7 +991,7 @@ RegrainSwap(s) ==
          /\ led' = SwapLedger(s, o)
          /\ rgCopy' = [rgCopy EXCEPT ![s] = 0]
     /\ UNCHANGED <<rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet, envLeft>>
-    /\ UNCHANGED <<obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -975,7 +1008,7 @@ Adopt(s) ==
          /\ led' = ResetCoverage(s, o)
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 -----------------------------------------------------------------------------
@@ -1011,7 +1044,7 @@ ForgetMissing ==
     /\ job' = IF ForgetIdlesJob THEN NoJob ELSE job
     \* a detached partition it was retiring is reported in orphan_tables, the operator's to deal with
     /\ opOwned' = opOwned \cup {o \in Oids : rel[o].ex /\ Custody(o)}
-    /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, rt, otherMark,
+    /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, liveDet, envLeft, obj, claimed, horizon, archOn, cronOK, jobRun, jobOid, jobFor, jobCache, jobStale, rt, otherMark,
                    upgraded, arc, ghostVars>>
 
 OpRecreate ==
@@ -1038,7 +1071,7 @@ OtherPut(k, sp) ==
        ELSE obj' = [obj EXCEPT ![k] = {}]
     /\ Spend
     /\ UNCHANGED <<rel, rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<part, led, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt, otherMark, upgraded, arc>>
+    /\ UNCHANGED <<part, led, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt, otherMark, upgraded, arc>>
     /\ UNCHANGED ghostVars
 
 \* The guide's rename of a partition as it used to document it: pgpm.part's
@@ -1051,7 +1084,7 @@ OpRenameTracked(s, nm) ==
     /\ part' = [part EXCEPT ![s].name = nm]
     /\ Spend
     /\ UNCHANGED <<rloc, rpos, rst, repoch, parentNsp, parentEx, epoch2, opOwned, liveDet>>
-    /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, rgCopy, rt,
+    /\ UNCHANGED <<led, obj, claimed, horizon, archOn, cronOK, job, jobRun, jobOid, jobFor, jobCache, jobStale, rgCopy, rt,
                    otherMark, upgraded, arc, ghostVars>>
 
 -----------------------------------------------------------------------------
@@ -1072,8 +1105,9 @@ EnvNext ==
     \/ Idle /\ \E o \in Oids : OpDetach(o, Custody(o)) /\ KeepCust
     \/ \E o \in Oids : OpDetachConc(o, Custody(o)) /\ KeepCust
     \/ Idle /\ \E o \in Oids : o # jobOid /\ OpFinalize(o) /\ KeepCust
-    \* H_C3 (claim C3): behind a launched run that has not resolved its name
-    \/ Idle /\ ("H_C3" \notin Hypotheses \/ jobRun = NoRun \/ jobOid # 0)
+    \* H_C3 (claim C3): behind a launched run that has not resolved its name, and a
+    \* launcher that still holds a command the job no longer does
+    \/ Idle /\ ("H_C3" \notin Hypotheses \/ ((jobRun = NoRun \/ jobOid # 0) /\ jobCache \in {job, NoJob}))
        /\ \E o \in Oids, s \in Slots : OpAttach(o, s) /\ KeepCust
     \/ Idle /\ \E o \in Oids, nm \in Names : OpRename(o, nm) /\ KeepCust
     \/ Idle /\ \E s \in Slots, nm \in Names : OpRenameTracked(s, nm)
@@ -1103,7 +1137,7 @@ PgpmNext ==
     \/ ArchFinish
     \/ Idle /\ \E s \in Slots, z \in SessZ : RetireBegin(s, z)
     \/ Idle /\ RetireEnd
-    \/ JobLaunch \/ JobPhase1 \/ JobEnd
+    \/ JobLaunch \/ JobPhase1 \/ JobEnd \/ CacheRefresh
     \/ Idle /\ JobPhase2
     \/ Idle /\ \E x \in Oids : DetachReap(x)
     \/ Idle /\ \E s \in Slots, z \in SessZ : Recall(s, z)
@@ -1120,6 +1154,7 @@ Fairness ==
     /\ WF_vars(ArchiveStep(0)) /\ WF_vars(ArchFinish) /\ WF_vars(Idle /\ RetireEnd)
     /\ \A s \in Slots : WF_vars(RetireBegin(s, 0))
     /\ WF_vars(JobLaunch) /\ WF_vars(JobPhase1) /\ WF_vars(JobPhase2) /\ WF_vars(JobEnd)
+    /\ WF_vars(CacheRefresh)
     /\ \A x \in Oids : WF_vars(DetachReap(x))
     /\ WF_vars(Upgrade)
     \* a statement the environment started finishes (Base A10)

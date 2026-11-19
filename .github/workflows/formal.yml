@@ -35,11 +35,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Two halves in parallel (test.sh --part): the liveness check of CustodyLive.cfg alone outgrew one job's
+  # budget once pg_cron's command cache came into the model (#1451), so it runs beside the rest.
   formal:
-    name: TLC custody spec and retrodiction
+    name: TLC custody spec (${{ matrix.part }})
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [core, live]
     steps:
       - uses: actions/checkout@v4
       - name: Run the formal track
-        run: ./test.sh formal
+        run: ./test.sh formal --part=${{ matrix.part }}
