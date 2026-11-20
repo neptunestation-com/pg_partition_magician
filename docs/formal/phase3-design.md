@@ -134,13 +134,66 @@ The record counts declarations per invariant.
 
 ## Wiring
 
-1. **Core and archive pgTAP.** `prove_one` runs `select * from pgpm_formal.check()` between `pg_prove` and the
-   drop. Files 31 and 78 run it on `postgres`, scoped to the parents they created. The hypertable runner gets
-   the same call after each file.
-2. **Bench.** There is no shared bench library, so a new `bench/formal_check.sh` exposes one function, and the
-   custody guards call it at each observation point. Which guards: the ones that drive retention or archiving
-   concurrently, chosen and listed in W4, not all 216 that mention either word.
-3. **Report first, then enforce.** The first full run (W6) reports and fails nothing, because every
+1. **Core, archive and hypertable pgTAP** (W4). After each file's `pg_prove` and before its clone is dropped, ONE
+   psql session runs `tests/formal/report.sql` in the clone: `check()`, then `judged()`, written tab separated to
+   `oracle-log/<track>/<file>.oracle` (`L` the ledger's parents, `V` one per violation, `J` one per invariant, `T` the
+   report's server-side time, `S` and `E` below). `test.sh`'s `oracle_report` is the one call, from `prove_one` (the
+   core track's parallel and alone files), from the serial branch for files 31 and 78 on `postgres`, from
+   `run_archive`'s loop and from `run_timescale`'s. 31 and 78 are scoped (`check()`'s argument) to the parents they
+   name, resolved through the drop history too, since 78 drops `dp78` at its end; 31 names none, so only its
+   session is judged (a `check()` that raises there is still counted). A violation fails nothing (item 4); a
+   session that fails is an `E` line.
+2. **One summary per track, and the witness.** `tests/formal/summarize.py <track> <log dir>` prints, per invariant,
+   the files that judged it, the identities judged, violations, declarations and `UnusedExpectation`s, the oracle's
+   time and errors, the baselined custody files whose `NoLostRow` judged nothing (listed), and the violations
+   grouped by file. It FAILS the track, report mode or not, when the oracle did not look: an invariant the track
+   must reach judged zero identities (`NoLostRow`, `NoDuplicateRow`, `ResolveByRecord` and `NoWedge` on core and
+   archive, `DropOnlyCovered` and `ArchiveNoClobber` on archive too; `NoLostRow`, `NoDuplicateRow` and
+   `ResolveByRecord` on timescale), any `E` line, or a custody file listed as baselined that left no ledger or no
+   report. CI runs the same script through `test.sh`, and keeps `oracle-log/` as an artifact of each job.
+   The witness has been seen to fail: pointed at three core files' reports, it failed on `NoWedge` judging zero
+   identities and on every other baselined custody file leaving no report. It has no `bench/mutations/` entry yet;
+   that is W5's, with the oracle's own mutations.
+3. **ArchiveNoClobber's store.** Before the archive track's report, `tests/formal/store_keys.sql` lists the retired
+   chunks' keys of every parent archived to the track's own bucket, the curl image the track already uses for its
+   bucket setup fetches them (SigV4, on the track's network), and `tests/formal/load_store.py` decodes them with
+   pyarrow (the reader `scripts/verify_parquet*.py` hold the writer to) or as NDJSON, gzip or not. No
+   `pgpm_archive` code reads them. The rows reach `report.sql` on standard input as JSON, and `report.sql` renders
+   their identities by the oracle's own SQL (`jsonb_populate_record` over the parent's row type, then
+   `_ident_sql` over the ledger's key, under the pinned settings), so a store identity and a ledger identity are
+   one rendering, not two that agree. An object that answers 404 was read and holds nothing; any other failure
+   leaves its parent unlisted, and says so as an `E` line.
+4. **Bench.** `bench/formal_check.sh` (sourced): `formal_install` after the guard's install, and `formal_check`
+   after the last observation, in its own session, printing one `ORACLE` line (never `PASS` or `FAIL`, so neither
+   the guard's verdict nor `discriminate.sh`'s reading of it moves) and writing
+   `oracle-log/bench/<guard>.<label>.oracle`. `PGPM_FORMAL_BENCH=0` skips the check and drops the oracle's event
+   triggers (the schema stays: a custody file calls `baseline()`), which is how the lock comparison was run.
+
+   W2 flagged the hazard first: the event triggers take AccessShare on `pgpm.part` and `pgpm.config` at every DDL. W4
+   ran each candidate guard twice on PostgreSQL 17, with the oracle and without, and compared its exit status and
+   every `PASS`/`FAIL` line by label (the guard's own liveness witnesses among them). All eleven measured were the
+   same both ways, and every exit was 0. Nine get the oracle; the `ORACLE` column is what `check()` judged there:
+
+   | Guard | What drives retention or archiving concurrently | `ORACLE` (judged; violations) |
+   |---|---|---|
+   | `retire_locks_by_oid` | tests/345: retire while a second session holds a lock, by oid | NoLostRow 879, RBR 17, NoWedge 1; 0 |
+   | `retire_pending_detach` | tests/327: dblink sessions park and kill a `DETACH CONCURRENTLY` under retire | NoLostRow 64, RBR 18; 4 (W3's tests/327 candidates) |
+   | `archive_hold_detach_in_flight` | tests/325: the archive hold against a detach in flight | NoLostRow 24, RBR 3, NoWedge 2; 0 |
+   | `retirement_mark_needs_dispatch` | tests/330: retirement marks against a dispatch in another session | NoLostRow 55, RBR 23, NoWedge 20; 0 |
+   | `retain_loop_per_child_isolation` | tests/263: retain's per-child loop with a child failing beside it | NoLostRow 7, RBR 3; 0 |
+   | `retire_detach_substitution` | tests/77: a relation substituted under the name between dispatch and drop | RBR 3; 0 (77 is not baselined) |
+   | `regrain_candidate_lock_race` | tests/148: an aged regrain candidate locked by another session | NoLostRow 306, RBR 1; 0 |
+   | `maintain_lock` | a retain-drop tick beside a reader and writer of the parent | RBR 29, NoWedge 1; 0 |
+   | `maintain_regrain_lock_timeout` | maintain's retain boundary then auto-regrain, a writer holding a row | RBR 1; 0 |
+
+   Measured and left out: `retire_detach_lock` judges nothing without a baseline, and with one (`public.messages`)
+   reports all 200,000 rows lost, because the guard stands in for pg_cron with its own `DETACH CONCURRENTLY` of the
+   retiring monolith, so no dispatch is recorded and the detached relation is not custody by the oracle's rule. That
+   is a harness reading, not a defect, and a guard whose oracle line is 200,000 false reports or nothing is no
+   witness. `reap_and_abort_lock_timeout` judged zero identities (aborted conversions and a reaped detach hold no
+   state the oracle reads). Not measured: `archive_recorded_chunk_tick_race` and the other `bench/archive_*`
+   guards, which need the archive track's MinIO; W6 can add them through the same two calls.
+5. **Report first, then enforce.** The first full run (W6) reports and fails nothing, because every
    pre-existing failure is a claim that has not been judged yet. Once the claims are judged, a violation fails
    its file the way a `not ok` does.
 
@@ -311,6 +364,56 @@ Each of these is folded into the sections above; the list is here so a reader of
 - **Not measured: a `DETACH CONCURRENTLY` that pg_cron runs** in its own session. Only files 31 and 78 reach it,
   on `postgres`, where W4 must install the oracle; whether the `ddl_command_end` trigger records it there is W4's
   to check before `ResolveByRecord` judges those files.
+
+### What W4 measured and changed
+
+The wiring is above ("Wiring"); what running it found:
+
+- **The three tracks, with the wiring, on this branch.** Every invariant each track must reach was judged and no
+  oracle raised:
+
+  | Track | Files | NoLostRow | NoDuplicateRow | DropOnlyCovered | ArchiveNoClobber | ResolveByRecord | NoWedge | Violations | Oracle time |
+  |---|---|---|---|---|---|---|---|---|---|
+  | core, PostgreSQL 17 / psql | 371 | 97 / 473,941 | 97 / 473,941 | 30 / 65,056 | not on this track | 191 / 1,427 | 62 / 62,592 | 50,013 | 15.1 s |
+  | archive (PostgreSQL 17, MinIO) | 53 | 20 / 40,466 | 20 / 40,466 | 8 / 322 | 8 / 322 | 11 / 43 | 10 / 29 | 6 | 0.9 s |
+  | timescale, supabase/postgres 15.14.1.127 | 75 | 4 / 361 | 4 / 361 | 0 | not on this track | 59 / 178 | 0 | 0 | 0.6 s |
+
+  Cells are files judged / identities judged. Violations are reported, not failed, and every one is in the track's
+  log; those that are not in `tests/formal/w3_candidates.json` are listed below for W6. Of the core track's 50,013,
+  50,000 are tests/59's `DropOnlyCovered` (a W3 candidate), and timescale's `NoWedge` judged nothing (none of its
+  files leaves a mark, a copy or a retired chunk), which is why the witness does not require it there.
+- **Violations outside the W3 candidates.** W3 ran the custody files only; W4 runs every file, so the structural
+  checks reach files nobody baselined. New: tests/223 (`ResolveByRecord`, pgpm drops `public.fv223_def`, a
+  dependant untransmute removes), tests/276 (`NoWedge`, a regrain copy with no attached source left), tests/348
+  (`ResolveByRecord` x4, the uninstall dropping `*_pgpm_delta` and `*_pgpm_dest` relations by oid, which the
+  oracle's catalog never named). On the archive track: tests/archive/db/40 (`ArchiveNoClobber` x6), whose closing
+  cleanup DELETEs every object it wrote, the retired chunks' among them, so after the file the six rows those
+  chunks recorded are in no object: the oracle reports exactly the state the file leaves, which W6 can declare or
+  judge before the cleanup. Each is a claim for W6, not yet a defect.
+- **`check()` costs more where retention ran than W2 measured.** W2 baselined the END state, so no ledger row was
+  gone and no control value was decoded. A file that baselines its fixture and then retains decodes every gone row
+  through `pgpm._col_to_native`, about 17 to 40 microseconds each: `check()` took 2.9 s on tests/59 (50,000 gone
+  rows), 1.0 s on tests/07, and 15.1 s over the whole core channel (median 7 ms per file), against W2's 122.6 ms
+  maximum. The channel still ran in its usual time (the files run four at a time); W6 should decide whether to
+  decode in bulk.
+- **A `DETACH CONCURRENTLY` that pg_cron runs is recorded** (W3 left it unmeasured): a job scheduled in `postgres`
+  detaching a partition wrote one `alter_history` row with the partitions after it, attributed to pgpm because the
+  backend is pg_cron. Every DDL a pg_cron job runs is attributed to pgpm that way, an operator's own job included;
+  no custody file runs one, so nothing reports it today. tests/78 asserts the dispatched command and never lets
+  pg_cron run it.
+- **The mutation check** (W5 builds on it): `regrain_reconcile_discards_delta` (the reconcile skips applying the
+  captured change), run over the 104 core custody files that run in a clone. The oracle reported 4 `NoLostRow`
+  violations the clean run does not, in tests/110, 120 and 136 (rows inserted during the copy and never applied),
+  and the clean run's other reports unchanged. Six files fail their own assertions under it; three of those (237,
+  323, 349) drew no oracle report, so W5 should not expect every catching file to catch through the oracle. tests/345
+  hung in the mutant run (it runs alone in `test.sh`, and here ran four at a time) and was cancelled.
+- **ArchiveNoClobber is judged** on the archive track: 45 parents listed over the 53 files, 18 objects read
+  (Parquet and NDJSON, gzip and plain), 566 store identities, 322 ledger identities judged in 8 files. The first run
+  hung: pyarrow's thread pool deadlocked the interpreter at exit after decoding a zero-row Parquet file
+  (tests/archive/db/31), so `load_store.py` reads with `use_threads=False` and bounds the fetch at 600 s.
+- **Not done in W4: the seven files that drop their own parents** (tests/60, 77, 78, 79, 105, 106, 116). Calling
+  `check()` inside them before their cleanup means a new pgTAP assertion, and report mode adds none, so they stay
+  unjudged for the row invariants and W6 decides. Their structural checks run after the file like every other's.
 
 ## Out of scope
 
