@@ -30,8 +30,11 @@ insert into public.f381 values (4, now() - interval '4 days', 'd'), (6, now() - 
 
 select ok(exists (select 1 from pg_constraint where conrelid = 'public.r381'::regclass and contype = 'f'
                      and conindid = 'public.e381_uq'::regclass)
-          and not exists (select 1 from pg_constraint where conrelid = 'public.e381'::regclass),
-  'LIVENESS: r381''s foreign key carries e381''s bare index as its conindid, and no constraint of e381 sits on it');
+          -- not "no constraint of e381 at all": PostgreSQL 18 records each NOT NULL column as a pg_constraint row of
+          -- contype 'n' (conindid 0), so the premise names what it means, no key of e381 and none on its index
+          and not exists (select 1 from pg_constraint where conrelid = 'public.e381'::regclass
+                             and (contype in ('p', 'u') or conindid = 'public.e381_uq'::regclass)),
+  'LIVENESS: r381''s foreign key carries e381''s bare index as its conindid, and no key of e381 sits on it');
 
 select throws_like(
   $$ call pgpm.transmute('public.f381', 'ts', interval '1 day') $$,
