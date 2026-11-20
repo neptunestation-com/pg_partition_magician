@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+- **A REPLICA IDENTITY USING INDEX whose index was dropped is carried as `NOTHING` by `transmute` and handed back as
+  `NOTHING` by `untransmute`** (#1036). PostgreSQL lets `DROP INDEX` remove a table's identity index and treats the
+  table as `NOTHING`; step 9d refused such a table as one whose identity index "was not carried onto the
+  partitioned parent", and `untransmute` refused such a parent as one whose index "has no copy on the original
+  table", each naming an index that does not exist. tests/376; mutations `transmute_dropped_identity_index_refused`
+  and `untransmute_dropped_identity_index_refused`.
+- **A deadlock met in `maintain_all`'s reap of an abandoned conversion defers that claim instead of ending the
+  tick** (#1231, B17-03). The sweep holds a reaped table's lock until the tick commits, so a reader of the next
+  claim's table that also touched the first closed a cycle in which the sweep was the victim, and the 40P01 rolled
+  back the reaps already done and skipped `_detach_reap` and every parent. It is logged `skip_transmute_reap` with
+  the error, as a lock timeout is. tests/377; mutation `transmute_reap_deadlock_escapes`.
+- **A resumed `transmute` refuses a claim recorded in `localtime`, `posixrules` or `Factory`** (#1111, V-02). An
+  install from before #1086 could record one as a claim's zone, and the resume adopted it unasked, registering a
+  grid that follows the host's setting. The refusal names `transmute_abort`. tests/378; mutation
+  `resume_claim_zone_unasked`.
+- **The cutover's name-collision refusals name the holder the statement collided with** (#1217). The staging
+  `CREATE`'s and the first `RENAME`'s 23505 arms named the first holder of the names they take, an implicit array
+  type committed beforehand that PostgreSQL moves aside included, with a remedy that cannot drop it, instead of the
+  enum in flight at the name it is moved to. tests/379; mutations `staging_create_names_held_unskipped` and
+  `monolith_rename_names_held_unskipped`.
+- **`transmute` refuses a `p_regrain_batch` that is not positive, and `from_hypertable` and its cutover a
+  `p_drain_batch` that is not** (#1243). Zero or a negative batch was recorded for the life of the table, and
+  regrain copied one row per tick. tests/380 and tests/timescale/db/58; mutations
+  `transmute_regrain_batch_unchecked` and `hypertable_drain_batch_unchecked`.
+- **A bare unique index an incoming foreign key references is refused as a bare index** (#1333, bullets 4 and 5).
+  `pgpm._transmute_bare_unique` counted any constraint whose index it was as backing it, an incoming foreign key's
+  included, so `transmute` fell through as keyless and refused with incoming-key remedies that do not work, and
+  `from_hypertable_cutover`'s key gate let the swap commit before `transmute` refused. Only a primary key or unique
+  constraint of the table itself counts now. tests/381 and tests/timescale/db/68 part F; mutation
+  `bare_unique_any_constraint`.
 - **`incoming_fk_orphans` counts orphans under a collation mismatch** (#958). It joined each referencing column to
   the column it references with no `COLLATE`, so a foreign key whose two text columns carry different collations
   (PostgreSQL accepts one, and `preserve` re-adds it as written) raised `could not determine which collation to use`

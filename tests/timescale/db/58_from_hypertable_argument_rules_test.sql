@@ -6,6 +6,8 @@
 --   p_retain  negative                     "p_retain cannot be negative" (#451)
 --   p_obtain  negative                     "p_obtain must be a non-negative integer" (#581)
 --   p_interval zero or negative            "the partition step must be positive" (#581)
+--   p_drain_batch zero or negative         "p_drain_batch must be a positive integer" (#1243: the cutover
+--                                          hands it to transmute as p_regrain_batch, refused since then)
 -- A negative p_interval was worse: the first thing to notice it was the frontier check (#792), whose limit
 -- now() + step + 1 hour then lies in the past, so it refused with a remedy that said to delete the newest
 -- day of rows, or to pass p_force_frontier, which committed the swap and met the step refusal after it.
@@ -24,7 +26,7 @@
 -- other's place would show. WITNESSES: transmute refuses each argument on a plain table with the same
 -- message, so the module asks transmute's rules and not new ones; the frontier check, asked first, would
 -- refuse a58 with the delete-the-rows remedy; and the same calls with good arguments migrate both tables.
-select plan(22);
+select plan(25);
 
 create table public.a58 (ts timestamptz not null, v int);
 select create_hypertable('public.a58', 'ts', chunk_time_interval => interval '1 day');
@@ -53,6 +55,10 @@ select throws_like(
   'pg_partition_magician: the partition step must be positive (got 00:00:00)%',
   'LIVENESS: transmute refuses a zero step on a plain table');
 select throws_like(
+  $$ call pgpm.transmute('public.p58', 'ts', interval '1 day', p_regrain_batch => 0) $$,
+  'pg_partition_magician: p_regrain_batch must be a positive integer (got 0)%',
+  'LIVENESS: transmute refuses a zero p_regrain_batch on a plain table');
+select throws_like(
   $$ select pgpm._from_hypertable_check_frontier('public.a58', 'ts', interval '-1 day', false) $$,
   'pg_partition_magician: cannot migrate hypertable a58 with p_interval -1 days -- %Delete or correct the rows whose ts is after %',
   'LIVENESS: asked of a negative step, the frontier check would refuse a58 telling the operator to delete rows');
@@ -70,6 +76,10 @@ select throws_like(
   $$ call pgpm.from_hypertable('public.a58', 'ts', interval '0') $$,
   'pg_partition_magician: the partition step must be positive (got 00:00:00)%',
   'from_hypertable refuses a zero p_interval before its copy');
+select throws_like(
+  $$ call pgpm.from_hypertable('public.a58', 'ts', interval '1 day', p_drain_batch => 0) $$,
+  'pg_partition_magician: p_drain_batch must be a positive integer (got 0)%',
+  'from_hypertable refuses a zero p_drain_batch, which it hands transmute as p_regrain_batch, before its copy');
 select throws_like(
   $$ call pgpm.from_hypertable('public.a58', 'ts', interval '-1 day') $$,
   'pg_partition_magician: the partition step must be positive (got -1 days)%',
@@ -109,6 +119,10 @@ select throws_like(
   $$ call pgpm.from_hypertable_cutover('public.b58', 'ts', interval '0', p_predrain => false) $$,
   'pg_partition_magician: the partition step must be positive (got 00:00:00)%',
   'from_hypertable_cutover refuses a zero p_interval before the swap');
+select throws_like(
+  $$ call pgpm.from_hypertable_cutover('public.b58', 'ts', interval '1 day', p_drain_batch => -3, p_predrain => false) $$,
+  'pg_partition_magician: p_drain_batch must be a positive integer (got -3)%',
+  'from_hypertable_cutover refuses a negative p_drain_batch before the swap');
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('public.b58', 'ts', interval '-1 day', p_predrain => false, p_force_frontier => true) $$,
   'pg_partition_magician: the partition step must be positive (got -1 days)%',

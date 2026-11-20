@@ -1603,8 +1603,12 @@ $$;
 -- whose swap drops the hypertable and commits before the handoff (#1085). One function, not a copy per
 -- entry point, so the rules cannot drift between them. p_step and p_retain are text in p_control_kind's
 -- native form, the way _transmute takes them: an interval for time, uuidv7 and text_time, an integer for id.
+-- #1243: and the regrain batch, which must be positive. p_batch_arg names the argument as the caller's entry
+-- point spells it (pgpm_hypertable hands its p_drain_batch to transmute as p_regrain_batch); null asks nothing.
+drop function if exists pgpm._refuse_bad_transmute_arguments(text, text, int, text);
 create or replace function pgpm._refuse_bad_transmute_arguments(
-  p_control_kind text, p_step text, p_obtain int, p_retain text
+  p_control_kind text, p_step text, p_obtain int, p_retain text,
+  p_regrain_batch int default null, p_batch_arg text default 'p_regrain_batch'
 ) returns void language plpgsql stable as $$
 begin
   -- #451: retain cannot be negative. Nothing checked its sign, so `p_retain => interval '-1 day'` (a typo
@@ -1637,6 +1641,12 @@ begin
   -- partition, no tick ever built one, and the first write past the monolith's hi failed.
   if p_obtain is null or p_obtain < 0 then
     raise exception 'pg_partition_magician: p_obtain must be a non-negative integer (got %)', p_obtain;
+  end if;
+  -- #1243: and the batch cannot be zero or negative. It is recorded in config.regrain_batch, which no setter
+  -- changes, and regrain_step clamps it to one row, so every auto-regrain tick copied a single row for good.
+  if p_regrain_batch < 1 then
+    raise exception 'pg_partition_magician: % must be a positive integer (got %) -- it is the number of rows each regrain COPY microbatch moves, recorded for the life of the table, and a regrain would copy one row per tick',
+      p_batch_arg, p_regrain_batch;
   end if;
 end;
 $$;
@@ -11529,12 +11539,17 @@ $$;
 -- included (named as the array type of its element type). p_own lists the relations the statement acts on,
 -- whose own row and array types are not holders.
 --
--- p_skip is for the XX000 arm. 23505, 42P07 and 42710 are name collisions by definition, but "tuple
--- concurrently updated" is any concurrent update of a catalog row the statement also updates, a GRANT on the
--- table (which takes no lock on it) as much as a CREATE TYPE that moved the table's array type aside. So that
--- arm passes the holders that were already there before the statement ran (_transmute_names_present, read
--- just before it): a holder among them is one PostgreSQL steps around, not the cause, and only a holder that
--- appeared during the wait is named. With none, the arm re-raises the error as it came.
+-- p_skip is the holders that were already there before the statement ran (_transmute_names_present, read just
+-- before it): a holder among them is one PostgreSQL steps around, not the cause, and only a holder that appeared
+-- during the wait is named. With none, the arm re-raises the error as it came. Every XX000 arm passes it, since
+-- "tuple concurrently updated" is any concurrent update of a catalog row the statement also updates, a GRANT on
+-- the table (which takes no lock on it) as much as a CREATE TYPE that moved the table's array type aside. 23505,
+-- 42P07 and 42710 are name collisions by definition, but not with whichever holder comes first (#1217): an
+-- implicit array type committed at the CREATE's or the first RENAME's name, which PostgreSQL moves aside, was
+-- named in place of the enum in flight at the name it was moved to, with a remedy that cannot drop it, so those
+-- arms pass it too, after the squatter helpers have refused a holder of the statement's own name committed
+-- beforehand. The second RENAME takes back names the first gave up in this transaction, which no other transaction
+-- can have been creating meanwhile, so its 23505 arm has no such pair to tell apart.
 create or replace function pgpm._transmute_taken_names(p_names name[], p_also name[] default '{}')
 returns name[] language sql immutable as $$
   select p_names || array(select pgpm._array_type_name(x) from unnest(p_names) x) || p_also;
@@ -12016,6 +12031,10 @@ end $$;
 -- branch of _transmute's key selection that raises "is a bare index, not a constraint"). Null when
 -- transmute would reuse a key, or partition the table keyless. Shared by _transmute and by pgpm_hypertable,
 -- whose cutover drops the hypertable before transmute asks, so it asks first.
+-- #1333: "backing no constraint" means no primary key or unique constraint OF THIS TABLE sits on the index, the
+-- reading #1266 gave the hypertable copy. Asked of the index alone, an incoming foreign key, whose row carries
+-- the index it references as its conindid, made the bare index read as a key's: transmute fell through as
+-- keyless and refused with incoming-key remedies that do not work, and the cutover's gate passed and swapped.
 create or replace function pgpm._transmute_bare_unique(p_parent regclass, p_control name)
 returns name language sql stable as $$
   select c.relname
@@ -12024,7 +12043,8 @@ returns name language sql stable as $$
    where i.indrelid = p_parent and i.indislive and i.indisunique and not i.indisprimary
      and i.indpred is null and i.indexprs is null
      and a.attnum = any((string_to_array(i.indkey::text, ' ')::int2[])[1:i.indnkeyatts])
-     and not exists (select 1 from pg_constraint con where con.conindid = i.indexrelid)
+     and not exists (select 1 from pg_constraint con
+                      where con.conrelid = p_parent and con.contype in ('p', 'u') and con.conindid = i.indexrelid)
      and not exists (select 1 from pg_constraint con where con.conrelid = p_parent and con.contype = 'p')
      and not exists (select 1 from pg_constraint con join pg_index ui on ui.indexrelid = con.conindid
                       where con.conrelid = p_parent and con.contype = 'u'
@@ -12340,7 +12360,7 @@ begin
   -- #451, #581: the argument rules, before anything is read or committed. One function, so that the entry
   -- points that reach this procedure only after committing work of their own (from_hypertable, whose
   -- cutover swap commits before the handoff) can ask exactly these rules first (#1085).
-  perform pgpm._refuse_bad_transmute_arguments(p_control_kind, p_step, p_obtain, p_retain);
+  perform pgpm._refuse_bad_transmute_arguments(p_control_kind, p_step, p_obtain, p_retain, p_regrain_batch);
   -- #309: validate the lock timeout HERE, before anything is committed. set_config raises on a bad value
   -- anyway, but it would do so from inside phase 1 or, worse, phase 3 -- after the O(rows) validation
   -- scan the operator has already waited through. A typo should cost nothing.
@@ -13046,6 +13066,13 @@ begin
   if v_resumed then
     v_tz := coalesce(v_claim_tz, v_tz);
   end if;
+  -- #1111: a claim an install from before #1086 recorded may carry localtime, posixrules or Factory, which are not
+  -- zones with rules of their own and which this one never records (_canonical_tz), and adopting it registered
+  -- the grid in whatever zone the host is set to. Refused, the claim left as it was: still the first transaction.
+  if v_resumed and v_claim_tz is not null and pgpm._canonical_tz(v_claim_tz) is null then
+    raise exception 'pg_partition_magician: cannot resume the transmute of %: the bound [%, %) an earlier attempt recorded was computed in the zone %, which is not a zone pgpm can record: it must be a name in pg_timezone_names other than localtime, posixrules or Factory (which stand for the host''s setting, a POSIX-rule default and a placeholder, not zones with rules of their own, so a grid in one moves with the host). Call pgpm.transmute_abort(%) to drop the bound and start over, then re-run transmute from a session whose TimeZone is a named zone (set timezone = ''UTC'' for UTC-aligned boundaries).',
+      p_parent, v_lo_native, v_hi_native, v_claim_tz, p_parent;
+  end if;
   -- #628: and the bound has to be on the column THIS call partitions by. The claim records the bound and
   -- its zone, and #574's check below holds a resume to its grid, but it did not record the column: a
   -- re-run on another column took the claim over, skipped phase 1 (a constraint by that name exists) and
@@ -13232,7 +13259,7 @@ begin
     when duplicate_table or duplicate_object or unique_violation then
       perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);
       perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
-        format('CREATE of the new parent %I.%I', v_nsp, v_staging));
+        format('CREATE of the new parent %I.%I', v_nsp, v_staging), p_skip => v_pre_names);
       raise;
     when internal_error then
       if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held
@@ -13523,7 +13550,7 @@ begin
     when duplicate_table or duplicate_object or unique_violation then
       perform pgpm._transmute_refuse_monolith_squatter(v_nsp, v_monolith, v_lo_native, v_hi_native);
       perform pgpm._transmute_refuse_names_held(v_nsp, array[v_monolith],
-        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr]);
+        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr], v_pre_names);
       raise;
     when internal_error then
       if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held
@@ -13905,6 +13932,11 @@ begin
   -- index it would not carry). The monolith is the original table and keeps its own. ALTER ... REPLICA
   -- IDENTITY takes ACCESS EXCLUSIVE, which this cutover holds, so the value read is the one carried.
   select c.relreplident into v_replident from pg_class c where c.oid = p_parent;
+  -- #1036: USING INDEX with no identity index left (DROP INDEX allows it) is the #978 state, which PostgreSQL
+  -- treats as NOTHING, so NOTHING is the identity carried; it was refused as an index transmute had not carried.
+  if v_replident = 'i' and not exists (select 1 from pg_index where indrelid = p_parent and indisreplident) then
+    v_replident := 'n';
+  end if;
   if v_replident = 'i' then
     select pc.relname into v_ri_idx
       from pg_index i
@@ -14207,7 +14239,10 @@ $$;
 -- for the lock that undoes the one transmute's phase 1 took: a SET clause, so it applies to every wait in
 -- here and the caller's setting is back the moment this returns (the _detach_reap after it carries its own, #708).
 -- A timeout DEFERS that table alone: skip_transmute_reap is logged, the claim and the bound stay exactly
--- as they were, and the next tick tries again. Any other error still propagates, as it always has.
+-- as they were, and the next tick tries again. So does a deadlock met in that wait (#1231): the lock of a table
+-- already reaped is held until maintain_all commits, so a reader of the next table that goes on to touch it
+-- closes a cycle with the sweep, which, having waited first, is the one broken; it ended the whole tick, the
+-- earlier reaps rolled back with it. Any other error still propagates, as it always has.
 -- bench/transmute_reap_lock_timeout.sh guards it.
 --
 -- The verdict is taken again under the table's lock (#1166). The loop's row is the claim as it stood when
@@ -14259,7 +14294,9 @@ begin
     exception
       when sqlstate 'PGPMR' then
         null;
-      when lock_not_available then   -- #657: defer this table to the next tick, never stall on it
+      -- #657: defer this table to the next tick, never stall on it. #1231: and a deadlock met in the wait, one
+      -- this sweep builds itself by holding a table it reaped while it waits on the next, defers it the same way
+      when lock_not_available or deadlock_detected then
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (r.parent_table, 'skip_transmute_reap', r.lo, r.hi, left(sqlerrm, 200));
     end;
@@ -14900,6 +14937,11 @@ begin
   -- takes ACCESS EXCLUSIVE. An index identity names the parent's index; the one handed back is the
   -- monolith's index attached under it, found by that identity before the DETACH removes it.
   select c.relreplident into v_ri from pg_class c where c.oid = p_parent;
+  -- #1036: USING INDEX with no identity index left is the #978 state, NOTHING to PostgreSQL, and handed back as
+  -- that; it was refused as an index with no copy on the original table.
+  if v_ri = 'i' and not exists (select 1 from pg_index where indrelid = p_parent and indisreplident) then
+    v_ri := 'n';
+  end if;
   if v_ri = 'i' then
     select h.inhrelid into v_ri_idx
       from pg_index pi
