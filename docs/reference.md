@@ -683,7 +683,11 @@ back unmanaged and rejecting every write, with no `pgpm` state left to lift it. 
 stays in `pgpm.archive_ledger`, as it does after a `retire`. And a **regrain still in flight** on the
 monolith is abandoned exactly as [`regrain_cancel`](#regrain_cancel) would abandon it (capture trigger and
 `TRUNCATE` guard off, fine copies dropped, delta cleared, one `regrain_cancel` log row): before its swap the
-monolith still holds every row, so nothing is lost but the copy work.
+monolith still holds every row, so nothing is lost but the copy work. And a **retirement in flight** on an empty
+forward partition (on a `time` grid wall-clock time can carry one past the horizon while every row is still in the
+monolith): the partition goes with the parent, and when the standing `pgpm_detach` job still holds the detach that
+retirement handed it, the job is put back to idle, so pg_cron does not re-run it against the restored table. A
+detach the job holds for another table is left armed.
 
 A **preserved incoming FK** (`p_incoming_fks => 'preserve'`) comes back against the restored table
 `NOT VALID` whenever its referencing table is an ordinary one: it enforces every new write at once, but
@@ -2201,7 +2205,7 @@ move into a schema the table's owner cannot use, below), and a table you create 
 takes none. Each write holds the delta while it writes it (`ROW EXCLUSIVE`, the
 lock its insert takes anyway), so a rename, move or drop of the delta waits for the writes in flight, and a
 write that arrives while one is pending waits for it and then writes the delta where it now is, even when
-the same transaction gives the freed name to a table of yours. A delta you drop refuses every write into the regraining partition
+the same transaction gives the freed name to a table, materialized view or sequence of yours. A delta you drop refuses every write into the regraining partition
 (42P01, naming the remedy) until the next tick, which restarts the run and re-mints capture. The source is likewise the relation
 `pgpm.part.child_oid` recorded, in its own schema, so a parent moved by `ALTER TABLE ... SET SCHEMA` before
 its regrain begins, or at any point while it runs, regrains as if it had stayed; the
@@ -2533,9 +2537,11 @@ coarse child a regrain is splitting (see [`retire`](#retire)). That is logged `r
 pgpm.regrain_history(p_parent regclass, p_target_step text default null) returns int
 ```
 
-Convenience: `regrain` the oldest coarse child (the monolith -- the smallest-`lo` attached partition) to
-`p_target_step`. The hierarchical monolith to coarse to fine path is just repeated `regrain` calls with
-chosen steps. Like `regrain`, it refuses a `REPEATABLE READ` or `SERIALIZABLE` transaction up front, naming
+Convenience: `regrain` the oldest coarse child to `p_target_step` (default: the partition step): the
+smallest-`lo` attached partition the target step subdivides, which at first is the monolith. The hierarchical
+monolith to coarse to fine path is just repeated `regrain` calls with chosen steps, and once one pass has split the
+first coarse child, the next call at a finer step passes over the fine children it left and splits the next coarse
+one. With nothing left that the target subdivides it refuses, saying so. Like `regrain`, it refuses a `REPEATABLE READ` or `SERIALIZABLE` transaction up front, naming
 `regrain_history`.
 
 ### `maintain`
@@ -2562,8 +2568,10 @@ block it, pgpm does not lift that block, since it cannot tell it from a block it
 detached by hand and kept. It names it instead, with the statement that lifts it (`drop trigger if exists
 pgpm_write_block on ...;`), in the refusal's `method` and in the remedy of the `retain_disown` that releases
 the renamed retirement. It names only its own trigger on a table that is no partition of a parent pgpm manages and that no
-`pgpm.part` row records, under the old name in the retirement's schema or the parent's. Run the statement
-only if the table is yours. Removal is deliberately *not* anchored: an older pgpm could have left that trigger on a
+`pgpm.part` row records, under the old name in the retirement's schema or the parent's. A row that records no oid of
+its own is refused the same way when a partition of the parent over another range than the row's carries its name,
+and an older pgpm that blocked by the name alone may have blocked that table too: the refusal names that block, with
+the same statement, unless a `pgpm.part` row records the table. Run the statement only if the table is yours. Removal is deliberately *not* anchored: an older pgpm could have left that trigger on a
 substituted relation, rejecting every write to it, and removing by name is what lets an upgraded pgpm lift
 it off again.
 
@@ -3665,7 +3673,9 @@ rather than warns, whenever the new value would make the very next `retain()` ti
 the *old* value still kept. The check runs before anything is written. Loosening (a larger
 interval/count, or `null`) can never trip it: a wider horizon only ever keeps a superset of what a
 narrower one kept. A tighter value that happens to grid-floor to the same boundary as before (nothing
-newly eligible) is also allowed -- the refusal is about what would actually drop, not the raw number.
+newly eligible) is also allowed -- the refusal is about what would actually drop, not the raw number. So is
+one whose only newly reached partition is a table you detached by hand: its `pgpm.part` row still says attached,
+but `retire` never drops it (it logs `fail_retain_drop`, see [`retire`](#retire)).
 
 Loosening does not reopen a partition that chunked archiving has already begun to cover: its write
 block stays, it is archived to completion, and the tick that keeps the block logs

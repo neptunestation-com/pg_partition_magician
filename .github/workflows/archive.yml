@@ -38,6 +38,7 @@ on:
     paths:
       - 'pgpm_archive/install.sql'
       - 'pgpm_core/install.sql'
+      - 'pgpm_core/uninstall.sql'
       - 'tests/archive/**'
       - 'bench/archive_*.sh'
       - 'bench/reads_under_caller_rls.sh'
@@ -53,6 +54,7 @@ on:
     paths:
       - 'pgpm_archive/install.sql'
       - 'pgpm_core/install.sql'
+      - 'pgpm_core/uninstall.sql'
       - 'tests/archive/**'
       - 'bench/archive_*.sh'
       - 'bench/reads_under_caller_rls.sh'
