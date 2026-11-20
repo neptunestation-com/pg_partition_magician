@@ -14,7 +14,7 @@
 -- to return exactly the one declaration left unmatched.
 create extension if not exists pgtap;
 
-select plan(77);
+select plan(78);
 
 create schema st;
 
@@ -465,6 +465,14 @@ select is(
   (select array_agg(invariant || '=' || expected order by invariant) from pgpm_formal.judged()),
   array['ArchiveNoClobber=1', 'DropOnlyCovered=1', 'NoDuplicateRow=2', 'NoLostRow=5', 'NoWedge=3', 'ResolveByRecord=4'],
   'judged() counts the declarations per invariant');
+-- Every declaration above but the two unused matched a violation, and a violation is of an identity check() judged, so
+-- each invariant judged() names with a declaration must count at least one identity. Not a premise: judged() is the
+-- oracle's output, and one that reports nothing judged where check() found violations is the zero-judged reading the
+-- track's witness (tests/formal/summarize.py) fails on, here held to what check() just reported (W5).
+select is(
+  (select array_agg(invariant order by invariant) from pgpm_formal.judged() where expected > 0 and identities = 0),
+  null::text[],
+  'judged() counts the identities of every invariant whose violations check() reported');
 select is(
   (select array_agg(invariant order by invariant) from pgpm_formal.judged() where judged and identities > 0),
   array['ArchiveNoClobber', 'DropOnlyCovered', 'NoDuplicateRow', 'NoLostRow', 'NoWedge', 'ResolveByRecord'],

@@ -4,6 +4,7 @@ docs/formal/phase3-design.md "Guards on the oracle"). test.sh calls it at the en
 same way, so a local run and a CI job read one summary.
 
   summarize.py <core|archive|timescale> <log dir> [title]
+  summarize.py --selftest      the liveness rule below against tracks built to pass and to fail
 
 The log dir holds one <file>.oracle per test file, the lines tests/formal/report.sql writes (L, S, E, V, J; its header
 says what each is), plus an E line from the runner when the oracle's session failed. Prints the summary and writes it
@@ -46,7 +47,53 @@ def custody(track):
     return base, unbased
 
 
+def liveness_failures(track, stats, errors, no_ledger, files):
+    """What fails the track: the oracle failing to look (see the module's docstring), never what it saw."""
+    fail = []
+    for inv in REQUIRED[track]:
+        if stats[inv]["ids"] == 0:
+            fail.append("%s judged zero identities on the %s track, which should reach it" % (inv, track))
+    if errors:
+        fail.append("%d oracle error(s)" % len(errors))
+    for p in no_ledger:
+        fail.append("%s is a baselined custody file and left %s" % (p, "no report" if p not in files else "no ledger"))
+    return fail
+
+
+def selftest():
+    """liveness_failures() against tracks built to pass and to fail (W5: bench/formal_summarize_selftest.sh runs it, and
+    bench/mutations/mutate.py's summarize_zero_judged_passes is required to fail it). Exit status 0 when every case
+    holds."""
+    def stats_of(ids):
+        st = {i: collections.Counter() for i in INVARIANTS}
+        for inv, n in ids.items():
+            st[inv]["ids"] = n
+        return st
+    every = {i: 7 for i in INVARIANTS}
+    cases = [
+        ("LIVENESS: every invariant judged on every track", [(t, stats_of(every), [], []) for t in REQUIRED], 0),
+        ("a required invariant judged zero identities fails its track",
+         [("core", stats_of(dict(every, NoWedge=0)), [], [])], 1),
+        ("the archive track fails when ArchiveNoClobber judged nothing",
+         [("archive", stats_of(dict(every, ArchiveNoClobber=0)), [], [])], 1),
+        ("an invariant a track need not reach may judge nothing",
+         [("timescale", stats_of(dict(every, NoWedge=0, DropOnlyCovered=0, ArchiveNoClobber=0)), [], [])], 0),
+        ("an oracle error fails the track", [("core", stats_of(every), [("tests/x", "check() raised")], [])], 1),
+        ("a baselined custody file with no report fails the track", [("core", stats_of(every), [], ["tests/y"])], 1),
+    ]
+    bad = 0
+    for desc, runs, want in cases:
+        got = sum(len(liveness_failures(t, st, err, nl, {})) for t, st, err, nl in runs)
+        ok = (got > 0) == (want > 0)
+        print("%s - %s" % ("ok" if ok else "not ok", desc))
+        bad += 0 if ok else 1
+    print("summarize.py selftest: %s" % ("PASS" if bad == 0 else "FAIL (%d case(s))" % bad))
+    return 1 if bad else 0
+
+
 def main():
+    if sys.argv[1:] == ["--selftest"]:
+        return selftest()
     track, logdir = sys.argv[1], sys.argv[2]
     title = sys.argv[3] if len(sys.argv) > 3 else track
     files = {}
@@ -143,14 +190,7 @@ def main():
             if len(vs) > 3:
                 out.append("    ... and %d more" % (len(vs) - 3))
 
-    fail = []
-    for inv in REQUIRED[track]:
-        if stats[inv]["ids"] == 0:
-            fail.append("%s judged zero identities on the %s track, which should reach it" % (inv, track))
-    if errors:
-        fail.append("%d oracle error(s)" % len(errors))
-    for p in no_ledger:
-        fail.append("%s is a baselined custody file and left %s" % (p, "no report" if p not in files else "no ledger"))
+    fail = liveness_failures(track, stats, errors, no_ledger, files)
     out.append("LIVENESS (fails the track): " + ("PASS" if not fail else "FAIL"))
     for f in fail:
         out.append("  FAIL " + f)
