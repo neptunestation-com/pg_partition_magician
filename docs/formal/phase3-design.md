@@ -208,6 +208,56 @@ The oracle is a guard, so `CLAUDE.md`'s rules apply to it:
 - **Liveness.** Each run prints, per invariant, how many files it judged and how many identities it checked.
   A judged share of zero for an invariant on a track that should reach it fails the track.
 
+### What W5 built and measured
+
+`bench/formal_discriminate.sh` turns the oracle's report into a guard's verdict. It installs an install of pgpm (the
+real one, or a mutant `bench/discriminate.sh` built) with the oracle in a fresh template, runs the named custody
+files each in a clone, runs `tests/formal/report.sql` after each, and fails when `check()` names a violation of ONE
+invariant that no `expect()` declared. It fails as unwitnessed (`FAIL  LIVENESS:`, which `discriminate.sh` reads as
+a starved fixture) when that invariant judged no identity in a file, or when the oracle raised. The files' own
+assertions never decide it: their TAP stays in `bench/results/formal/`, and the guard prints only whether they
+passed. With `--archive` it builds the archive track's template, makes the MinIO bucket and the pyarrow venv where
+the job lacks them, and loads each file's retired objects into the report as `run_archive` does. A wrapper per
+invariant names the files; `run_perf` (and `run_archive` for the archive one) runs each on clean code.
+
+Every row below was run as `discriminate.sh` runs it (build, install, the guard must fail on more than a premise)
+and its guard on clean code, on PostgreSQL 17, the archive one against MinIO:
+
+| Invariant | pgpm mutation | Files | Identity reported under the mutant | Oracle mutation | Caught by |
+|---|---|---|---|---|---|
+| NoLostRow | `formal_regrain_reconcile_discards_delta` (#916) | tests/110, 120, 136 | rc110 `[25]`, rfa `[20050]`, ev and evn row 5 | `oracle_nolostrow_ignores_custody` | self-test: "NoLostRow counts a row in custody as kept" |
+| NoDuplicateRow | none on the core or archive tracks (below) | | | `oracle_noduplicaterow_unjudged` | self-test: the keyless third copy, the copy in custody |
+| DropOnlyCovered | `formal_retire_drops_uncovered` (novel: no coverage asked, pre-#238) and `formal_archive_retired_unmarked` (#1141) | tests/64, 130 | rg64a `[16]` to `[100]`, rs130a `[1]`: no retired chunk holds it | `oracle_droponlycovered_unjudged` | self-test: the shrunk chunk `[19]` |
+| ArchiveNoClobber | `formal_archive_recorded_chunk_rows_unchecked` (#975 F5-03, #1069) | tests/archive/db/42 | t42.nd `[1]` in `t42.nd_0.ndjson`, t42.pq `[1]` in `t42.pq_0.parquet`: 160 of 160 | `oracle_archivenoclobber_unjudged` | self-test: the object that lost `[40]` |
+| ResolveByRecord | `formal_retire_drop_child_oid_ignored` (#428 of #407 and #421) | tests/103 | `public.rb103_p0000000000000000000`, dropped by pgpm | `oracle_resolvebyrecord_drops_unjudged` | self-test: the unanchored row, the pgpm-framed drop |
+| NoWedge | `formal_mark_retired_chunks_unplaced_live_marked` (PR #1351 P1-01) | tests/346 | t346.e `chunk <lo>` of a live partition | `oracle_nowedge_chunks_unjudged` and `oracle_nowedge_judged_zero` | self-test: `chunk 70`; judged() held to check()'s violations |
+| the track witness | | | | `summarize_zero_judged_passes` (tests/formal/summarize.py) | `summarize.py --selftest` |
+
+The pgpm mutations reuse the catalogue's edits by reference (`MUTATIONS[...][2]`), so a pattern that drifts is
+refused once, for both of its guards; only `formal_retire_drops_uncovered` is new. Several files fail their own
+assertions under these mutants too (tests/64, 103, 110, 120, 130, 136, 346, archive/db/42); the formal guard failed
+through the oracle in every case. Three things W5 learned:
+
+- **The catalogue's coverage mutations are not DropOnlyCovered's defects.** `retire_trusts_unguarded_coverage`,
+  `retire_drops_on_contradicted_coverage` and `archive_successor_coverage_counted` all drop rows a chunk's RANGE
+  covers but no object holds, so DropOnlyCovered (a retired chunk names the row's value, and pgpm dropped its
+  relation) holds under each over tests/309, 330 and 130. They are ArchiveNoClobber's to catch, on the archive
+  track. DropOnlyCovered's defects are a drop no chunk records at all, which only the novel gate removal and
+  `archive_retired_unmarked` put back.
+- **A zeroed judged() count was caught only by a premise.** The self-test's last assertion, "LIVENESS: the last
+  check() judged every invariant", was the only one `oracle_nowedge_judged_zero` failed, which `discriminate.sh`
+  rightly reads as starved. The self-test now holds judged() to what check() reported (an invariant with matched
+  declarations counts at least one identity), an assertion about the oracle's output and not a premise.
+- **NoDuplicateRow is not discriminated by a pgpm mutation.** Through the parent, a keyed table's key is unique
+  across its partitions, so a second copy of a row cannot be visible there; across the parent and custody it needs
+  rows copied into a relation pgpm's retirement holds, which no path of pgpm does; and regrain, the one core path
+  that copies rows, refuses a keyless table. So on the core and archive tracks no catalogue defect makes it fire,
+  and a novel one would have to be a defect pgpm cannot have. The one keyless path that moves rows
+  is the hypertable cutover, and the catalogue has its defect: `hypertable_cutover_reads_copy_unlocked` (#1158)
+  doubles the drained rows in tests/timescale/db/64 (K). That file keeps no ledger (it sets no retention, so it is
+  not a custody file) and the guard has no timescale mode; both are W6's if NoDuplicateRow is to be discriminated.
+  The oracle's own NoDuplicateRow check is discriminated (`oracle_noduplicaterow_unjudged`).
+
 ## Measured before it is relied on
 
 Three things this note assumes, each checked in W2 with a test of its own:
