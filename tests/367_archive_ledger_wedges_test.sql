@@ -83,14 +83,20 @@ end $$;
 
 -- ============ PART A: rows that cover nothing, left by an older install ============
 select pgpm_t367.mk('ac367a', array[1, 2, 3]);
+select pgpm_formal.baseline('public.ac367a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 select pgpm_t367.mk('ac367b', array[11, 12, 13, 14, 15]);
+select pgpm_formal.baseline('public.ac367b');
 select pgpm_t367.mk('ac367c', array[21, 22]);
+select pgpm_formal.baseline('public.ac367c');
 call pgpm.transmute('public.ac367a', 'id', 1000::bigint, p_retain => 19000, p_paused => false);
 call pgpm.transmute('public.ac367b', 'id', 1000::bigint, p_retain => 19000, p_paused => false);
 call pgpm.transmute('public.ac367c', 'id', 1000::bigint, p_retain => 19000, p_paused => false);
 insert into public.ac367a values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367a', 'id = 20000');
 insert into public.ac367b values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367b', 'id = 20000');
 insert into public.ac367c values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367c', 'id = 20000');
 select child_name as a_child, child_oid as a_oid from pgpm.part where parent_table = 'public.ac367a'::regclass and lo = '0' \gset
 select child_name as b_child, child_oid as b_oid from pgpm.part where parent_table = 'public.ac367b'::regclass and lo = '0' \gset
 select child_name as c_child, child_oid as c_oid from pgpm.part where parent_table = 'public.ac367c'::regclass and lo = '0' \gset
@@ -98,6 +104,7 @@ select pgpm._enforce_write_blocks(p) from unnest(array['public.ac367a', 'public.
 select pgpm.set_archive_fn(p, 'pgpm_t367.full(regclass,name,text,text)'::regprocedure)
   from unnest(array['public.ac367a', 'public.ac367b', 'public.ac367c']::regclass[]) p;
 select pgpm_t367.mk('ac367n', array[41]);
+select pgpm_formal.baseline('public.ac367n');
 call pgpm.transmute('public.ac367n', 'id', 1000::bigint, p_retain => 19000, p_paused => false);
 select child_name as n_child, child_oid as n_oid from pgpm.part where parent_table = 'public.ac367n'::regclass and lo = '0' \gset
 -- a row whose hi is not a value of the column, which an older archive step recorded (reference.md, the contract check)
@@ -113,8 +120,10 @@ insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived
   ('public.ac367a', '-5000', '-5000', 'ac367a_gone', 0, null, now());
 -- an install older than v0.6.0, upgraded: its oid backfill marked the empty row retired (no oid, an adopted anchor)
 select pgpm_t367.mk('ac367r', array[71, 72, 73, 74]);
+select pgpm_formal.baseline('public.ac367r');
 call pgpm.transmute('public.ac367r', 'id', 1000::bigint, p_retain => 19000, p_paused => false);
 insert into public.ac367r values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367r', 'id = 20000');
 select child_name as r_child from pgpm.part where parent_table = 'public.ac367r'::regclass and lo = '0' \gset
 select pgpm._enforce_write_blocks('public.ac367r');
 select pgpm.set_archive_fn('public.ac367r', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
@@ -123,6 +132,7 @@ insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived
 -- a time grid's retired chunk covering years, its hi written as digits, at the lo its partition holds
 create table public.ac367t (id bigint, ts timestamptz not null);
 insert into public.ac367t select g, '2026-01-01 00:00:00+00'::timestamptz + (g || ' hours')::interval from generate_series(1, 6) g;
+select pgpm_formal.baseline('public.ac367t');
 call pgpm.transmute('public.ac367t', 'ts', '1 month'::interval, p_retain => '5 years'::interval, p_paused => false);
 select lo as t_lo from pgpm.part where parent_table = 'public.ac367t'::regclass and attached order by lo::timestamptz limit 1 \gset
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, rows_archived, child_oid, retired_at) values
@@ -163,9 +173,12 @@ select is(pgpm_t367.ledger('public.ac367c'), array[format('%s:0-400:live', :'c_c
 -- ============ PART B: two partitions' names swapped, the ledger left behind ============
 create table public.ac367s (id bigint primary key, payload text);
 insert into public.ac367s select g, 'p' || g from unnest(array[1, 2, 3, 4]) g;
+select pgpm_formal.baseline('public.ac367s');
 call pgpm.transmute('public.ac367s', 'id', 1000::bigint, p_retain => 17000, p_paused => false);
 insert into public.ac367s select g, 'p' || g from unnest(array[1001, 1002, 1003, 1004, 1005, 1006, 2001]) g;
+select pgpm_formal.wrote('public.ac367s', 'id between 1001 and 2001');
 insert into public.ac367s values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367s', 'id = 20000');
 select child_name as s0, child_oid as s0_oid from pgpm.part where parent_table = 'public.ac367s'::regclass and lo = '0' \gset
 select child_name as s1, child_oid as s1_oid from pgpm.part where parent_table = 'public.ac367s'::regclass and lo = '1000' \gset
 select child_name as s2, child_oid as s2_oid from pgpm.part where parent_table = 'public.ac367s'::regclass and lo = '2000' \gset
@@ -210,9 +223,11 @@ select is((select array_agg(rows_archived order by lo::numeric) from pgpm.archiv
 -- ============ PART C: a skip that recurs is counted ============
 create table public.ac367k (id bigint primary key, payload text);
 insert into public.ac367k select g, 'p' || g from generate_series(31, 39) g;
+select pgpm_formal.baseline('public.ac367k');
 call pgpm.transmute('public.ac367k', 'id', 1000::bigint, p_retain => 19000, p_paused => false);
 update pgpm.part set created_at = created_at - interval '1 hour' where parent_table = 'public.ac367k'::regclass;
 insert into public.ac367k values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367k', 'id = 20000');
 select pgpm._enforce_write_blocks('public.ac367k');
 select pgpm.set_archive_fn('public.ac367k', 'pgpm_t367.boom(regclass,name,text,text)'::regprocedure);
 select is((select archive_skips from pgpm.status() where parent = 'public.ac367k'::regclass), 0::bigint, 'C: no skip yet');
@@ -255,10 +270,13 @@ begin
 end $$;
 create table public.ac367d (id bigint primary key, payload text);
 insert into public.ac367d select g, 'p' || g from unnest(array[51, 52, 53, 54, 55, 56, 57]) g;
+select pgpm_formal.baseline('public.ac367d');
 call pgpm.transmute('public.ac367d', 'id', 1000::bigint, p_retain => 17000, p_paused => false);
 update pgpm.part set created_at = created_at - interval '1 hour' where parent_table = 'public.ac367d'::regclass;
 insert into public.ac367d select g, 'p' || g from unnest(array[1001, 1102, 1203]) g;
+select pgpm_formal.wrote('public.ac367d', 'id in (1001, 1102, 1203)');
 insert into public.ac367d values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367d', 'id = 20000');
 select child_name as d1 from pgpm.part where parent_table = 'public.ac367d'::regclass and lo = '1000' \gset
 update pgpm.config set archive_batch = 2 where parent_table = 'public.ac367d'::regclass;
 select pgpm._enforce_write_blocks('public.ac367d');
@@ -283,9 +301,11 @@ select is((select archive_skips from pgpm.status() where parent = 'public.ac367d
 -- ============ PART E: a regrain's copy at the same lo ============
 create table public.ac367e (id bigint primary key, payload text);
 insert into public.ac367e select g, 'p' || g from generate_series(61, 1661) g;
+select pgpm_formal.baseline('public.ac367e');
 call pgpm.transmute('public.ac367e', 'id', 1000::bigint, p_retain => 15000, p_paused => false);
 update pgpm.part set created_at = created_at - interval '3 hours' where parent_table = 'public.ac367e'::regclass;
 insert into public.ac367e values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367e', 'id = 20000');
 select child_name as e0 from pgpm.part where parent_table = 'public.ac367e'::regclass and lo = '0' and attached \gset
 select pgpm._enforce_write_blocks('public.ac367e');
 select pgpm.set_archive_fn('public.ac367e', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
@@ -306,9 +326,11 @@ select is((select archive_skips from pgpm.status() where parent = 'public.ac367e
 -- ============ PART F: the regrain's swap ============
 create table public.ac367f (id bigint primary key, payload text);
 insert into public.ac367f select g, 'p' || g from generate_series(81, 1681) g;
+select pgpm_formal.baseline('public.ac367f');
 call pgpm.transmute('public.ac367f', 'id', 1000::bigint, p_retain => 15000, p_paused => false);
 update pgpm.part set created_at = created_at - interval '3 hours' where parent_table = 'public.ac367f'::regclass;
 insert into public.ac367f values (20000, 'frontier');
+select pgpm_formal.wrote('public.ac367f', 'id = 20000');
 select pgpm._enforce_write_blocks('public.ac367f');
 select pgpm.set_archive_fn('public.ac367f', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
 -- one transient skip of the source, ticks ago, then its chunk
@@ -337,9 +359,11 @@ select is((select archive_skips from pgpm.status() where parent = 'public.ac367f
 -- ============ PART G: the swap deletes the parent's only chunk (#1468) ============
 create table public.ac367g (id bigint primary key, payload text);
 insert into public.ac367g select g, 'p' || g from generate_series(81, 881) g;
+select pgpm_formal.baseline('public.ac367g');
 call pgpm.transmute('public.ac367g', 'id', 1000::bigint, p_retain => 15000, p_paused => false);
 update pgpm.part set created_at = created_at - interval '3 hours' where parent_table = 'public.ac367g'::regclass;
 insert into public.ac367g values (16000, 'frontier');
+select pgpm_formal.wrote('public.ac367g', 'id = 16000');
 select pgpm._enforce_write_blocks('public.ac367g');
 select pgpm.set_archive_fn('public.ac367g', 'pgpm_t367.full(regclass,name,text,text)'::regprocedure);
 -- one transient whole-step skip, hours ago, then the chunk that cleared it

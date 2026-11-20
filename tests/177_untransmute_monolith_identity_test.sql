@@ -23,14 +23,17 @@ select plan(20);
 -- ======================================================================================================
 create table public.rt177 (id bigint primary key, body text);
 insert into public.rt177 select g, 'b' || g from generate_series(1, 5) g;   -- monolith [0, 10)
+select pgpm_formal.baseline('public.rt177');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 create temp table orig177 as select 'public.rt177'::regclass::oid as oid;
 
 call pgpm.transmute('public.rt177', 'id', 10::bigint, p_obtain => 3, p_retain => 10, p_paused => false);
 select is((select monolith_oid from pgpm.config where parent_table = 'public.rt177'::regclass), (select oid from orig177),
   'transmute records the original table''s oid as the monolith');
 insert into public.rt177 values (25, 'x'), (35, 'y');
+select pgpm_formal.wrote('public.rt177', 'id in (25, 35)');
 call pgpm.maintain_all();   -- retention retires [0, 10) (the monolith) and [10, 20)
 delete from public.rt177 where id = 35;
+select pgpm_formal.deleted('public.rt177', 'id = 35');
 
 select ok(not exists (select 1 from pg_class where oid = (select oid from orig177)),
   'LIVENESS: (A) the original table (the monolith) has been retired by retention');
@@ -61,15 +64,18 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.rt177
 -- ======================================================================================================
 create table public.rg177 (id bigint primary key, body text);
 insert into public.rg177 values (1, 'a'), (2, 'b'), (3, 'c'), (150, 'wide');   -- monolith [0, 200)
+select pgpm_formal.baseline('public.rg177');
 create temp table orig177b as select 'public.rg177'::regclass::oid as oid;
 
 call pgpm.transmute('public.rg177', 'id', 100::bigint, p_obtain => 3);
 insert into public.rg177 values (250, 'frontier');   -- past B: the monolith is frozen and regrainable
+select pgpm_formal.wrote('public.rg177', 'id = 250');
 select child_name as mon177b from pgpm.part
  where parent_table = 'public.rg177'::regclass and child_oid = (select oid from orig177b) \gset
 select is(pgpm.regrain('public.rg177', :'mon177b', '50'), 4,
   'LIVENESS: (B) the regrain swapped the monolith for four fine children');
 delete from public.rg177 where id in (150, 250);
+select pgpm_formal.deleted('public.rg177', 'id in (150, 250)');
 
 select ok(not exists (select 1 from pg_class where oid = (select oid from orig177b)),
   'LIVENESS: (B) the original table (the monolith) is gone, dropped by the swap');
@@ -95,9 +101,11 @@ select is((select array_agg(id order by id) from public.rg177), array[1, 2, 3]::
 -- ======================================================================================================
 create table public.ok177 (id bigint primary key, body text);
 insert into public.ok177 values (1, 'a'), (2, 'b'), (7, 'c');
+select pgpm_formal.baseline('public.ok177');
 create temp table orig177c as select 'public.ok177'::regclass::oid as oid;
 call pgpm.transmute('public.ok177', 'id', 10::bigint, p_obtain => 3);
 delete from public.ok177 where id = 2;
+select pgpm_formal.deleted('public.ok177', 'id = 2');
 
 select is(pgpm.untransmute('public.ok177')::oid, (select oid from orig177c),
   '(C) with the monolith intact untransmute goes through and hands back the original relation');

@@ -81,6 +81,12 @@ begin
     commit;
   end loop;
 end $$;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md): after the DO block, which transmutes each table
+-- in the same loop that fills it, so this is the first top-level point; every archive and retain step comes later
+select pgpm_formal.baseline('public.t325_wh');
+select pgpm_formal.baseline('public.t325_st');
+select pgpm_formal.baseline('public.t325_lt');
+select pgpm_formal.baseline('public.t325_rr');
 
 -- The race. Opens the detach of p_child and holds it; runs p_call in the archive session (under p_lock_timeout
 -- when given, inside a REPEATABLE READ transaction whose snapshot predates the detach's commit when p_rr);
@@ -204,6 +210,7 @@ select is((select string_agg(id::text, ',' order by id) from public.t325_st wher
   'B: attached back, retain() keeps ids 7, 42 and 88');
 
 -- ---------------------------------------------------------------- PART C: under maintain()'s lock_timeout
+select pgpm_formal.operator_owns(format('public.%I', :'lt0')::regclass);   -- part C detaches it by hand and keeps it
 select * from t325.race('public.t325_lt', :'lt0',
   $$select pgpm._archive_step('public.t325_lt'::regclass)$$, false, '200ms') \gset c_
 select ok(:'c_detach_held'::boolean, 'LIVENESS: C: the operator''s DETACH held the parent''s lock, uncommitted, when the step started');

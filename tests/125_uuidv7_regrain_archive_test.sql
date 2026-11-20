@@ -34,12 +34,14 @@ insert into public.u7r (id, payload)
 select pgpm._ts_to_uuid(ts), 'r' || row_number() over (order by ts)
   from generate_series(date_trunc('month', now()) - interval '2 months',
                        now() - interval '1 minute', interval '1 hour') ts;
+select pgpm_formal.baseline('public.u7r');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.u7r', 'id', interval '1 month', p_obtain => 4, p_paused => false,
                     p_regrain_batch => 100);
 select pgpm.obtain('public.u7r');
 -- a write three months ahead lands in a forward partition and moves the frontier past the monolith
 insert into public.u7r (id, payload)
   values (pgpm._ts_to_uuid(date_trunc('month', now()) + interval '3 months 1 day'), 'frontier');
+select pgpm_formal.wrote('public.u7r', $$payload = 'frontier'$$);
 
 select child_name as mono_r from pgpm.part
  where parent_table = 'public.u7r'::regclass and attached order by lo::timestamptz limit 1 \gset
@@ -92,11 +94,13 @@ insert into public.u7a (id, payload)
 select pgpm._ts_to_uuid(ts), 'a' || row_number() over (order by ts)
   from generate_series(date_trunc('month', now()) - interval '2 months',
                        now() - interval '1 minute', interval '1 day') ts;
+select pgpm_formal.baseline('public.u7a');
 call pgpm.transmute('public.u7a', 'id', interval '1 month', p_obtain => 4, p_paused => false,
                     p_retain => interval '1 month');
 select pgpm.obtain('public.u7a');
 insert into public.u7a (id, payload)
   values (pgpm._ts_to_uuid(date_trunc('month', now()) + interval '3 months 1 day'), 'frontier');
+select pgpm_formal.wrote('public.u7a', $$payload = 'frontier'$$);
 -- A 400-byte budget against ~50-byte rows forces the aged month into several chunks in part (C), which
 -- is the only way the chunk boundary's tie extension (the min() site) is reached at all.
 update pgpm.config set archive_byte_budget = 400 where parent_table = 'public.u7a'::regclass;

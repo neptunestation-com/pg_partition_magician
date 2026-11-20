@@ -72,18 +72,22 @@ $$;
 -- two parents whose doomed partition an incoming foreign key makes retire by a concurrent detach
 create table public.vp4 (id bigint primary key, payload text);
 insert into public.vp4 values (1, 'a'), (2, 'b'), (3, 'c');
+select pgpm_formal.baseline('public.vp4');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.vp4', 'id', 10000::bigint, p_retain => 35000, p_paused => false);
 select pgpm.extend_to('public.vp4', '60000');
 insert into public.vp4 values (50005, 'frontier');
+select pgpm_formal.wrote('public.vp4', 'id = 50005');
 create table public.vp4_ref (id bigint primary key, p_id bigint references public.vp4(id));
 insert into public.vp4_ref values (1, 50005);
 select child_name as doomed, child_oid as doomed_oid from pgpm.part where parent_table = 'public.vp4'::regclass and lo = '0' \gset
 
 create table public.vq4 (id bigint primary key, payload text);
 insert into public.vq4 values (11, 'p'), (12, 'q');
+select pgpm_formal.baseline('public.vq4');
 call pgpm.transmute('public.vq4', 'id', 10000::bigint, p_retain => 35000, p_paused => false);
 select pgpm.extend_to('public.vq4', '60000');
 insert into public.vq4 values (50007, 'frontier');
+select pgpm_formal.wrote('public.vq4', 'id = 50007');
 create table public.vq4_ref (id bigint primary key, p_id bigint references public.vq4(id));
 insert into public.vq4_ref values (1, 50007);
 select child_name as q_doomed, child_oid as q_doomed_oid from pgpm.part where parent_table = 'public.vq4'::regclass and lo = '0' \gset
@@ -94,12 +98,15 @@ select ok(pgpm._retain_boundary(c) is not null and '0' < pgpm._retain_boundary(c
 -- ====== PART A: the DEFAULT is there before the first dispatch, and a row crosses ======
 create table public.vr4 (id bigint primary key, payload text);
 insert into public.vr4 values (21, 'w'), (22, 'x'), (23, 'y'), (24, 'z');
+select pgpm_formal.baseline('public.vr4');
 call pgpm.transmute('public.vr4', 'id', 10000::bigint, p_retain => 35000, p_paused => false);
 select pgpm.extend_to('public.vr4', '60000');
 insert into public.vr4 values (50009, 'frontier');
+select pgpm_formal.wrote('public.vr4', 'id = 50009');
 create table public.vr4_ref (id bigint primary key, p_id bigint references public.vr4(id) on delete cascade);
 insert into public.vr4_ref values (1, 22), (2, 50009);
 create table public.vr4_default partition of public.vr4 default;
+select pgpm_formal.operator_owns('public.vr4_default');   -- the operator's DEFAULT partition
 select child_name as r_doomed, child_oid as r_doomed_oid from pgpm.part where parent_table = 'public.vr4'::regclass and lo = '0' \gset
 select is(pgpm._crossing_keys('public.vr4', '0', '10000'), array['22'], 'A: LIVENESS: a referencing row crosses into the doomed range');
 select ok(pgpm_t366.armed() = 'select 1' and not exists (select 1 from pgpm.part where retiring_at is not null),
@@ -119,6 +126,7 @@ select ok((select retain_drop_failures from pgpm.status() where parent = 'public
 select ok(not pgpm.retire('public.vp4', :'doomed'), 'B: fixture: retire() dispatches vp4''s concurrent detach');
 select is(pgpm_t366.armed() ~ 'detach partition' and pgpm_t366.armed() ~ :'doomed', true, 'B: LIVENESS: the job holds vp4''s detach');
 create table public.vp4_default partition of public.vp4 default;
+select pgpm_formal.operator_owns('public.vp4_default');   -- the operator's DEFAULT partition
 select is(pgpm_t366.run(), 'ERROR', 'B: LIVENESS: pg_cron''s run of the detach is refused (a DEFAULT partition exists)');
 select ok(pgpm_t366.attached(:doomed_oid), 'B: LIVENESS: and the partition stays attached');
 select is(coalesce(array_length(pgpm._crossing_keys('public.vp4', '0', '10000'), 1), 0), 0,
@@ -167,17 +175,21 @@ select ok(not exists (select 1 from pg_class where oid = :q_doomed_oid)
 -- ====== PART D: a pending detach keeps the slot under a DEFAULT ======
 create table public.vs4 (id bigint primary key, payload text);
 insert into public.vs4 values (31, 'm'), (32, 'n');
+select pgpm_formal.baseline('public.vs4');
 call pgpm.transmute('public.vs4', 'id', 10000::bigint, p_retain => 35000, p_paused => false);
 select pgpm.extend_to('public.vs4', '60000');
 insert into public.vs4 values (50011, 'frontier');
+select pgpm_formal.wrote('public.vs4', 'id = 50011');
 create table public.vs4_ref (id bigint primary key, p_id bigint references public.vs4(id));
 insert into public.vs4_ref values (1, 50011);
 select child_name as s_doomed, child_oid as s_doomed_oid from pgpm.part where parent_table = 'public.vs4'::regclass and lo = '0' \gset
 create table public.vt4 (id bigint primary key, payload text);
 insert into public.vt4 values (41, 'r'), (42, 's'), (43, 't');
+select pgpm_formal.baseline('public.vt4');
 call pgpm.transmute('public.vt4', 'id', 10000::bigint, p_retain => 35000, p_paused => false);
 select pgpm.extend_to('public.vt4', '60000');
 insert into public.vt4 values (50013, 'frontier');
+select pgpm_formal.wrote('public.vt4', 'id = 50013');
 create table public.vt4_ref (id bigint primary key, p_id bigint references public.vt4(id));
 insert into public.vt4_ref values (1, 50013);
 select child_name as t_doomed from pgpm.part where parent_table = 'public.vt4'::regclass and lo = '0' \gset
@@ -193,6 +205,7 @@ select dblink_exec('t366_blk', 'commit');
 select dblink_disconnect('t366_blk');
 select ok(exists (select 1 from pg_inherits where inhrelid = :s_doomed_oid and inhdetachpending), 'D: LIVENESS: vs4''s detach is pending');
 create table public.vs4_default partition of public.vs4 default;
+select pgpm_formal.operator_owns('public.vs4_default');   -- the operator's DEFAULT partition
 select ok(exists (select 1 from pg_partitioned_table where partrelid = 'public.vs4'::regclass and partdefid <> 0), 'D: LIVENESS: vs4 has a DEFAULT partition');
 update cron.job set command = 'select 1';   -- a tick's idle could free the job; the slot must hold regardless
 

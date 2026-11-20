@@ -52,9 +52,11 @@ $$;
 -- ================= PART A: write block on, writes refused, block off, retire per tick =================
 create table pgpm_t197_old.ra (id bigint primary key, payload text);
 insert into pgpm_t197_old.ra values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('pgpm_t197_old.ra');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('pgpm_t197_old.ra', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('pgpm_t197_old.ra', '60');
 insert into pgpm_t197_old.ra values (22, 'aged'), (31, 'live'), (33, 'live'), (55, 'frontier');
+select pgpm_formal.wrote('pgpm_t197_old.ra', 'id in (22, 31, 33, 55)');
 update pgpm.config set retain_batch = 1 where parent_table = 'pgpm_t197_old.ra'::regclass;
 
 select pgpm_t197_old.oid_of('pgpm_t197_old.ra', '0') as a_mono_oid \gset
@@ -98,6 +100,7 @@ select ok(pgpm_t197_old.alive(:a_20_oid) and not pgpm_t197_old.blocked(:a_20_oid
   'A tick 2: the block came off [20, 30), which is still there');
 select lives_ok($$ insert into pgpm_t197_new.ra values (25, 'late') $$,
   'A tick 2: and [20, 30) takes writes again');
+select pgpm_formal.wrote('pgpm_t197_new.ra', 'id = 25');
 select is((select array_agg(id order by id) from pgpm_t197_old.:"a_20"), array[22, 25]::bigint[],
   'A tick 2: the write landed in the old-schema partition');
 
@@ -116,9 +119,11 @@ select is(pgpm_t197_old.wedges('pgpm_t197_new.ra'), 0,
 -- ================= PART B: the archive step reads and archives the old-schema partition =================
 create table pgpm_t197_old.rb (id bigint primary key, payload text);
 insert into pgpm_t197_old.rb values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('pgpm_t197_old.rb');
 call pgpm.transmute('pgpm_t197_old.rb', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('pgpm_t197_old.rb', '60');
 insert into pgpm_t197_old.rb values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('pgpm_t197_old.rb', 'id in (22, 55)');
 select pgpm.set_archive_fn('pgpm_t197_old.rb', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 
 select pgpm_t197_old.oid_of('pgpm_t197_old.rb', '0') as b_mono_oid \gset
@@ -164,9 +169,11 @@ select is(pgpm_t197_old.wedges('pgpm_t197_new.rb'), 0,
 -- ================= PART C: an unanchored row (child_oid null) is reached through the parent =================
 create table pgpm_t197_old.rc (id bigint primary key, payload text);
 insert into pgpm_t197_old.rc values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('pgpm_t197_old.rc');
 call pgpm.transmute('pgpm_t197_old.rc', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('pgpm_t197_old.rc', '60');
 insert into pgpm_t197_old.rc values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('pgpm_t197_old.rc', 'id in (22, 55)');
 
 select pgpm_t197_old.oid_of('pgpm_t197_old.rc', '0') as c_mono_oid \gset
 update pgpm.part set child_oid = null where parent_table = 'pgpm_t197_old.rc'::regclass and lo = '0';
@@ -190,9 +197,11 @@ select is(pgpm_t197_old.wedges('pgpm_t197_new.rc'), 0, 'C: and nothing was repor
 -- ================= PART D: the identity anchors still hold in the partition's own schema =================
 create table pgpm_t197_old.rd (id bigint primary key, payload text);
 insert into pgpm_t197_old.rd values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('pgpm_t197_old.rd');
 call pgpm.transmute('pgpm_t197_old.rd', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('pgpm_t197_old.rd', '60');
 insert into pgpm_t197_old.rd values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('pgpm_t197_old.rd', 'id in (22, 55)');
 
 select pgpm_t197_old.oid_of('pgpm_t197_old.rd', '0') as d_mono_oid \gset
 select pgpm_t197_old.oid_of('pgpm_t197_old.rd', '20') as d_20_oid \gset
@@ -204,6 +213,7 @@ select format('alter table pgpm_t197_old.%I rename to rd_mono_aside', :'d_mono')
 select format('create table pgpm_t197_old.%I (id bigint, payload text)', :'d_mono') \gexec
 select format('insert into pgpm_t197_old.%I values (999, %L)', :'d_mono', 'squatter') \gexec
 select format('pgpm_t197_old.%I', :'d_mono')::regclass::oid as d_squat_oid \gset
+select pgpm_formal.operator_owns(:d_squat_oid::oid::regclass);
 
 select ok(:d_squat_oid <> :d_mono_oid and pgpm_t197_old.alive(:d_mono_oid),
   'LIVENESS: (D) the name now means a different relation, and the real monolith still exists');

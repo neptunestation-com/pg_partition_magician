@@ -76,8 +76,10 @@ select array_agg(g * 10 || '=real' order by g) as want_real from generate_series
 create schema a349s;
 create table a349s.t (id bigint primary key, payload text);
 insert into a349s.t select g * 10, 'real' from generate_series(1, 99) g;
+select pgpm_formal.baseline('a349s.t');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('a349s.t', 'id', 1000, p_paused => true, p_retain => '5000');
 insert into a349s.t values (20000, 'frontier');
+select pgpm_formal.wrote('a349s.t', 'id = 20000');
 select 'a349s.t'::regclass::oid as a_parent \gset
 select is(pgpm.regrain_step('a349s.t', (select child_name from pgpm.part
     where parent_table = 'a349s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
@@ -109,6 +111,8 @@ select dblink_exec('h349', 'commit') as a8 \gset
 select coalesce(string_agg(x, ','), 'no row') as a_ret from dblink_get_result('r349', false) as t(x text) \gset
 select dblink_error_message('r349') as a_err \gset
 select count(*) as a_drained from dblink_get_result('r349', false) as t(x text) \gset
+select pgpm_formal.operator_owns(:'a_squat'::oid::regclass);
+select pgpm_formal.operator_owns(:'a_squat_part'::oid::regclass);
 select ok(:'a_squat'::oid <> :'a_parent'::oid and :'a_squat_part'::oid <> :'a_src_oid'::oid,
   'LIVENESS: A: the parent''s and the source''s names denote the strangers once the reader commits');
 
@@ -127,8 +131,10 @@ select is((select array_agg(action order by id) from pgpm.log where id > :a_mark
 create schema b349s;
 create table b349s.t (id bigint primary key, payload text);
 insert into b349s.t select g * 10, 'real' from generate_series(1, 99) g;
+select pgpm_formal.baseline('b349s.t');
 call pgpm.transmute('b349s.t', 'id', 1000, p_paused => true);
 insert into b349s.t values (20000, 'frontier');
+select pgpm_formal.wrote('b349s.t', 'id = 20000');
 select 'b349s.t'::regclass::oid as b_parent \gset
 select is(pgpm.regrain_step('b349s.t', (select child_name from pgpm.part
     where parent_table = 'b349s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
@@ -162,6 +168,8 @@ select dblink_exec('h349', 'commit') as b8 \gset
 select coalesce(string_agg(x, ','), 'no row') as b_ret from dblink_get_result('r349', false) as t(x text) \gset
 select dblink_error_message('r349') as b_err \gset
 select count(*) as b_drained from dblink_get_result('r349', false) as t(x text) \gset
+select pgpm_formal.operator_owns(:'b_squat'::oid::regclass);
+select pgpm_formal.operator_owns(:'b_squat_part'::oid::regclass);
 select ok(:'b_squat'::oid <> :'b_parent'::oid and :'b_squat_part'::oid <> :'b_src_oid'::oid,
   'LIVENESS: B: the parent''s and the source''s names denote the strangers once the reader commits');
 
@@ -182,8 +190,10 @@ select is((select array_agg(r) from unnest(pg_temp.rows_of(:'b_parent')) r where
 create schema c349s;
 create table c349s.t (id bigint primary key, payload text);
 insert into c349s.t select g * 10, 'real' from generate_series(1, 99) g;
+select pgpm_formal.baseline('c349s.t');
 call pgpm.transmute('c349s.t', 'id', 1000, p_paused => true);
 insert into c349s.t values (20000, 'frontier');
+select pgpm_formal.wrote('c349s.t', 'id = 20000');
 select 'c349s.t'::regclass::oid as c_parent \gset
 select is(pgpm.regrain_step('c349s.t', (select child_name from pgpm.part
     where parent_table = 'c349s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
@@ -215,6 +225,8 @@ select dblink_exec('h349', 'commit') as c9 \gset
 select coalesce(string_agg(x, ','), 'no row') as c_ret from dblink_get_result('r349', false) as t(x text) \gset
 select dblink_error_message('r349') as c_err \gset
 select count(*) as c_drained from dblink_get_result('r349', false) as t(x text) \gset
+select pgpm_formal.operator_owns(:'c_squat'::oid::regclass);
+select pgpm_formal.operator_owns(:'c_squat_part'::oid::regclass);
 select ok(:'c_squat_part'::oid <> :'c_src_oid'::oid, 'LIVENESS: C: the source''s name denotes the stranger''s partition now');
 
 select is(:'c_ret'::text, 'swapped:2', format('C: the swap completed on the table pgpm manages (%s)', :'c_err'));

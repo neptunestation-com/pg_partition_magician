@@ -49,6 +49,7 @@ create function t334_clock.now() returns timestamptz language sql immutable as $
 
 create table t334.t (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t334.t (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+select pgpm_formal.baseline('t334.t');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.t', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
 reset search_path;
@@ -136,6 +137,7 @@ set timezone = 'Asia/Tokyo';
 create table t334.u (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 set timezone = 'UTC';
 insert into t334.u (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+select pgpm_formal.baseline('t334.u');
 set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.u', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
 reset search_path;
@@ -159,6 +161,7 @@ set timezone = 'UTC';
 -- ends two and a half hours BEFORE that partition's lo.
 create table t334.v (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t334.v (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+select pgpm_formal.baseline('t334.v');
 set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.v', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
 reset search_path;
@@ -198,6 +201,7 @@ set timezone = 'UTC';
 set timezone = 'Asia/Tokyo';
 create table t334.w (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t334.w (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+select pgpm_formal.baseline('t334.w');
 set search_path = t334_clock, pg_catalog, public;
 call pgpm.transmute('t334.w', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
 reset search_path;

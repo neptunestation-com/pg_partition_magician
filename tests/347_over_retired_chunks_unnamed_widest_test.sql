@@ -35,6 +35,7 @@ create table t347.t (id bigint generated always as identity, ts timestamptz not 
                      primary key (id, ts));
 insert into t347.t (ts, payload)
   select timestamptz '2026-01-06 03:00:00+00' + g * interval '10 minutes', 'live' || g from generate_series(0, 11) g;
+select pgpm_formal.baseline('t347.t');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 -- the object store: one body per key, a PUT replaces it; a PUT over an object that exists is counted on a sequence,
 -- which a rollback does not undo, as an object store's PUT is not undone
 create table t347.objects (key text primary key, body text);
@@ -69,6 +70,7 @@ insert into t347.t (ts, payload) values
   ('2025-12-08 12:10:00+00', 'late1'), ('2025-12-08 12:20:00+00', 'late2'), ('2025-12-08 12:30:00+00', 'late3'),
   ('2025-12-15 07:10:00+00', 'h07a'), ('2025-12-15 08:10:00+00', 'h08a'), ('2025-12-15 08:20:00+00', 'h08b'),
   ('2025-12-15 09:10:00+00', 'h09a');
+select pgpm_formal.wrote('t347.t', 'ts < ''2026-01-06''');
 select pgpm.adopt_partition('t347.t', p) from unnest(array['t347.t_redo', 't347.h07', 't347.h08', 't347.h09']::regclass[]) p;
 
 -- what the call holds, one line per partition: its chunks, then the lo of each chunk held at its widest
@@ -190,6 +192,7 @@ create table t347.u (id bigint generated always as identity, ts timestamptz not 
                      primary key (id, ts));
 insert into t347.u (ts, payload)
   select timestamptz '2026-01-06 03:00:00+00' + g * interval '10 minutes', 'live' || g from generate_series(0, 5) g;
+select pgpm_formal.baseline('t347.u');
 call pgpm.transmute('t347.u', 'ts', interval '1 hour', p_obtain => 1, p_paused => true);
 select pgpm.set_archive_fn('t347.u', 't347.strat(regclass,name,text,text)'::regprocedure);
 select pgpm.set_retain('t347.u', '1 day');
@@ -202,6 +205,7 @@ create table t347.u_oct18 partition of t347.u for values from ('2025-10-18 00:00
 create table t347.u_oct21 partition of t347.u for values from ('2025-10-21 00:00:00+00') to ('2025-10-21 01:00:00+00');
 insert into t347.u (ts, payload) values ('2025-09-15 12:10:00+00', 'u15a'), ('2025-10-18 00:10:00+00', 'u18a'),
                                         ('2025-10-18 00:20:00+00', 'u18b'), ('2025-10-21 00:10:00+00', 'u21a');
+select pgpm_formal.wrote('t347.u', 'ts < ''2026-01-06''');
 select pgpm.adopt_partition('t347.u', p) from unnest(array['t347.u_sep15', 't347.u_oct18', 't347.u_oct21']::regclass[]) p;
 create function t347.parses(p_text text, p_style text) returns boolean language plpgsql set datestyle = 'ISO, MDY' as $$
 begin

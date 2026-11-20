@@ -77,6 +77,7 @@ insert into t314.u select g, 'mid' || g from generate_series(101, 107) g;
 insert into t314.u select g, 'far' || g from generate_series(201, 203) g;
 insert into t314.u select g, 'rep' || g from generate_series(301, 304) g;
 insert into t314.u select g, 'lift' || g from generate_series(401, 405) g;
+select pgpm_formal.baseline('t314.u');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 select child_name as u0 from pgpm.part where parent_table = 't314.u'::regclass and lo = '0' \gset
 select child_name as u1 from pgpm.part where parent_table = 't314.u'::regclass and lo = '100' \gset
 select child_name as u2 from pgpm.part where parent_table = 't314.u'::regclass and lo = '200' \gset
@@ -110,6 +111,7 @@ select is((select string_agg(format('%s|%s', p.lo, coalesce(t.tgenabled::text, '
 -- ============================ parent s: a successor the upgrade's #421 backfill adopts ============================
 call t314.mk('s', 450);
 insert into t314.s select g, 'old' || g from generate_series(1, 3) g;
+select pgpm_formal.baseline('t314.s');
 select child_name as s0 from pgpm.part where parent_table = 't314.s'::regclass and lo = '0' \gset
 select to_regclass('t314.' || quote_ident(:'s0'))::oid as s0_old \gset
 call pgpm.maintain('t314.s');
@@ -120,9 +122,11 @@ select is((select body from t314.objects where key = 't314.s/0'), t314.expect('o
 -- (the anchor is set first here only so that today's _install_write_block, which checks it, lays the block)
 select format('drop table t314.%I', :'s0') as drop_s \gset
 :drop_s;
+select pgpm_formal.deleted('t314.s', 'id between 1 and 3');   -- the test's own drop of [0, 100)
 select format('create table t314.%I partition of t314.s for values from (0) to (100)', :'s0') as mk_s \gset
 :mk_s;
 insert into t314.s values (5, 'new5'), (6, 'new6');
+select pgpm_formal.wrote('t314.s', 'id in (5, 6)');
 update pgpm.part set child_oid = to_regclass('t314.' || quote_ident(:'s0'))::oid
  where parent_table = 't314.s'::regclass and child_name = :'s0';
 select pgpm._install_write_block('t314.s', :'s0');

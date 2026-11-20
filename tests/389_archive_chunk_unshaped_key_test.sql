@@ -52,6 +52,7 @@ insert into public.oid389 values
   (pgpm_test389.oid_at('2020-06-01 00:00:00+00', 1), 9);
 insert into public.oid389
   select pgpm_test389.oid_at('2020-03-01 00:00:00+00', g), 10 + g from generate_series(1, 5) g;   -- the burst
+select pgpm_formal.baseline('public.oid389');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 
 select (now() - timestamptz '2021-06-15 00:00:00+00') as ret \gset
 call pgpm.transmute('public.oid389', 'id', interval '1 year', p_obtain => 1, p_retain => :'ret'::interval,
@@ -61,7 +62,9 @@ select pgpm.set_archive_fn('public.oid389', 'pgpm._archive_noop(regclass,name,te
 select (date_trunc('year', now()) + interval '2 years 5 months 14 days') as t_pin \gset
 select pgpm.extend_to('public.oid389', pgpm_test389.oid_at(:'t_pin'::timestamptz, 1)) as extended \gset
 insert into public.oid389 values (pgpm_test389.oid_at(:'t_pin'::timestamptz, 1), -9);
+select pgpm_formal.wrote('public.oid389', 'v = -9');
 insert into public.oid389 values (pgpm_test389.oid_at('2021-03-10 00:00:00+00', 1), -3);       -- live: must survive
+select pgpm_formal.wrote('public.oid389', 'v = -3');
 
 create table pgpm_test389.regrain as select null::text as last_status;
 do $$
@@ -84,6 +87,7 @@ insert into public.oid389 values
   (pgpm_test389.odd_after('2020-01-11 00:00:00+00'), 101),
   (pgpm_test389.odd_after('2020-01-14 00:00:00+00'), 102),
   (pgpm_test389.odd_after('2020-03-01 00:00:00+00'), 103);
+select pgpm_formal.wrote('public.oid389', 'v in (101, 102, 103)');
 -- about three rows a chunk
 update pgpm.config set archive_byte_budget = (select (avg(pg_column_size(t.*)) * 3.5)::bigint from public.oid389 t)
  where parent_table = 'public.oid389'::regclass;

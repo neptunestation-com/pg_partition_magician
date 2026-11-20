@@ -190,10 +190,10 @@ def check(listing=None, root=ROOT):
                 problems.append(f"{rel}: expect() names {inv!r}, not an invariant")
             if not why.strip():
                 problems.append(f"{rel}: expect({inv}, {ident}) gives no reason")
-        if bl:
+        if "pgpm_formal." in text:   # any call needs the schema, a baseline or not
             for r in runners_of(rel, root):
                 if not installs_oracle(os.path.join(root, r)):
-                    problems.append(f"{r}: runs {rel}, which calls pgpm_formal.baseline, and never installs tests/formal/oracle.sql")
+                    problems.append(f"{r}: runs {rel}, which calls pgpm_formal, and never installs tests/formal/oracle.sql")
     # 2: no unlisted file uses the oracle
     for d in ("tests", os.path.join("tests", "archive", "db"), os.path.join("tests", "timescale", "db")):
         for n in sorted(os.listdir(os.path.join(root, d))):

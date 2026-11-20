@@ -37,6 +37,7 @@ insert into public.ar273 values
   (now() - interval '5 hours', 'early1'),
   (now() - interval '4 hours', 'early2'),
   (now() - interval '1 hour', 'late');
+select pgpm_formal.baseline('public.ar273');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 create table public.ar273_archived (ts timestamptz, body text);
 create table public.ar273_calls (n serial primary key, p_lo text, p_hi text, covered_text text, covered_at timestamptz);
 

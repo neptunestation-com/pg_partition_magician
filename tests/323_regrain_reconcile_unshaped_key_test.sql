@@ -49,6 +49,7 @@ end $f$;
 -- partition, frozen by a row two days on, and regrained to 6 hours: S0 [T, T+6h), S1, S2, S3.
 create table public.ru (id text collate "C" primary key, payload text);
 insert into public.ru values (pg_temp.tt('2024-01-01 12:00+00') || 'H', 'history');
+select pgpm_formal.baseline('public.ru');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ru', 'id', interval '1 day', p_obtain => 4, p_paused => true,
                     p_tt_prefix => '', p_tt_width => 10, p_tt_radix => 32, p_tt_unit => 'ms',
                     p_tt_alphabet => '0123456789ABCDEFGHJKMNPQRSTVWXYZ');
@@ -72,6 +73,7 @@ insert into public.ru
   select oa, 'oa' from k union all
   select ob, 'ob' from k union all
   select pg_temp.tt(t + interval '2 days 1 hour') || 'S', 'frontier' from cell;
+select pgpm_formal.wrote('public.ru', 'payload <> ''history''');
 
 select ok((select not pg_temp.shaped(oa) and not pg_temp.shaped(ob) and not pg_temp.shaped(oc)
                   and not pg_temp.shaped(forged) and pg_temp.shaped(s1a) from k),
@@ -100,9 +102,13 @@ select is(pg_temp.child_payloads('public.ru', (select t from cell)), 'ob,s0a,s0b
 
 -- committed DML on the finished sub-ranges, and a forged delta row (#1123 P1-02's route) naming no source row
 delete from public.ru where id = (select oa from k);
+select pgpm_formal.deleted('public.ru', 'payload = ''oa''');
 update public.ru set payload = 'ob-updated' where id = (select ob from k);
+select pgpm_formal.wrote('public.ru', 'payload = ''ob-updated''');
 insert into public.ru select oc, 'oc-inserted' from k;
+select pgpm_formal.wrote('public.ru', 'payload = ''oc-inserted''');
 update public.ru set payload = 's1a-updated' where id = (select s1a from k);
+select pgpm_formal.wrote('public.ru', 'payload = ''s1a-updated''');
 select regrain_delta_oid::regclass::text as ru_delta from pgpm.config where parent_table = 'public.ru'::regclass \gset
 insert into :ru_delta (id) select forged from k;
 select is(pg_temp.delta_ids('public.ru'),
@@ -150,6 +156,7 @@ create table public.rv (id text collate "C" primary key, payload text);
 insert into public.rv select pg_temp.tt(date_trunc('day', now()) - make_interval(days => d) + interval '12 hours') || 'R', 'd' || d
   from generate_series(1, 8) d;
 insert into public.rv values (left(pg_temp.tt(date_trunc('day', now()) - interval '6 days' + interval '9 hours'), 8), 'aged-odd');
+select pgpm_formal.baseline('public.rv');
 call pgpm.transmute('public.rv', 'id', interval '1 day', p_obtain => 2, p_paused => true, p_retain => '3 days',
                     p_tt_prefix => '', p_tt_width => 10, p_tt_radix => 32, p_tt_unit => 'ms',
                     p_tt_alphabet => '0123456789ABCDEFGHJKMNPQRSTVWXYZ');
@@ -157,6 +164,7 @@ create temp table mono as
   select child_name, lo::timestamptz as lo, hi::timestamptz as hi from pgpm.part
    where parent_table = 'public.rv'::regclass and attached order by lo::timestamptz limit 1;
 insert into public.rv select pg_temp.tt(hi + interval '1 hour') || 'F', 'frontier' from mono;
+select pgpm_formal.wrote('public.rv', 'payload = ''frontier''');
 select is(pgpm.regrain_step('public.rv', (select child_name from mono), '1 day', 1000), 'prepared', 'aged: tick 1 installs capture');
 select is(pgpm.regrain_step('public.rv', (select child_name from mono), '1 day', 1000), 'copied:1',
   'aged: tick 2 skips the aged sub-ranges and copies the first one at the horizon');
@@ -167,6 +175,7 @@ select ok(not exists (select 1 from pgpm.part where parent_table = 'public.rv'::
                        and hi::timestamptz > date_trunc('day', now()) - interval '6 days'),
   'LIVENESS: in particular none holds the aged-odd row''s day');
 delete from public.rv where payload = 'aged-odd';
+select pgpm_formal.deleted('public.rv', 'payload = ''aged-odd''');
 select is(pg_temp.delta_ids('public.rv'), left(pg_temp.tt(date_trunc('day', now()) - interval '6 days' + interval '9 hours'), 8),
   'LIVENESS: the DELETE of the off-shape row is captured, below the cursor');
 select is(pgpm.regrain_step('public.rv', (select child_name from mono), '1 day', 1000), 'reconciled:1',
@@ -182,6 +191,7 @@ select is(pg_temp.delta_ids('public.rv'), null, 'the delta is clear');
 -- ============ (C) an off-shape key whose fine child is missing in a range that is not aged refuses ============
 create table public.rw (id text collate "C" primary key, payload text);
 insert into public.rw values (pg_temp.tt('2024-01-01 12:00+00') || 'H', 'history');
+select pgpm_formal.baseline('public.rw');
 call pgpm.transmute('public.rw', 'id', interval '1 day', p_obtain => 4, p_paused => true,
                     p_tt_prefix => '', p_tt_width => 10, p_tt_radix => 32, p_tt_unit => 'ms',
                     p_tt_alphabet => '0123456789ABCDEFGHJKMNPQRSTVWXYZ');
@@ -193,6 +203,7 @@ insert into public.rw
   select left(pg_temp.tt(t + interval '3 hours'), 8), 'w-odd' from cw union all
   select pg_temp.tt(t + interval '7 hours') || 'S', 'w1' from cw union all
   select pg_temp.tt(t + interval '2 days 1 hour') || 'S', 'frontier' from cw;
+select pgpm_formal.wrote('public.rw', 'payload <> ''history''');
 select is(pgpm.regrain_step('public.rw', (select child_name from cw), '6 hours', 1000), 'prepared', 'not aged: tick 1 installs capture');
 select is(pgpm.regrain_step('public.rw', (select child_name from cw), '6 hours', 1000), 'copied:2', 'not aged: tick 2 copies S0');
 select is(pgpm.regrain_step('public.rw', (select child_name from cw), '6 hours', 1000), 'copied:1', 'not aged: tick 3 copies S1');
@@ -202,6 +213,7 @@ select child_oid::regclass::text as rw_s0 from pgpm.part
 drop table :rw_s0;
 delete from pgpm.part where parent_table = 'public.rw'::regclass and not attached and lo::timestamptz = (select t from cw);
 delete from public.rw where payload = 'w-odd';
+select pgpm_formal.deleted('public.rw', 'payload = ''w-odd''');
 select is(pg_temp.delta_ids('public.rw'), (select left(pg_temp.tt(t + interval '3 hours'), 8) from cw),
   'LIVENESS: the DELETE is captured, below the cursor, in a range with no fine child and no retention policy');
 select throws_like(

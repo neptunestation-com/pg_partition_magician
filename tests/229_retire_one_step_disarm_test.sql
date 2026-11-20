@@ -36,8 +36,10 @@ insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
 -- ==================== (A) dispatched, FK dropped, finished by the one-step DROP ====================
 create table public.rd229 (id bigint primary key, payload text);
 insert into public.rd229 values (1, 'a'), (2, 'b'), (3, 'c');
+select pgpm_formal.baseline('public.rd229');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rd229', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
 insert into public.rd229 values (55, 'frontier');
+select pgpm_formal.wrote('public.rd229', 'id = 55');
 create table public.rd229_ref (id bigint primary key, rd_id bigint references public.rd229 (id));
 insert into public.rd229_ref values (100, 55);
 select child_name as a_doomed from pgpm.part where parent_table = 'public.rd229'::regclass and lo = '0' \gset
@@ -62,8 +64,10 @@ select is((select array_agg(id order by id) from public.rd229), array[55]::bigin
 -- ==================== (B) the job holds another retirement's command: left alone ====================
 create table public.rb229 (id bigint primary key, payload text);
 insert into public.rb229 values (5, 'e'), (6, 'f');
+select pgpm_formal.baseline('public.rb229');
 call pgpm.transmute('public.rb229', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
 insert into public.rb229 values (57, 'frontier');
+select pgpm_formal.wrote('public.rb229', 'id = 57');
 create table public.rb229_ref (id bigint primary key, rb_id bigint references public.rb229 (id));
 insert into public.rb229_ref values (200, 57);
 select child_name as b_doomed from pgpm.part where parent_table = 'public.rb229'::regclass and lo = '0' \gset
@@ -89,8 +93,10 @@ select is((select array_agg(id order by id) from public.rb229), array[57]::bigin
 -- ==================== (C) an ordinary one-step retirement does not touch the job ====================
 create table public.rc229 (id bigint primary key, payload text);
 insert into public.rc229 values (7, 'g');
+select pgpm_formal.baseline('public.rc229');
 call pgpm.transmute('public.rc229', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
 insert into public.rc229 values (58, 'frontier');
+select pgpm_formal.wrote('public.rc229', 'id = 58');
 select child_name as c_doomed from pgpm.part where parent_table = 'public.rc229'::regclass and lo = '0' \gset
 update cron.job set command = format('alter table public.rc229 detach partition public.%I concurrently', :'c_doomed')
  where jobname = 'pgpm_detach';

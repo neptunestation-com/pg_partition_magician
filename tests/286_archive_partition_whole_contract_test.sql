@@ -111,6 +111,10 @@ insert into public.t286_over  select g, 'over'  from generate_series(1, 7) g;
 insert into public.t286_stall select g, 'stall' from generate_series(101, 103) g;
 insert into public.t286_full  select g, 'full'  from generate_series(201, 205) g;
 insert into public.t286_half  (id, payload) values (301, 'h'), (302, 'h'), (601, 'h'), (602, 'h');
+select pgpm_formal.baseline('public.t286_over');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.t286_stall');
+select pgpm_formal.baseline('public.t286_full');
+select pgpm_formal.baseline('public.t286_half');
 call pgpm.transmute('public.t286_over',  'id', 1000, p_retain => 19000, p_paused => false);
 call pgpm.transmute('public.t286_stall', 'id', 1000, p_retain => 19000, p_paused => false);
 call pgpm.transmute('public.t286_full',  'id', 1000, p_retain => 19000, p_paused => false);
@@ -119,6 +123,10 @@ insert into public.t286_over  values (20000, 'frontier');
 insert into public.t286_stall values (20000, 'frontier');
 insert into public.t286_full  values (20000, 'frontier');
 insert into public.t286_half  values (20000, 'frontier');
+select pgpm_formal.wrote('public.t286_over', 'id = 20000');
+select pgpm_formal.wrote('public.t286_stall', 'id = 20000');
+select pgpm_formal.wrote('public.t286_full', 'id = 20000');
+select pgpm_formal.wrote('public.t286_half', 'id = 20000');
 select pgpm._enforce_write_blocks('public.t286_over');
 select pgpm._enforce_write_blocks('public.t286_stall');
 select pgpm._enforce_write_blocks('public.t286_full');
@@ -256,8 +264,10 @@ end $$;
 create table public.t286_rls (id bigint primary key, tenant text not null);
 alter table public.t286_rls owner to t286_owner;
 insert into public.t286_rls select g, case when g in (3, 6) then 'old' else 'new' end from generate_series(1, 7) g;
+select pgpm_formal.baseline('public.t286_rls');
 call pgpm.transmute('public.t286_rls', 'id', 1000, p_retain => 19000, p_paused => false);
 insert into public.t286_rls values (20000, 'new');
+select pgpm_formal.wrote('public.t286_rls', 'id = 20000');
 select child_name as ch_rls from pgpm.part where parent_table = 'public.t286_rls'::regclass and lo = '0' \gset
 select pgpm._enforce_write_blocks('public.t286_rls');
 select pgpm.set_archive_fn('public.t286_rls', 't286.copy_out(regclass,name,text,text)'::regprocedure);
@@ -329,6 +339,7 @@ end $$;
 set timezone = 'UTC';
 create table public.t286_zone (ts timestamptz not null, payload text);
 insert into public.t286_zone select now() - g * interval '1 hour', 'zone' from generate_series(1, 6) g;
+select pgpm_formal.baseline('public.t286_zone');
 call pgpm.transmute('public.t286_zone', 'ts', interval '1 second', 3, p_retain => interval '0 seconds', p_paused => false);
 select child_name as ch_zone, lo as zone_lo, hi as zone_hi from pgpm.part
  where parent_table = 'public.t286_zone'::regclass order by lo::timestamptz limit 1 \gset

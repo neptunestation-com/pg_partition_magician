@@ -36,6 +36,7 @@ insert into public.u7t137
 insert into public.u7t137 values (pgpm_test137.u7_at('2020-01-20 00:00:00+00', 1), -4);   -- after the burst,
 insert into public.u7t137 values (pgpm_test137.u7_at('2020-01-21 00:00:00+00', 1), -5);   -- same partition
 insert into public.u7t137 values (pgpm_test137.u7_at('2020-02-10 00:00:00+00', 1), -2);   -- a month on
+select pgpm_formal.baseline('public.u7t137');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 
 -- retention pinned so the horizon is 2021-06-15 whenever this runs (floor on the year grid: 2021-01-01)
 select (now() - timestamptz '2021-06-15 00:00:00+00') as ret \gset
@@ -49,6 +50,7 @@ select (date_trunc('year', now()) + interval '2 years 5 months 14 days') as t_pi
 select pgpm.extend_to('public.u7t137', pgpm_test137.u7_at(:'t_pin'::timestamptz, 1)::text) as extended \gset
 insert into public.u7t137 values (pgpm_test137.u7_at(:'t_pin'::timestamptz, 1), -9);
 insert into public.u7t137 values (pgpm_test137.u7_at('2021-03-10 00:00:00+00', 1), -3);  -- live: must survive
+select pgpm_formal.wrote('public.u7t137', 'v in (-9, -3)');
 
 select is((select control_kind from pgpm.config where parent_table = 'public.u7t137'::regclass), 'uuidv7',
   'LIVENESS: the table is managed as uuidv7, the control kind whose tie read used min(uuid)');

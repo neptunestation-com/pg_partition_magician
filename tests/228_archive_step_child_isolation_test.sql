@@ -25,8 +25,10 @@ select plan(15);
 
 create table public.ab228 (id bigint primary key, payload text);
 insert into public.ab228 values (1, 'a1'), (2, 'a2');
+select pgpm_formal.baseline('public.ab228');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ab228', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint);
 insert into public.ab228 values (15, 'b'), (21, 'c1'), (22, 'c2'), (23, 'c3'), (65, 'frontier');
+select pgpm_formal.wrote('public.ab228', 'id in (15, 21, 22, 23, 65)');
 
 select child_name as a_child from pgpm.part where parent_table = 'public.ab228'::regclass and lo = '0' \gset
 select child_name as b_child from pgpm.part where parent_table = 'public.ab228'::regclass and lo = '10' \gset

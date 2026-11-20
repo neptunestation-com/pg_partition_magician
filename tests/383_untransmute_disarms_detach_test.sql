@@ -36,6 +36,7 @@ insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
 -- ==================== (A) untransmute with a forward cell's retirement armed ====================
 create table public.t383 (ts timestamptz primary key, payload text);
 insert into public.t383 values (now() - interval '9 seconds', 'a'), (now() - interval '8 seconds', 'b'), (now() - interval '7 seconds', 'c');
+select pgpm_formal.baseline('public.t383');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 create table public.t383_ref (id bigint primary key, t_ts timestamptz references public.t383 (ts));
 insert into public.t383_ref values (100, (select min(ts) from public.t383));
 call pgpm.transmute('public.t383', 'ts', '1 second'::interval, p_obtain => 4, p_retain => '0 seconds'::interval,
@@ -76,6 +77,7 @@ select is((select array_agg(payload order by ts) from public.t383), array['a', '
 -- ==================== (B) another table's detach is left armed ====================
 create table public.u383 (ts timestamptz primary key, payload text);
 insert into public.u383 values (now() - interval '9 seconds', 'x');
+select pgpm_formal.baseline('public.u383');
 call pgpm.transmute('public.u383', 'ts', '1 second'::interval, p_obtain => 4, p_retain => '0 seconds'::interval, p_paused => true);
 select p.child_name as ufwd from pgpm.part p join pgpm.config c on c.parent_table = p.parent_table
  where p.parent_table = 'public.u383'::regclass and p.child_oid is distinct from c.monolith_oid

@@ -67,8 +67,10 @@ select is((select command from cron.job where jobname = 'pgpm_detach'), 'select 
 -- later: a table re-created under the same name, converted on the same grid
 create table public.fa246 (id bigint primary key, payload text);
 insert into public.fa246 values (1, 'new-a'), (2, 'new-b');
+select pgpm_formal.baseline('public.fa246');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.fa246', 'id', 10::bigint, p_obtain => 6, p_paused => true);
 insert into public.fa246 values (12, 'new-12'), (17, 'new-17');
+select pgpm_formal.wrote('public.fa246', 'id in (12, 17)');
 select is((select array_agg(id order by id) from public.fa246), array[1, 2, 12, 17]::bigint[],
   'LIVENESS: the namesake holds 1, 2, 12, 17');
 select ok(exists (select 1 from pg_inherits i where i.inhparent = 'public.fa246'::regclass
@@ -123,8 +125,10 @@ drop table public.fc246 cascade;
 -- the namesake, re-created and retiring the same-named cell BEFORE the operator runs forget_missing()
 create table public.fc246 (id bigint primary key, payload text);
 insert into public.fc246 values (4, 'new-d');
+select pgpm_formal.baseline('public.fc246');
 call pgpm.transmute('public.fc246', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
 insert into public.fc246 values (14, 'new-14'), (16, 'new-16'), (57, 'frontier');
+select pgpm_formal.wrote('public.fc246', 'id in (14, 16, 57)');
 create table public.fc246_ref2 (id bigint primary key, fc_id bigint references public.fc246 (id));
 insert into public.fc246_ref2 values (201, 57);
 select is(pgpm.retire('public.fc246', :'c_doomed'), false, 'LIVENESS: the namesake''s retire() takes the referenced path');

@@ -49,9 +49,11 @@ $$;
 -- grid_floor(700 - 200) = 500, so the monolith is eligible and gets blocked and archived.
 create table public.cl114a (id bigint primary key, payload text);
 insert into public.cl114a select g, repeat('x', 100) from generate_series(1, 400) g where g <> 5;
+select pgpm_formal.baseline('public.cl114a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.cl114a', 'id', 500, p_retain => 200, p_paused => false, p_obtain => 2);
 select pgpm.obtain('public.cl114a');
 insert into public.cl114a values (700, 'frontier');
+select pgpm_formal.wrote('public.cl114a', 'id = 700');
 update pgpm.config set retain_batch = 0, archive_byte_budget = 2000,
        archive_fn = 'pgpm_test114.recorder(regclass,name,text,text)'::regprocedure
  where parent_table = 'public.cl114a'::regclass;
@@ -81,6 +83,7 @@ select results_eq(
 -- grid_floor(400 - 200) = 0: by the tick's own eligibility rule the monolith (hi 500) is no longer
 -- eligible, and before this fix that lifted its block.
 delete from public.cl114a where id = 700;
+select pgpm_formal.deleted('public.cl114a', 'id = 700');
 select ok(pgpm._native_gt('id', '500',
             (select pgpm._retain_boundary(c) from pgpm.config c where parent_table = 'public.cl114a'::regclass)),
   'LIVENESS A: the monolith''s hi is above the new horizon, so the lift condition is present');
@@ -118,6 +121,7 @@ select is((select count(*)::int from pgpm.archive_ledger
 -- The frontier moves on again, the monolith is eligible again, and retention is allowed to drop it.
 -- Its contents are frozen by the block, so what is in it now is what the drop destroys.
 insert into public.cl114a values (700, 'frontier');
+select pgpm_formal.wrote('public.cl114a', 'id = 700');
 create table pgpm_test114.at_drop_a as select id, payload from public.cl114a where id < 500;
 update pgpm.config set retain_batch = null where parent_table = 'public.cl114a'::regclass;
 do $$ declare i int := 0; v_status text; begin
@@ -143,9 +147,11 @@ select is((select count(*)::int from pgpm_test114.at_drop_a), 399,
 -- ============================ case B: set_retain loosens the horizon ============================
 create table public.cl114b (id bigint primary key, payload text);
 insert into public.cl114b select g, repeat('x', 100) from generate_series(1, 400) g where g <> 5;
+select pgpm_formal.baseline('public.cl114b');
 call pgpm.transmute('public.cl114b', 'id', 500, p_retain => 200, p_paused => false, p_obtain => 2);
 select pgpm.obtain('public.cl114b');
 insert into public.cl114b values (700, 'frontier');
+select pgpm_formal.wrote('public.cl114b', 'id = 700');
 update pgpm.config set retain_batch = 0, archive_byte_budget = 2000,
        archive_fn = 'pgpm_test114.recorder(regclass,name,text,text)'::regprocedure
  where parent_table = 'public.cl114b'::regclass;
@@ -191,6 +197,7 @@ select ok(not exists (select 1 from pg_trigger where tgname = 'pgpm_write_block'
   'WITNESS B: with its coverage discarded, the block is lifted: pg_trigger holds no pgpm_write_block on the monolith');
 select lives_ok($$ insert into public.cl114b values (5, 'LATE') $$,
   'WITNESS B: and the late write succeeds');
+select pgpm_formal.wrote('public.cl114b', 'id = 5');
 select is((select payload from public.cl114b where id = 5), 'LATE',
   'WITNESS B: it is in the table');
 
@@ -239,9 +246,11 @@ select is((select count(*)::int from pgpm_test114.handed where parent = 'public.
 -- skip_write_block_lift must not appear.
 create table public.cl114c (id bigint primary key, payload text);
 insert into public.cl114c select g, repeat('x', 100) from generate_series(1, 400) g where g <> 5;
+select pgpm_formal.baseline('public.cl114c');
 call pgpm.transmute('public.cl114c', 'id', 500, p_retain => 200, p_paused => false, p_obtain => 2);
 select pgpm.obtain('public.cl114c');
 insert into public.cl114c values (700, 'frontier');
+select pgpm_formal.wrote('public.cl114c', 'id = 700');
 update pgpm.config set retain_batch = 0, archive_byte_budget = 2000,
        archive_fn = 'pgpm_test114.recorder(regclass,name,text,text)'::regprocedure
  where parent_table = 'public.cl114c'::regclass;
@@ -263,6 +272,7 @@ select ok(not pgpm._is_write_blocked('public.cl114c', :'mono_c'),
   'WITNESS C: the block is gone while three chunks of coverage remain');
 select lives_ok($$ insert into public.cl114c values (5, 'LATE') $$,
   'WITNESS C: and a late write into the covered range lands');
+select pgpm_formal.wrote('public.cl114c', 'id = 5');
 
 call pgpm.maintain('public.cl114c');
 

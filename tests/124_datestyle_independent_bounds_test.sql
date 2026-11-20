@@ -81,9 +81,11 @@ select is(pgpm._decode('text_time', pgpm._ts_to_text_time(timestamptz '2026-10-0
 -- ==================== (c) the issue's reproduction: a DMY transmute, an MDY maintain, a `time` table ====================
 create table public.ev (id bigint generated always as identity, at timestamptz not null, payload text, primary key (id, at));
 insert into public.ev (at, payload) values (now() - interval '100 days', 'old'), (now() - interval '1 day', 'yesterday');
+select pgpm_formal.baseline('public.ev');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 select is(current_setting('DateStyle'), 'SQL, DMY', 'LIVENESS: the transmuting session is on SQL, DMY');
 call pgpm.transmute('public.ev', 'at', interval '1 month', p_retain => interval '1 month', p_paused => false);
 insert into public.ev (at, payload) values (now(), 'today');
+select pgpm_formal.wrote('public.ev', $$payload = 'today'$$);
 
 -- The expected bounds, derived without the code under test: the monolith is [floor(min), next(floor(now))),
 -- and to_char does not consult DateStyle. Its child is the one with the lowest lo.
@@ -134,11 +136,13 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.ev'::
 -- instant an MDY session reads it back as.
 create table public.u (id uuid primary key, v int);
 insert into public.u values (pgpm._ts_to_uuid('2020-01-10 00:00:00+00'), 1), (pgpm._ts_to_uuid('2020-02-10 00:00:00+00'), 2);
+select pgpm_formal.baseline('public.u');
 select (now() - timestamptz '2020-03-15 00:00:00+00') as ret \gset
 set datestyle = 'SQL, DMY';
 select is(current_setting('DateStyle'), 'SQL, DMY', 'LIVENESS: the uuidv7 table is transmuted from a SQL, DMY session');
 call pgpm.transmute('public.u', 'id', interval '1 month', p_retain => :'ret'::interval, p_paused => false);
 insert into public.u values (pgpm._ts_to_uuid('2020-06-10 00:00:00+00'), 6), (pgpm._ts_to_uuid('2021-06-10 00:00:00+00'), 7);
+select pgpm_formal.wrote('public.u', 'v in (6, 7)');
 select child_name as umono from pgpm.part where parent_table = 'public.u'::regclass order by lo::timestamptz limit 1 \gset
 select is((select lo || ' .. ' || hi from pgpm.part where parent_table = 'public.u'::regclass and child_name = :'umono'),
   '2020-01-01 00:00:00+00 .. ' || :'mono_hi',
@@ -162,6 +166,7 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.u'::r
 -- ==================== (e) a naive control column: the wall-time rule still renders ISO 8601 ====================
 create table public.evn (id bigint generated always as identity, at timestamp not null, primary key (id, at));
 insert into public.evn (at) values (now()::timestamp - interval '100 days');
+select pgpm_formal.baseline('public.evn');
 set datestyle = 'SQL, DMY';
 call pgpm.transmute('public.evn', 'at', interval '1 month');
 select is((select lo from pgpm.part where parent_table = 'public.evn'::regclass order by lo::timestamptz limit 1), :'mono_lo',

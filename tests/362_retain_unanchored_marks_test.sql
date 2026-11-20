@@ -103,6 +103,12 @@ call pgpm_t362.landed('uc', array[11, 12, 13, 14]);
 call pgpm_t362.landed('ue', array[31, 32]);
 call pgpm_t362.landed('uf', array[41, 42]);
 call pgpm_t362.landed('ug', array[51, 52, 53]);
+select pgpm_formal.baseline('pgpm_t362.ua');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md); after each helper, which fills and transmutes
+select pgpm_formal.baseline('pgpm_t362.ub');
+select pgpm_formal.baseline('pgpm_t362.uc');
+select pgpm_formal.baseline('pgpm_t362.ue');
+select pgpm_formal.baseline('pgpm_t362.uf');
+select pgpm_formal.baseline('pgpm_t362.ug');
 select child_name as a_doomed, child_oid as a_oid from pgpm.part where parent_table = 'pgpm_t362.ua'::regclass and lo = '0' \gset
 select child_name as b_doomed, child_oid as b_oid from pgpm.part where parent_table = 'pgpm_t362.ub'::regclass and lo = '0' \gset
 select child_name as c_doomed, child_oid as c_oid from pgpm.part where parent_table = 'pgpm_t362.uc'::regclass and lo = '0' \gset
@@ -140,19 +146,30 @@ select format('alter table pgpm_t362.%I rename to ua_kept', :'a_doomed') \gexec
 select format('create table pgpm_t362.%I (id bigint, payload text)', :'a_doomed') \gexec
 select format('insert into pgpm_t362.%I values (98, ''squat'')', :'a_doomed') \gexec
 select to_regclass(format('pgpm_t362.%I', :'a_doomed'))::oid as a_squat \gset
+select pgpm_formal.operator_owns(:'a_squat'::oid::regclass);   -- the squatter the test creates under the name
 -- C: an older retire() recorded a namesake in another schema as the mark's relation (#1365)
 select format('create table pgpm_t362_else.%I (id bigint, payload text)', :'c_doomed') \gexec
 select format('insert into pgpm_t362_else.%I values (77, ''namesake'')', :'c_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t362_else.%I', :'c_doomed'));   -- the namesake the test creates
 update pgpm.part set retiring_oid = to_regclass(format('pgpm_t362_else.%I', :'c_doomed'))::oid
  where parent_table = 'pgpm_t362.uc'::regclass and lo = '0';
+select pgpm_formal.expect('NoLostRow', '[11]', 'part C builds a v0.5.0 mark with no detach_dispatched_oid (lines above) on a namesake; the detached partition keeps the row but no record vouches for it as custody', 'pgpm_t362.uc');
+select pgpm_formal.expect('NoLostRow', '[12]', 'part C builds a v0.5.0 mark with no detach_dispatched_oid (lines above) on a namesake; the detached partition keeps the row but no record vouches for it as custody', 'pgpm_t362.uc');
+select pgpm_formal.expect('NoLostRow', '[13]', 'part C builds a v0.5.0 mark with no detach_dispatched_oid (lines above) on a namesake; the detached partition keeps the row but no record vouches for it as custody', 'pgpm_t362.uc');
+select pgpm_formal.expect('NoLostRow', '[14]', 'part C builds a v0.5.0 mark with no detach_dispatched_oid (lines above) on a namesake; the detached partition keeps the row but no record vouches for it as custody', 'pgpm_t362.uc');
 -- F: moved to another schema under its own name, and a squatter created under the name in the old one
 select format('alter table pgpm_t362.%I set schema pgpm_t362_else', :'f_doomed') \gexec
 select format('create table pgpm_t362.%I (id bigint, payload text)', :'f_doomed') \gexec
 select format('insert into pgpm_t362.%I values (97, ''squat'')', :'f_doomed') \gexec
 select to_regclass(format('pgpm_t362.%I', :'f_doomed'))::oid as f_squat \gset
+select pgpm_formal.operator_owns(:'f_squat'::oid::regclass);   -- the squatter the test creates under the name
+select pgpm_formal.expect('NoLostRow', '[41]', 'part F builds a v0.5.0 mark with no detach_dispatched_oid and moves the detached table to pgpm_t362_else (lines above); it keeps the row but no record vouches for it as custody', 'pgpm_t362.uf');
+select pgpm_formal.expect('NoLostRow', '[42]', 'part F builds a v0.5.0 mark with no detach_dispatched_oid and moves the detached table to pgpm_t362_else (lines above); it keeps the row but no record vouches for it as custody', 'pgpm_t362.uf');
 -- E, G: the state a v0.4.0 install leaves, retiring_at alone
 update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table in ('pgpm_t362.ue'::regclass, 'pgpm_t362.ug'::regclass) and lo = '0';
+select pgpm_formal.expect('NoLostRow', '[31]', 'part E builds a v0.4.0 mark, retiring_at alone (line above); the detached table keeps the row but no record vouches for it as custody', 'pgpm_t362.ue');
+select pgpm_formal.expect('NoLostRow', '[32]', 'part E builds a v0.4.0 mark, retiring_at alone (line above); the detached table keeps the row but no record vouches for it as custody', 'pgpm_t362.ue');
 
 select ok((select child_oid is null and detach_dispatched_oid is null and retiring_oid = :'a_oid'::oid from pgpm.part
             where parent_table = 'pgpm_t362.ua'::regclass and lo = '0'),
@@ -240,6 +257,7 @@ select ok(pgpm_t362.disown_method('pgpm_t362.ua') not like format('%%attach part
 
 -- ========== PART D: a v0.4.0 row, no oid at all, its detached table renamed ==========
 call pgpm_t362.landed('ud', array[21]);
+select pgpm_formal.baseline('pgpm_t362.ud');
 select child_name as d_doomed, child_oid as d_oid from pgpm.part where parent_table = 'pgpm_t362.ud'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t362.ud', :'d_doomed'), 'fixture: (D) retire() dispatches the detach');
 select pgpm_t362.armed() as d_cmd \gset

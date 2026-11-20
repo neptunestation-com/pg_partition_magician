@@ -48,8 +48,10 @@ $$;
 -- the first fine child's chunk collides with.
 create table public.rg125 (id bigint primary key, payload text);
 insert into public.rg125 select g, repeat('x', 100) from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.rg125');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rg125', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.rg125 values (20000, 'frontier');
+select pgpm_formal.wrote('public.rg125', 'id = 20000');
 update pgpm.config set archive_byte_budget = 2000 where parent_table = 'public.rg125'::regclass;
 select pgpm.set_archive_fn('public.rg125', 'pgpm_test125.recorder(regclass,name,text,text)');
 select child_name as rg_mono from pgpm.part where parent_table = 'public.rg125'::regclass and lo = '0' \gset
@@ -107,8 +109,10 @@ select is((select array_agg(id order by id) from public.rg125 where id in (1, 10
 -- old name's chunk is now coverage nothing tracks, over a range the renamed partition holds.
 create table public.rn125 (id bigint primary key, payload text);
 insert into public.rn125 select g, repeat('x', 100) from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.rn125');
 call pgpm.transmute('public.rn125', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.rn125 values (20000, 'frontier');
+select pgpm_formal.wrote('public.rn125', 'id = 20000');
 update pgpm.config set archive_byte_budget = 2000 where parent_table = 'public.rn125'::regclass;
 select pgpm.set_archive_fn('public.rn125', 'pgpm_test125.recorder(regclass,name,text,text)');
 select child_name as rn_mono from pgpm.part where parent_table = 'public.rn125'::regclass and lo = '0' \gset
@@ -150,8 +154,10 @@ select is((select array_agg(id order by id) from public.rn125 where id in (1, 10
 -- attached, so archiving resumes from the watermark rather than exporting the prefix a second time.
 create table public.rk125 (id bigint primary key, payload text);
 insert into public.rk125 select g, repeat('x', 100) from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.rk125');
 call pgpm.transmute('public.rk125', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.rk125 values (20000, 'frontier');
+select pgpm_formal.wrote('public.rk125', 'id = 20000');
 update pgpm.config set archive_byte_budget = 2000 where parent_table = 'public.rk125'::regclass;
 select pgpm.set_archive_fn('public.rk125', 'pgpm_test125.recorder(regclass,name,text,text)');
 select child_name as rk_mono from pgpm.part where parent_table = 'public.rk125'::regclass and lo = '0' \gset
@@ -193,8 +199,10 @@ select is((select array_agg(id order by id) from public.rk125 where id in (1, 10
 -- for that rename to carry; without the carry the source's chunk sits under a name nothing tracks.
 create table public.tr125 (id bigint primary key, payload text);
 insert into public.tr125 select g, repeat('x', 100) from generate_series(1, 900) g;
+select pgpm_formal.baseline('public.tr125');
 call pgpm.transmute('public.tr125', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.tr125 values (20000, 'frontier');
+select pgpm_formal.wrote('public.tr125', 'id = 20000');
 update pgpm.config set archive_byte_budget = 2000 where parent_table = 'public.tr125'::regclass;
 select pgpm.set_archive_fn('public.tr125', 'pgpm_test125.recorder(regclass,name,text,text)');
 select child_name as tr_mono from pgpm.part where parent_table = 'public.tr125'::regclass and lo = '0' \gset

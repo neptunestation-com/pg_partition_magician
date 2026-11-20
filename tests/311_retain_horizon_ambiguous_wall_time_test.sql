@@ -49,6 +49,9 @@ call pgpm.transmute('a311', 'ts', interval '1 hour', p_obtain => 4, p_retain => 
 insert into a311 values (1, '2026-11-01 04:10:00+00', 'aged'),
                         (2, '2026-11-01 05:10:00+00', 'live1'),
                         (3, '2026-11-01 05:25:00+00', 'live2');
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md): here, not before transmute, which converts the
+-- table empty; its rows are written after
+select pgpm_formal.baseline('a311');
 set clk.now = '2026-11-01 05:30:00+00';
 set timezone = 'UTC';
 
@@ -74,6 +77,7 @@ select ok(to_regclass('a311_p2026_11_01_05') is not null and to_regclass('a311_p
   'A: a311_p2026_11_01_05 (taking writes) still exists and a311_p2026_11_01_04 (aged) is gone');
 select lives_ok($$ insert into a311 values (4, '2026-11-01 05:29:00+00', 'written after') $$,
   'A: the table still takes a write at now()');
+select pgpm_formal.wrote('a311', 'id = 4');
 
 -- ==================== PART B: the matrix ====================
 -- clk, now, retain, step, and the rule's raw horizon, worked by hand in America/New_York:
@@ -134,6 +138,7 @@ select format('set clk.now = %L', bound - interval '1 minute'),
               bound - interval '1 minute', 'aged', bound + interval '1 minute', 'edge',
               clk - interval '1 minute', 'live')
   from m311 order by k \gexec
+select format('select pgpm_formal.baseline(%L)', 'm311_' || k) from m311 order by k \gexec
 
 -- Retention runs at each case's clock, in a UTC session: the horizon is partition_tz's business.
 set timezone = 'UTC';
@@ -169,8 +174,10 @@ insert into c311 values (pgpm._ts_to_uuid('2026-11-01 04:10:00+00'), 'aged'),
                         (pgpm._ts_to_uuid('2026-11-01 05:10:00+00'), 'live1'),
                         (pgpm._ts_to_uuid('2026-11-01 05:15:00+00'), 'live2'),
                         (pgpm._ts_to_uuid('2026-11-01 06:10:00+00'), 'ahead1');
+select pgpm_formal.baseline('c311');
 call pgpm.transmute('c311', 'id', interval '1 hour', p_obtain => 2, p_retain => interval '0');
 insert into c311 values (pgpm._ts_to_uuid('2026-11-01 07:10:00+00'), 'ahead2');
+select pgpm_formal.wrote('c311', 'tag = ''ahead2''');
 set clk.now = '2026-11-01 05:30:00+00';
 set timezone = 'UTC';
 
@@ -206,5 +213,6 @@ select is((select array_agg(tag order by id) from c311 where tableoid = to_regcl
   array['live1', 'live2'], 'C: the hour taking writes is its own partition, c311_p2026_11_01_05, holding live1 and live2');
 select lives_ok($$ insert into c311 values (pgpm._ts_to_uuid('2026-11-01 05:29:00+00'), 'written after') $$,
   'C: the table still takes a write at now()');
+select pgpm_formal.wrote('c311', 'tag = ''written after''');
 
 select * from finish();

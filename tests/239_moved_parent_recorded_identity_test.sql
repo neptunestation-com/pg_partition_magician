@@ -92,6 +92,7 @@ select 'm0.ev'::regclass::oid as parent \gset
 alter table m0.ev set schema m1;
 create table m0.ev (id bigint constraint ev_s1_pkey primary key);
 insert into m0.ev values (999);
+select pgpm_formal.operator_owns('m0.ev');
 select ok((select restored_at is null and definition like '%REFERENCES m0.ev(id)%'
              from pgpm.dropped_fk where parent_table = :parent::oid::regclass)
           and 'm0.ev'::regclass::oid <> :parent::oid,
@@ -111,6 +112,7 @@ select child_oid as source from pgpm.part where parent_table = :parent::oid::reg
 alter table m1.ev set schema m2;
 create table m2.ev_p0000000000000000000 (id bigint, note text);
 insert into m2.ev_p0000000000000000000 values (7777, 'namesake');
+select pgpm_formal.operator_owns('m2.ev_p0000000000000000000');
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived)
   values (:parent::oid::regclass, '0', '10', 'ev_p0000000000000000000_to_0000000000000000200', 8);
 
@@ -149,8 +151,10 @@ select is((select method from pgpm.log where parent_table = :parent::oid::regcla
 alter table m2.ev set schema m3;
 create table m3.ev_p0000000000000000000 (id bigint);
 insert into m3.ev_p0000000000000000000 values (8888);
+select pgpm_formal.operator_owns('m3.ev_p0000000000000000000');
 create table m3.ev_p0000000000000000050 (id bigint);
 insert into m3.ev_p0000000000000000050 values (8888);
+select pgpm_formal.operator_owns('m3.ev_p0000000000000000050');
 select pgpm.set_archive_fn(:parent::oid::regclass, 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 update pgpm.config set retain = '100' where parent_table = :parent::oid::regclass;   -- set_retain refuses arming a drop
 select pgpm.suspend_incoming_fks(:parent::oid::regclass, true);
@@ -194,6 +198,7 @@ alter table m0.uv set schema m1;
 alter table m1.uv rename to uv2;
 create table m0.uv (id bigint constraint uv_s4_pkey primary key);
 insert into m0.uv values (999);
+select pgpm_formal.operator_owns('m0.uv');
 select ok((select definition like '%REFERENCES m0.uv(id)%' from pgpm.dropped_fk where parent_table = 'm1.uv2'::regclass)
           and pg_temp.at(:umono) like 'm0.%',
   'LIVENESS: (S4) the recorded text names m0.uv, a namesake holds it, and the monolith is in m0');
@@ -209,6 +214,7 @@ select ok((select restored_at is null and definition like '%REFERENCES m0.ev(id)
 alter table m3.ev set schema m4;
 create table m3.ev (id bigint constraint ev_s5_pkey primary key);
 insert into m3.ev values (999);
+select pgpm_formal.operator_owns('m3.ev');
 
 \set ON_ERROR_STOP 0
 begin;

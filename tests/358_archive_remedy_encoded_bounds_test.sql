@@ -87,9 +87,11 @@ $$;
 -- ======== PART U: uuidv7 ========
 create table t358.u (id uuid primary key, v int not null);
 insert into t358.u values (t358.key('uuidv7', now(), 100)::uuid, 100), (t358.key('uuidv7', now(), 101)::uuid, 101);
+select pgpm_formal.baseline('t358.u');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('t358.u', 'id', interval '1 month', p_obtain => 1, p_retain => interval '1 year', p_paused => true,
                     p_force_uuidv7 => true);
 select t358.hand_cells('t358.u', 'uuidv7');
+select pgpm_formal.wrote('t358.u', 'v < 100');   -- the hand-built cells' ids 1 to 6
 select pgpm._enforce_write_blocks('t358.u');
 select ok((select control_kind = 'uuidv7' from pgpm.config where parent_table = 't358.u'::regclass)
           and pgpm._is_write_blocked('t358.u', 'u_a') and pgpm._is_write_blocked('t358.u', 'u_b')
@@ -138,9 +140,11 @@ update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_
 -- ======== PART T: text_time (cuid v1 shaped) ========
 create table t358.t (id text collate "C" primary key, v int not null);
 insert into t358.t values (t358.key('text_time', now(), 100), 100), (t358.key('text_time', now(), 101), 101);
+select pgpm_formal.baseline('t358.t');
 call pgpm.transmute('t358.t', 'id', interval '1 month', p_obtain => 1, p_retain => interval '1 year', p_paused => true,
                     p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms');
 select t358.hand_cells('t358.t', 'text_time');
+select pgpm_formal.wrote('t358.t', 'v < 100');   -- the hand-built cells' ids 1 to 6
 select pgpm._enforce_write_blocks('t358.t');
 select ok((select control_kind = 'text_time' from pgpm.config where parent_table = 't358.t'::regclass)
           and pgpm._is_write_blocked('t358.t', 't_a') and pgpm._is_write_blocked('t358.t', 't_b')

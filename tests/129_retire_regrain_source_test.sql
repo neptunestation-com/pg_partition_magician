@@ -27,8 +27,10 @@ select plan(42);
 -- ============================ A: the scheduled path (the issue's reproduction) ============================
 create table public.rrs_a (id bigint primary key, payload text);
 insert into public.rrs_a select g, repeat('x', 100) from generate_series(1, 2000) g;       -- monolith [0,3000)
+select pgpm_formal.baseline('public.rrs_a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rrs_a', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.rrs_a values (20000, 'frontier');                                       -- horizon 19000
+select pgpm_formal.wrote('public.rrs_a', 'id = 20000');
 select pgpm.set_archive_fn('public.rrs_a', 'pgpm._archive_noop(regclass,name,text,text)');
 update pgpm.config set archive_byte_budget = 60000 where parent_table = 'public.rrs_a'::regclass;  -- a few chunks
 select pgpm.set_regrain('public.rrs_a', '100');                                            -- auto-regrain on
@@ -123,8 +125,10 @@ select is((select array[regrain_child::text] from pgpm.progress('public.rrs_a'))
 -- afterwards has a witness. Paused: no maintenance tick touches this table, every step is explicit.
 create table public.rrs_b (id bigint primary key, payload text);
 insert into public.rrs_b select g, repeat('x', 100) from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.rrs_b');
 call pgpm.transmute('public.rrs_b', 'id', 1000, p_retain => 1000::bigint, p_paused => true);
 insert into public.rrs_b values (20000, 'frontier');
+select pgpm_formal.wrote('public.rrs_b', 'id = 20000');
 select pgpm.set_archive_fn('public.rrs_b', 'pgpm._archive_noop(regclass,name,text,text)');
 update pgpm.config set archive_byte_budget = 8 * 1024 * 1024 where parent_table = 'public.rrs_b'::regclass;  -- one chunk covers
 
@@ -135,6 +139,7 @@ select is(pgpm.regrain_step('public.rrs_b', 'rrs_b_p0000000000000000000_to_00000
 select is(pgpm.regrain_step('public.rrs_b', 'rrs_b_p0000000000000000000_to_0000000000000003000', '100', 500),
           'copied:100', 'LIVENESS: [100,200) copied');
 update public.rrs_b set payload = 'changed' where id = 5;   -- no write block yet: captured, not refused
+select pgpm_formal.wrote('public.rrs_b', 'id = 5');
 select is(pgpm._regrain_delta_count('public.rrs_b'), 2::bigint,
           'LIVENESS: one captured change (its OLD and NEW key) is pending in the delta');
 select is((select array_agg(child_name::text order by child_name) from pgpm.part
@@ -177,8 +182,10 @@ select is((select array_agg(id order by id) from public.rrs_b), array[20000]::bi
 -- the only proof that "untouched" meant the delta too.
 create table public.rrs_c (id bigint primary key, payload text);
 insert into public.rrs_c select g, repeat('x', 100) from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.rrs_c');
 call pgpm.transmute('public.rrs_c', 'id', 1000, p_retain => 1000::bigint, p_paused => true);
 insert into public.rrs_c values (20000, 'frontier');
+select pgpm_formal.wrote('public.rrs_c', 'id = 20000');
 select pgpm.set_archive_fn('public.rrs_c', 'pgpm._archive_noop(regclass,name,text,text)');
 -- a tiny budget keeps the monolith UNcovered; archive_batch 2 lets the empty [3000,4000) cover in the same call
 update pgpm.config set archive_byte_budget = 2000, archive_batch = 2 where parent_table = 'public.rrs_c'::regclass;
@@ -188,6 +195,7 @@ select is(pgpm.regrain_step('public.rrs_c', 'rrs_c_p0000000000000000000_to_00000
 select pgpm.regrain_step('public.rrs_c', 'rrs_c_p0000000000000000000_to_0000000000000003000', '100', 500);
 select pgpm.regrain_step('public.rrs_c', 'rrs_c_p0000000000000000000_to_0000000000000003000', '100', 500);
 update public.rrs_c set payload = 'changed' where id = 1500;
+select pgpm_formal.wrote('public.rrs_c', 'id = 1500');
 select is((select array_agg(child_name::text order by child_name) from pgpm.part
             where parent_table = 'public.rrs_c'::regclass and not attached),
           array['rrs_c_p0000000000000000000', 'rrs_c_p0000000000000000100'],

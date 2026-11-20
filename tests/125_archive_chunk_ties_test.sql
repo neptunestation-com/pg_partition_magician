@@ -49,6 +49,7 @@ insert into public.oid124
 insert into public.oid124 values (pgpm_test124.oid_at('2020-01-20 00:00:00+00', 1), -4);        -- after the burst,
 insert into public.oid124 values (pgpm_test124.oid_at('2020-01-21 00:00:00+00', 1), -5);        -- same partition
 insert into public.oid124 values (pgpm_test124.oid_at('2020-02-10 00:00:00+00', 1), -2);        -- a month on
+select pgpm_formal.baseline('public.oid124');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 
 -- retention pinned so the horizon is 2021-06-15 whenever this runs (floor on the year grid: 2021-01-01)
 select (now() - timestamptz '2021-06-15 00:00:00+00') as ret \gset
@@ -64,7 +65,9 @@ update pgpm.config set archive_byte_budget = 2000 where parent_table = 'public.o
 select (date_trunc('year', now()) + interval '2 years 5 months 14 days') as t_pin \gset
 select pgpm.extend_to('public.oid124', pgpm_test124.oid_at(:'t_pin'::timestamptz, 1)) as extended \gset
 insert into public.oid124 values (pgpm_test124.oid_at(:'t_pin'::timestamptz, 1), -9);
+select pgpm_formal.wrote('public.oid124', 'v = -9');
 insert into public.oid124 values (pgpm_test124.oid_at('2021-03-10 00:00:00+00', 1), -3);       -- live: must survive
+select pgpm_formal.wrote('public.oid124', 'v = -3');
 
 select is(pgpm._frontier_native('public.oid124')::timestamptz, :'t_pin'::timestamptz,
   'LIVENESS: the frontier is pinned two years out by the -9 row, so the monolith is frozen and can regrain');

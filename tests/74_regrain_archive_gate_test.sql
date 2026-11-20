@@ -18,8 +18,10 @@ select plan(13);
 create table public.ag74 (id bigint primary key, payload text);
 -- 100 characters a row as before (the byte budgets below are sized to it), each row its own (#1374)
 insert into public.ag74 select g, lpad(g::text, 100, 'x') from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.ag74');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ag74', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.ag74 values (20000, 'frontier');   -- pushes the horizon to 3000: the child is fully aged
+select pgpm_formal.wrote('public.ag74', 'id = 20000');
 -- A deliberately tiny byte budget, so coverage is INCOMPLETE when the regrain runs. That is the whole
 -- point: with coverage already complete there would be nothing for the gate to protect.
 update pgpm.config set archive_byte_budget = 2000,
@@ -121,8 +123,10 @@ select is(
 -- "wait for coverage" unimplementable, since a straddling child is never write-blocked and so never archived.
 create table public.pa74 (id bigint primary key, payload text);
 insert into public.pa74 select g, lpad(g::text, 100, 'x') from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.pa74');
 call pgpm.transmute('public.pa74', 'id', 1000, p_retain => 99000::bigint, p_paused => false);
 insert into public.pa74 values (20000, 'frontier');   -- horizon 1000, child [0,3000): straddles it
+select pgpm_formal.wrote('public.pa74', 'id = 20000');
 update pgpm.config set archive_byte_budget = 2000,
        archive_fn = 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure
  where parent_table = 'public.pa74'::regclass;
@@ -160,8 +164,10 @@ select is(
 -- materializing aged rows only to drop them would be pure cost.
 create table public.na74 (id bigint primary key, payload text);
 insert into public.na74 select g, repeat('x',100) from generate_series(1, 2000) g;
+select pgpm_formal.baseline('public.na74');
 call pgpm.transmute('public.na74', 'id', 1000, p_retain => 1000::bigint, p_paused => false);
 insert into public.na74 values (20000, 'frontier');
+select pgpm_formal.wrote('public.na74', 'id = 20000');
 
 do $$
 declare v_child name; v_status text; i int := 0;

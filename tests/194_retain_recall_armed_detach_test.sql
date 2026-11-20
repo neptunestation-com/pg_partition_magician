@@ -175,9 +175,11 @@ $$;
 -- referencing row points at the live frontier row, so there is no crossing and nothing stops the detach.
 create table public.rr194a (id bigint primary key, payload text);
 insert into public.rr194a values (1, 'a'), (2, 'b'), (3, 'c');
+select pgpm_formal.baseline('public.rr194a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rr194a', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194a', '60000');
 insert into public.rr194a values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194a', 'id = 50005');
 create table public.rr194a_ref (id bigint primary key, p_id bigint references public.rr194a(id));
 insert into public.rr194a_ref values (1, 50005);
 select child_name as a_doomed, hi as a_hi, child_oid as a_oid from pgpm.part
@@ -219,13 +221,16 @@ select pgpm_test194.cron_run(pgpm_test194.armed());
 call pgpm.maintain('public.rr194a');
 select ok(pgpm_test194.attached('public.rr194a', :'a_doomed'), 'A: and a cron run and a tick after it leave it attached');
 select lives_ok($$ insert into public.rr194a values (4, 'd') $$, 'A: a write into the range lands');
+select pgpm_formal.wrote('public.rr194a', 'id = 4');
 
 -- ====== PART B: #1438's race, no operator: a late run of the detach finds nothing pgpm put back ======
 create table public.rr194b (id bigint primary key, payload text);
 insert into public.rr194b values (5, 'e'), (6, 'f'), (7, 'g'), (8, 'h');
+select pgpm_formal.baseline('public.rr194b');
 call pgpm.transmute('public.rr194b', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194b', '60000');
 insert into public.rr194b values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194b', 'id = 50005');
 create table public.rr194b_ref (id bigint primary key, p_id bigint references public.rr194b(id));
 insert into public.rr194b_ref values (1, 50005);
 select child_name as b_doomed, hi as b_hi, child_oid as b_oid from pgpm.part
@@ -253,9 +258,11 @@ select is(pgpm_test194.armed(), 'select 1', 'B: the standing job is back to idle
 -- ============== PART C: the frontier moves back with no set_retain; the tick settles it ==============
 create table public.rr194c (id bigint primary key, payload text);
 insert into public.rr194c values (11, 'k'), (12, 'l');
+select pgpm_formal.baseline('public.rr194c');
 call pgpm.transmute('public.rr194c', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194c', '60000');
 insert into public.rr194c values (30005, 'second'), (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194c', 'id in (30005, 50005)');
 create table public.rr194c_ref (id bigint primary key, p_id bigint references public.rr194c(id));
 insert into public.rr194c_ref values (1, 30005);
 select child_name as c_doomed, hi as c_hi from pgpm.part
@@ -264,6 +271,7 @@ select child_name as c_doomed, hi as c_hi from pgpm.part
 select ok(not pgpm.retire('public.rr194c', :'c_doomed'), 'fixture: (C) retire() dispatches the detach');
 select pgpm_test194.armed() as c_cmd \gset
 delete from public.rr194c where id = 50005;   -- the frontier moves back to 30005: horizon 20000 -> 0
+select pgpm_formal.deleted('public.rr194c', 'id = 50005');
 select ok(not pgpm_test194.reached('public.rr194c', :'c_hi'), 'LIVENESS: (C) retention no longer reaches the partition');
 select is((select retain from pgpm.config where parent_table = 'public.rr194c'::regclass), '25000',
   'LIVENESS: (C) retain itself was never changed, so set_retain cannot be what settles it');
@@ -281,9 +289,11 @@ select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.sta
 -- frontier 30005, retain 20000: horizon 10000, which reaches only the monolith [0, 10000)
 create table public.rr194d (id bigint primary key, payload text);
 insert into public.rr194d values (21, 'u'), (22, 'v'), (23, 'w');
+select pgpm_formal.baseline('public.rr194d');
 call pgpm.transmute('public.rr194d', 'id', 10000::bigint, p_retain => 20000, p_paused => false);
 select pgpm.extend_to('public.rr194d', '40000');
 insert into public.rr194d values (30005, 'frontier');
+select pgpm_formal.wrote('public.rr194d', 'id = 30005');
 create table public.rr194d_ref (id bigint primary key, p_id bigint references public.rr194d(id));
 insert into public.rr194d_ref values (1, 30005);
 select child_name as d_doomed, hi as d_hi, child_oid as d_oid from pgpm.part
@@ -305,9 +315,11 @@ select is(pgpm_test194.actions('public.rr194d', '0'), array['retain_detach', 're
 -- ======= PART E: a mark whose job no longer holds its detach is cleared, and the partition stays =======
 create table public.rr194e (id bigint primary key, payload text);
 insert into public.rr194e values (31, 'x'), (32, 'y');
+select pgpm_formal.baseline('public.rr194e');
 call pgpm.transmute('public.rr194e', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194e', '60000');
 insert into public.rr194e values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194e', 'id = 50005');
 create table public.rr194e_ref (id bigint primary key, p_id bigint references public.rr194e(id));
 insert into public.rr194e_ref values (1, 50005);
 select child_name as e_doomed, hi as e_hi from pgpm.part
@@ -341,9 +353,11 @@ select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.sta
 -- ====== PART F: a run already started when retention loosened lands after the tick, and is recorded ======
 create table public.rr194f (id bigint primary key, payload text);
 insert into public.rr194f values (41, 'p'), (42, 'q'), (43, 'r'), (44, 's'), (45, 't');
+select pgpm_formal.baseline('public.rr194f');
 call pgpm.transmute('public.rr194f', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194f', '60000');
 insert into public.rr194f values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194f', 'id = 50005');
 create table public.rr194f_ref (id bigint primary key, p_id bigint references public.rr194f(id));
 insert into public.rr194f_ref values (1, 50005);
 select child_name as f_doomed, hi as f_hi from pgpm.part
@@ -368,9 +382,11 @@ select results_eq($$ select retain_drop_failures from pgpm.status() where parent
 -- ====== PART G: a detach a foreign key refuses for good is logged and counted, with a way out ======
 create table public.rr194g (id bigint primary key, payload text);
 insert into public.rr194g values (61, 'u'), (62, 'v'), (63, 'w');
+select pgpm_formal.baseline('public.rr194g');
 call pgpm.transmute('public.rr194g', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194g', '60000');
 insert into public.rr194g values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194g', 'id = 50005');
 create table public.rr194g_ref (id bigint primary key, p_id bigint references public.rr194g(id));
 insert into public.rr194g_ref values (1, 50005);
 select child_name as g_doomed, hi as g_hi from pgpm.part
@@ -411,9 +427,11 @@ select is(pgpm_test194.ids('public.rr194g', 20000), array[61, 62, 63]::bigint[],
 -- ====== PART H: a released monolith put back by hand comes out of untransmute without the detach's CHECK ======
 create table public.rr194h (id bigint primary key, payload text constraint rr194h_own check (payload <> 'forbidden'));
 insert into public.rr194h values (71, 'x'), (72, 'y'), (73, 'z');
+select pgpm_formal.baseline('public.rr194h');
 call pgpm.transmute('public.rr194h', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194h', '60000');
 insert into public.rr194h values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194h', 'id = 50005');
 create table public.rr194h_ref (id bigint primary key, p_id bigint references public.rr194h(id));
 insert into public.rr194h_ref values (1, 50005);
 select child_name as h_doomed from pgpm.part where parent_table = 'public.rr194h'::regclass and lo = '0' \gset
@@ -432,9 +450,11 @@ select :'h_attach' \gexec
 select ok(pgpm_test194.attached('public.rr194h', :'h_doomed'), 'LIVENESS: (H) the remedy''s ATTACH put the monolith back');
 drop table public.rr194h_ref;
 delete from public.rr194h where id >= 10000;
+select pgpm_formal.deleted('public.rr194h', 'id >= 10000');
 select pgpm.untransmute('public.rr194h');
 select lives_ok($$ insert into public.rr194h values (20000, 'past the old bound') $$,
   'H: the restored table takes an id past the monolith''s old bound');
+select pgpm_formal.wrote('public.rr194h', 'id = 20000');
 select throws_ok($$ insert into public.rr194h values (20001, 'forbidden') $$, '23514', NULL,
   'H: and its own CHECK still holds');
 select is(pgpm_test194.ids('public.rr194h'), array[71, 72, 73, 20000]::bigint[], 'H: the restored table holds ids 71, 72, 73 and 20000');
@@ -442,9 +462,11 @@ select is(pgpm_test194.ids('public.rr194h'), array[71, 72, 73, 20000]::bigint[],
 -- ====== PART I: a detach a DEFAULT partition refuses for good is logged and counted, naming the DEFAULT ======
 create table public.rr194i (id bigint primary key, payload text);
 insert into public.rr194i values (81, 'i'), (82, 'j'), (83, 'k');
+select pgpm_formal.baseline('public.rr194i');
 call pgpm.transmute('public.rr194i', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194i', '60000');
 insert into public.rr194i values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194i', 'id = 50005');
 create table public.rr194i_ref (id bigint primary key, p_id bigint references public.rr194i(id));
 insert into public.rr194i_ref values (1, 50005);
 select child_name as i_doomed from pgpm.part where parent_table = 'public.rr194i'::regclass and lo = '0' \gset
@@ -454,6 +476,7 @@ select pgpm_test194.armed() as i_cmd \gset
 select pgpm.set_retain('public.rr194i', '45000');
 -- the operator attaches a DEFAULT partition, which nothing in pgpm refuses
 create table public.rr194i_def partition of public.rr194i default;
+select pgpm_formal.operator_owns('public.rr194i_def');
 select ok(pgpm_test194.cron_run(:'i_cmd') = 'ERROR' and pgpm_test194.attached('public.rr194i', :'i_doomed'),
   'LIVENESS: (I) pg_cron''s run of the detach is refused, and the partition stays attached');
 select ok(coalesce(array_length(pgpm._crossing_keys('public.rr194i', '0', '10000'), 1), 0) = 0,
@@ -480,9 +503,11 @@ select is(pgpm_test194.ids(format('public.%I', :'i_doomed')), array[81, 82, 83]:
 -- ====== PART J: a reference check that could not run is an uncounted skip, and the detach still lands ======
 create table public.rr194j (id bigint primary key, payload text);
 insert into public.rr194j values (91, 'l'), (92, 'm'), (93, 'n');
+select pgpm_formal.baseline('public.rr194j');
 call pgpm.transmute('public.rr194j', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194j', '60000');
 insert into public.rr194j values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194j', 'id = 50005');
 create table public.rr194j_ref (id bigint primary key, p_id bigint references public.rr194j(id));
 insert into public.rr194j_ref values (1, 50005);
 select child_name as j_doomed from pgpm.part where parent_table = 'public.rr194j'::regclass and lo = '0' \gset
@@ -520,9 +545,11 @@ select is(pgpm_test194.ids(format('public.%I', :'j_doomed')), array[91, 92, 93]:
 -- ====== PART K: #1451 path 1, the job idled in the recall's own transaction while a run carries the detach ======
 create table public.rr194k (id bigint primary key, payload text);
 insert into public.rr194k values (101, 'a'), (102, 'b'), (103, 'c'), (104, 'd');
+select pgpm_formal.baseline('public.rr194k');
 call pgpm.transmute('public.rr194k', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194k', '60000');
 insert into public.rr194k values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194k', 'id = 50005');
 create table public.rr194k_ref (id bigint primary key, p_id bigint references public.rr194k(id));
 insert into public.rr194k_ref values (1, 50005);
 select child_name as k_doomed, hi as k_hi from pgpm.part where parent_table = 'public.rr194k'::regclass and lo = '0' \gset
@@ -567,9 +594,11 @@ grant all on all tables in schema pgpm to pgpm_test194_owner;
 grant all on all sequences in schema pgpm to pgpm_test194_owner;
 create table public.rr194l (id bigint primary key, payload text);
 insert into public.rr194l values (111, 'e'), (112, 'f'), (113, 'g'), (114, 'h'), (115, 'i');
+select pgpm_formal.baseline('public.rr194l');
 call pgpm.transmute('public.rr194l', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194l', '60000');
 insert into public.rr194l values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194l', 'id = 50005');
 create table public.rr194l_ref (id bigint primary key, p_id bigint references public.rr194l(id));
 insert into public.rr194l_ref values (1, 50005);
 select child_name as l_doomed, hi as l_hi from pgpm.part where parent_table = 'public.rr194l'::regclass and lo = '0' \gset
@@ -621,9 +650,11 @@ select is(pgpm_test194.ids(format('public.%I', :'l_doomed')), array[111, 112, 11
 -- ====== PART M: the idle clock belongs to one dispatch: a re-dispatch resets it ======
 create table public.rr194m (id bigint primary key, payload text);
 insert into public.rr194m values (121, 'j'), (122, 'k'), (123, 'l'), (124, 'm'), (125, 'n'), (126, 'o');
+select pgpm_formal.baseline('public.rr194m');
 call pgpm.transmute('public.rr194m', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194m', '60000');
 insert into public.rr194m values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194m', 'id = 50005');
 create table public.rr194m_ref (id bigint primary key, p_id bigint references public.rr194m(id));
 insert into public.rr194m_ref values (1, 50005);
 select child_name as m_doomed, hi as m_hi from pgpm.part where parent_table = 'public.rr194m'::regclass and lo = '0' \gset
@@ -638,6 +669,7 @@ select is(pgpm_test194.idle_at('public.rr194m', '0'), 'started', 'LIVENESS: (M) 
 -- retention reaches the partition again before a tick clears it (a newer row moves the frontier on): retire()
 -- re-dispatches
 insert into public.rr194m values (55005, 'newer');
+select pgpm_formal.wrote('public.rr194m', 'id = 55005');
 select ok(pgpm_test194.reached('public.rr194m', :'m_hi'), 'LIVENESS: (M) retention reaches the partition again');
 call pgpm.maintain('public.rr194m');
 select is(pgpm_test194.armed(), :'m_cmd', 'LIVENESS: (M) the tick re-dispatched the detach');
@@ -650,6 +682,7 @@ select pgpm.retain('public.rr194m');
 select is(pgpm_test194.mark('public.rr194m', '0'), format('retiring_at set, dispatched %s', (select child_oid from pgpm.part where parent_table = 'public.rr194m'::regclass and lo = '0')),
   'M: the second loosening keeps the mark: the first dispatch''s clock does not carry over');
 commit;
+select pgpm_formal.deleted('public.rr194m', 'id = 55005');
 select ok(pgpm_test194.cron_run(:'m_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194m', :'m_doomed'),
   'LIVENESS: (M) the run that carried the detach lands');
 call pgpm.maintain('public.rr194m');
@@ -659,9 +692,11 @@ select is(pgpm_test194.ids(format('public.%I', :'m_doomed')), array[121, 122, 12
 -- ====== PART N: the clock starts only in a later transaction than the one that read the idle ======
 create table public.rr194n (id bigint primary key, payload text);
 insert into public.rr194n select g, 'n' from generate_series(131, 137) g;
+select pgpm_formal.baseline('public.rr194n');
 call pgpm.transmute('public.rr194n', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194n', '60000');
 insert into public.rr194n values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194n', 'id = 50005');
 create table public.rr194n_ref (id bigint primary key, p_id bigint references public.rr194n(id));
 insert into public.rr194n_ref values (1, 50005);
 select child_name as n_doomed from pgpm.part where parent_table = 'public.rr194n'::regclass and lo = '0' \gset
@@ -694,9 +729,11 @@ grant update on cron.job to pgpm_test194_owner;
 -- ====== PART O: the owner's own idle job is no reading of the administrator's ======
 create table public.rr194o (id bigint primary key, payload text);
 insert into public.rr194o select g, 'o' from generate_series(141, 148) g;
+select pgpm_formal.baseline('public.rr194o');
 call pgpm.transmute('public.rr194o', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194o', '60000');
 insert into public.rr194o values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194o', 'id = 50005');
 create table public.rr194o_ref (id bigint primary key, p_id bigint references public.rr194o(id));
 insert into public.rr194o_ref values (1, 50005);
 select child_name as o_doomed, hi as o_hi from pgpm.part where parent_table = 'public.rr194o'::regclass and lo = '0' \gset
@@ -733,9 +770,11 @@ delete from cron.job where jobid = 2;
 -- ====== PART P: a mark with no record of pgpm's dispatch is kept by a non-superuser's tick ======
 create table public.rr194p (id bigint primary key, payload text);
 insert into public.rr194p select g, 'p' from generate_series(151, 159) g;
+select pgpm_formal.baseline('public.rr194p');
 call pgpm.transmute('public.rr194p', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194p', '60000');
 insert into public.rr194p values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194p', 'id = 50005');
 create table public.rr194p_ref (id bigint primary key, p_id bigint references public.rr194p(id));
 insert into public.rr194p_ref values (1, 50005);
 select child_name as p_doomed from pgpm.part where parent_table = 'public.rr194p'::regclass and lo = '0' \gset
@@ -776,6 +815,9 @@ insert into cron.job values (3, 'pgpm_detach', current_database(), 'select 1', '
 set role pgpm_test194_owner;
 create table public.rr194q (id bigint primary key, payload text);
 insert into public.rr194q select g, 'q' from generate_series(161, 170) g;
+reset role;   -- the ledger is the test harness's, not the owner's
+select pgpm_formal.baseline('public.rr194q');
+set role pgpm_test194_owner;
 call pgpm.transmute('public.rr194q', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194q', '60000');
 insert into public.rr194q values (50005, 'frontier');
@@ -784,6 +826,7 @@ insert into public.rr194q_ref values (1, 50005);
 select child_name as q_doomed from pgpm.part where parent_table = 'public.rr194q'::regclass and lo = '0' \gset
 select set_config('t194.q_retire', (pgpm.retire('public.rr194q', :'q_doomed'))::text, false);
 reset role;
+select pgpm_formal.wrote('public.rr194q', 'id = 50005');
 select is(current_setting('t194.q_retire'), 'false', 'fixture: (Q) the owner''s own tick dispatches the detach');
 select ok((select command from cron.job where jobid = 3) ~ 'detach partition' and pgpm_test194.armed() = 'select 1',
   'LIVENESS: (Q) the owner''s job holds the detach, the administrator''s does not');
@@ -813,6 +856,9 @@ delete from cron.job where jobid = 3;
 set role pgpm_test194_owner;
 create table public.rr194r (id bigint primary key, payload text);
 insert into public.rr194r select g, 'r' from generate_series(171, 181) g;
+reset role;   -- the ledger is the test harness's, not the owner's
+select pgpm_formal.baseline('public.rr194r');
+set role pgpm_test194_owner;
 call pgpm.transmute('public.rr194r', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194r', '60000');
 insert into public.rr194r values (50005, 'frontier');
@@ -821,6 +867,7 @@ insert into public.rr194r_ref values (1, 50005);
 select child_name as r_doomed from pgpm.part where parent_table = 'public.rr194r'::regclass and lo = '0' \gset
 select set_config('t194.r_retire', (pgpm.retire('public.rr194r', :'r_doomed'))::text, false);
 reset role;
+select pgpm_formal.wrote('public.rr194r', 'id = 50005');
 select ok(current_setting('t194.r_retire') = 'false'
           and (select action from pgpm.log where parent_table = 'public.rr194r'::regclass and lo = '0' order by id desc limit 1) = 'fail_retain_detach'
           and pgpm_test194.mark('public.rr194r', '0') = 'retiring_at set, dispatched null',
@@ -841,6 +888,9 @@ insert into cron.job values (4, 'pgpm_detach', current_database(), 'select 1', '
 set role pgpm_test194_owner;
 create table public.rr194s (id bigint primary key, payload text);
 insert into public.rr194s select g, 's' from generate_series(191, 202) g;
+reset role;   -- the ledger is the test harness's, not the owner's
+select pgpm_formal.baseline('public.rr194s');
+set role pgpm_test194_owner;
 call pgpm.transmute('public.rr194s', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194s', '60000');
 insert into public.rr194s values (50005, 'frontier');
@@ -849,6 +899,7 @@ insert into public.rr194s_ref values (1, 50005);
 select child_name as s_doomed from pgpm.part where parent_table = 'public.rr194s'::regclass and lo = '0' \gset
 select set_config('t194.s_retire', (pgpm.retire('public.rr194s', :'s_doomed'))::text, false);
 reset role;
+select pgpm_formal.wrote('public.rr194s', 'id = 50005');
 select ok(current_setting('t194.s_retire') = 'false', 'fixture: (S) the owner''s tick dispatches through its own job');
 select ok(not pgpm.retire('public.rr194s', :'s_doomed'), 'fixture: (S) the administrator''s tick dispatches it again');
 select pgpm_test194.armed() as s_cmd \gset
@@ -884,12 +935,16 @@ delete from cron.job where jobid = 4;
 set role pgpm_test194_owner;
 create table public.rr194t (id bigint primary key, payload text);
 insert into public.rr194t select g, 't' from generate_series(211, 223) g;
+reset role;   -- the ledger is the test harness's, not the owner's
+select pgpm_formal.baseline('public.rr194t');
+set role pgpm_test194_owner;
 call pgpm.transmute('public.rr194t', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194t', '60000');
 insert into public.rr194t values (50005, 'frontier');
 create table public.rr194t_ref (id bigint primary key, p_id bigint references public.rr194t(id));
 insert into public.rr194t_ref values (1, 50005);
 reset role;
+select pgpm_formal.wrote('public.rr194t', 'id = 50005');
 select child_name as t_doomed from pgpm.part where parent_table = 'public.rr194t'::regclass and lo = '0' \gset
 revoke usage on schema cron from pgpm_test194_owner;
 set role pgpm_test194_owner;
@@ -911,9 +966,11 @@ select ok(pgpm_test194.attached('public.rr194t', :'t_doomed') and pgpm_test194.i
 -- ====== PART U: the owner's tick does not release a landed detach whose job it cannot read ======
 create table public.rr194u (id bigint primary key, payload text);
 insert into public.rr194u select g, 'u' from generate_series(231, 244) g;
+select pgpm_formal.baseline('public.rr194u');
 call pgpm.transmute('public.rr194u', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194u', '60000');
 insert into public.rr194u values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194u', 'id = 50005');
 create table public.rr194u_ref (id bigint primary key, p_id bigint references public.rr194u(id));
 insert into public.rr194u_ref values (1, 50005);
 select child_name as u_doomed from pgpm.part where parent_table = 'public.rr194u'::regclass and lo = '0' \gset
@@ -945,9 +1002,11 @@ alter table cron.job disable row level security;
 -- ====== PART V: a superuser's tick waits out the idle on a mark with no record of pgpm's dispatch ======
 create table public.rr194v (id bigint primary key, payload text);
 insert into public.rr194v select g, 'v' from generate_series(251, 257) g;
+select pgpm_formal.baseline('public.rr194v');
 call pgpm.transmute('public.rr194v', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194v', '60000');
 insert into public.rr194v values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194v', 'id = 50005');
 create table public.rr194v_ref (id bigint primary key, p_id bigint references public.rr194v(id));
 insert into public.rr194v_ref values (1, 50005);
 select child_name as v_doomed, hi as v_hi from pgpm.part where parent_table = 'public.rr194v'::regclass and lo = '0' \gset
@@ -984,9 +1043,11 @@ select is(pgpm_test194.ids(format('public.%I', :'v_doomed')), array(select gener
 -- ====== PART W: a landed detach under an older mark with no record is not released by a role that cannot read the job ======
 create table public.rr194w (id bigint primary key, payload text);
 insert into public.rr194w select g, 'w' from generate_series(261, 266) g;
+select pgpm_formal.baseline('public.rr194w');
 call pgpm.transmute('public.rr194w', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194w', '60000');
 insert into public.rr194w values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194w', 'id = 50005');
 create table public.rr194w_ref (id bigint primary key, p_id bigint references public.rr194w(id));
 insert into public.rr194w_ref values (1, 50005);
 select child_name as w_doomed from pgpm.part where parent_table = 'public.rr194w'::regclass and lo = '0' \gset
@@ -1061,9 +1122,11 @@ begin
 end $f$;
 create table public.rr194x (id bigint primary key, payload text);
 insert into public.rr194x select g, 'x' from generate_series(271, 275) g;
+select pgpm_formal.baseline('public.rr194x');
 call pgpm.transmute('public.rr194x', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194x', '60000');
 insert into public.rr194x values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194x', 'id = 50005');
 create table public.rr194x_ref (id bigint primary key, p_id bigint references public.rr194x(id));
 insert into public.rr194x_ref values (1, 50005);
 select child_name as x_doomed from pgpm.part where parent_table = 'public.rr194x'::regclass and lo = '0' \gset
@@ -1116,9 +1179,11 @@ select is(pgpm_test194.ids(format('public.%I', :'x_doomed')), array(select gener
 -- ====== PART Y: a stamp past the cluster's xid counter is of no live transaction ======
 create table public.rr194y (id bigint primary key, payload text);
 insert into public.rr194y select g, 'y' from generate_series(281, 288) g;
+select pgpm_formal.baseline('public.rr194y');
 call pgpm.transmute('public.rr194y', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194y', '60000');
 insert into public.rr194y values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194y', 'id = 50005');
 create table public.rr194y_ref (id bigint primary key, p_id bigint references public.rr194y(id));
 insert into public.rr194y_ref values (1, 50005);
 select child_name as y_doomed from pgpm.part where parent_table = 'public.rr194y'::regclass and lo = '0' \gset
@@ -1144,9 +1209,11 @@ select ok(pgpm_test194.mark('public.rr194y', '0') = 'retiring_at null, dispatche
 alter schema cron rename to cron_aside;
 create table public.rr194z (id bigint primary key, payload text);
 insert into public.rr194z select g, 'z' from generate_series(291, 293) g;
+select pgpm_formal.baseline('public.rr194z');
 call pgpm.transmute('public.rr194z', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('public.rr194z', '60000');
 insert into public.rr194z values (50005, 'frontier');
+select pgpm_formal.wrote('public.rr194z', 'id = 50005');
 create table public.rr194z_ref (id bigint primary key, p_id bigint references public.rr194z(id));
 insert into public.rr194z_ref values (1, 50005);
 select child_name as z_doomed from pgpm.part where parent_table = 'public.rr194z'::regclass and lo = '0' \gset

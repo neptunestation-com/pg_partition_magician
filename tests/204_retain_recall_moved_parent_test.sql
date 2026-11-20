@@ -87,9 +87,11 @@ $$;
 -- referencing row points at the live frontier row, so nothing stops the detach.
 create table pgpm_t204_old.rra (id bigint primary key, payload text);
 insert into pgpm_t204_old.rra values (1, 'a'), (2, 'b'), (3, 'c');
+select pgpm_formal.baseline('pgpm_t204_old.rra');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('pgpm_t204_old.rra', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t204_old.rra', '60000');
 insert into pgpm_t204_old.rra values (50005, 'frontier');
+select pgpm_formal.wrote('pgpm_t204_old.rra', 'id = 50005');
 create table public.rr204a_ref (id bigint primary key, p_id bigint references pgpm_t204_old.rra(id));
 insert into public.rr204a_ref values (1, 50005);
 select child_name as a_doomed, hi as a_hi, child_oid as a_oid from pgpm.part
@@ -132,9 +134,11 @@ select is(pgpm_t204_old.ids('pgpm_t204_new.rra', 20000), array[1, 2, 3]::bigint[
 -- ====== PART B: on a moved parent, a late run of the detach finds nothing pgpm put back ======
 create table pgpm_t204_old.rrb (id bigint primary key, payload text);
 insert into pgpm_t204_old.rrb values (5, 'e'), (6, 'f'), (7, 'g'), (8, 'h');
+select pgpm_formal.baseline('pgpm_t204_old.rrb');
 call pgpm.transmute('pgpm_t204_old.rrb', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t204_old.rrb', '60000');
 insert into pgpm_t204_old.rrb values (50005, 'frontier');
+select pgpm_formal.wrote('pgpm_t204_old.rrb', 'id = 50005');
 create table public.rr204b_ref (id bigint primary key, p_id bigint references pgpm_t204_old.rrb(id));
 insert into public.rr204b_ref values (1, 50005);
 select child_name as b_doomed, hi as b_hi, child_oid as b_oid from pgpm.part
@@ -164,9 +168,11 @@ select is(pgpm_t204_old.actions('pgpm_t204_new.rrb', '0'), array['retain_detach'
 -- ====== PART C: the identity anchor still holds in the partition's own schema on a moved parent ======
 create table pgpm_t204_old.rrc (id bigint primary key, payload text);
 insert into pgpm_t204_old.rrc values (11, 'k'), (12, 'l');
+select pgpm_formal.baseline('pgpm_t204_old.rrc');
 call pgpm.transmute('pgpm_t204_old.rrc', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t204_old.rrc', '60000');
 insert into pgpm_t204_old.rrc values (50005, 'frontier');
+select pgpm_formal.wrote('pgpm_t204_old.rrc', 'id = 50005');
 create table public.rr204c_ref (id bigint primary key, p_id bigint references pgpm_t204_old.rrc(id));
 insert into public.rr204c_ref values (1, 50005);
 select child_name as c_doomed, hi as c_hi, child_oid as c_oid from pgpm.part
@@ -179,6 +185,7 @@ select format('alter table pgpm_t204_old.%I rename to rr204c_aside', :'c_doomed'
 select format('create table pgpm_t204_old.%I (id bigint, payload text)', :'c_doomed') \gexec
 select format('insert into pgpm_t204_old.%I values (99, ''squat'')', :'c_doomed') \gexec
 select format('pgpm_t204_old.%I', :'c_doomed') as c_squat \gset
+select pgpm_formal.operator_owns(:'c_squat'::regclass);
 select isnt(to_regclass(:'c_squat')::oid, :'c_oid'::oid, 'LIVENESS: (C) the name now resolves to a different relation in the partition''s schema');
 select is(pgpm_t204_old.armed(), format('alter table pgpm_t204_new.rrc detach partition pgpm_t204_old.%I concurrently', :'c_doomed'),
   'LIVENESS: (C) the standing job is armed with the detach of that name');

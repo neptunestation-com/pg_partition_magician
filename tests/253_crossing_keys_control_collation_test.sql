@@ -52,6 +52,7 @@ $$;
 
 create table public.ks253 (id text collate "C" primary key, body text);
 insert into public.ks253 values (public.ks253(now(), 7), 'seed');
+select pgpm_formal.baseline('public.ks253');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ks253', 'id', interval '1 second', p_obtain => 70, p_retain => interval '1 second',
   p_paused => true, p_tt_prefix => '', p_tt_width => 27, p_tt_radix => 62, p_tt_unit => 's',
   p_tt_alphabet => '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
@@ -73,6 +74,7 @@ select public.ks253(:'cell_at'::timestamptz, 0) as k_up,
        public.ks253(:'cell_at'::timestamptz + interval '20 seconds', 5) as k_kept \gset
 insert into public.ks253 values (:'k_up', 'doomed, referenced twice'), (:'k_free', 'doomed, unreferenced'),
   (:'k_low', 'doomed, referenced once'), (:'k_kept', 'kept, referenced');
+select pgpm_formal.wrote('public.ks253', 'body <> ''seed''');
 
 select child_name as doomed, lo as d_lo, hi as d_hi from pgpm.part
  where parent_table = 'public.ks253'::regclass and lo::timestamptz = :'cell_at'::timestamptz \gset

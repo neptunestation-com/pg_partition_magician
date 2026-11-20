@@ -41,6 +41,7 @@ insert into public.ck231 values
   (1,  now() - interval '0.75 seconds', 'seed'),
   (10, now() - interval '0.5 seconds',  'doomed, referenced'),
   (11, now() - interval '0.25 seconds', 'doomed, unreferenced');
+select pgpm_formal.baseline('public.ck231');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ck231', 'created_at', '1 second'::interval, p_obtain => 30,
                     p_retain => '1 second'::interval, p_paused => false);
 
@@ -49,6 +50,7 @@ select child_name as doomed, lo as d_lo, hi as d_hi from pgpm.part
    and not pgpm._native_gt('time', lo, (select min(created_at)::text from public.ck231)) \gset
 
 insert into public.ck231 values (20, :'d_hi'::timestamptz + interval '20.5 seconds', 'kept, referenced');
+select pgpm_formal.wrote('public.ck231', 'id = 20');
 create table public.ck231_ref (id bigint primary key, ck_id bigint, ck_at timestamptz,
   foreign key (ck_id, ck_at) references public.ck231 (id, created_at) on delete cascade);
 insert into public.ck231_ref

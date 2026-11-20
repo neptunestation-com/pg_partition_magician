@@ -87,6 +87,7 @@ create table t354.t (id bigint generated always as identity, ts timestamptz not 
                      primary key (id, ts));
 insert into t354.t (ts, payload)
   select timestamptz '2026-01-06 03:00:00+00' + g * interval '10 minutes', 'live' || g from generate_series(0, 11) g;
+select pgpm_formal.baseline('t354.t');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 -- the object store: one body per key, a PUT replaces it; a PUT over an object that exists is counted on a sequence,
 -- which a rollback does not undo, as an object store's PUT is not undone
 create table t354.objects (key text primary key, body text);
@@ -149,6 +150,7 @@ insert into t354.t (ts, payload) values
   ('2025-12-20 00:10:00+00', 'hf1'), ('2025-12-20 00:20:00+00', 'hf2'), ('2025-12-20 00:30:00+00', 'hf3'),
   ('1800-01-06 00:10:00+00', 'pm1'),
   ('1800-01-20 00:10:00+00', 'pk1'), ('1800-01-20 00:20:00+00', 'pk2');
+select pgpm_formal.wrote('t354.t', $$ts < '2026-01-01'$$);
 select pgpm.adopt_partition('t354.t', p)
   from unnest(array['t354.p_w_posix', 't354.b_w_posix', 't354.b_e_dst', 't354.p_e_dst', 't354.p_e_posix', 't354.p_e_int',
                     't354.h_free', 't354.p_w_lmt', 't354.p_e_lmt']::regclass[]) p;
@@ -239,6 +241,7 @@ create table t354.u (id bigint generated always as identity, ts timestamptz not 
                      primary key (id, ts));
 insert into t354.u (ts, payload)
   select timestamptz '2026-01-06 03:00:00+00' + g * interval '10 minutes', 'live' || g from generate_series(0, 5) g;
+select pgpm_formal.baseline('t354.u');
 call pgpm.transmute('t354.u', 'ts', interval '1 hour', p_obtain => 1, p_paused => true);
 select pgpm.set_archive_fn('t354.u', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 select pgpm.set_retain('t354.u', '1 day');
@@ -247,6 +250,7 @@ create table t354.u0 partition of t354.u for values from ('2025-12-26 00:00:00+0
 create table t354.u3 partition of t354.u for values from ('2025-12-26 03:00:00+00') to ('2025-12-26 04:00:00+00');
 insert into t354.u (ts, payload) values ('2025-12-26 00:10:00+00', 'u0a'), ('2025-12-26 03:10:00+00', 'u3a'),
                                         ('2025-12-26 03:20:00+00', 'u3b');
+select pgpm_formal.wrote('t354.u', $$ts < '2026-01-01'$$);
 select pgpm.adopt_partition('t354.u', p) from unnest(array['t354.u0', 't354.u3']::regclass[]) p;
 select pgpm._enforce_write_blocks('t354.u');
 set timezone = 'XYZ20';
@@ -279,6 +283,7 @@ create table t354.w (id bigint generated always as identity, ts timestamptz not 
                      primary key (id, ts));
 insert into t354.w (ts, payload)
   select timestamptz '2026-01-06 03:00:00+00' + g * interval '10 minutes', 'live' || g from generate_series(0, 5) g;
+select pgpm_formal.baseline('t354.w');
 call pgpm.transmute('t354.w', 'ts', interval '1 hour', p_obtain => 1, p_paused => true);
 select pgpm.set_archive_fn('t354.w', 't354.strat(regclass,name,text,text)'::regprocedure);
 select pgpm.set_retain('t354.w', '1 day');
@@ -293,6 +298,7 @@ create table t354.w_over partition of t354.w for values from ('2025-12-20 05:00:
 create table t354.w_after partition of t354.w for values from ('2025-12-20 06:00:00+00') to ('2025-12-20 07:00:00+00');
 insert into t354.w (ts, payload) values ('2025-12-20 05:10:00+00', 'wo1'), ('2025-12-20 06:10:00+00', 'wa1'),
                                         ('2025-12-20 06:20:00+00', 'wa2');
+select pgpm_formal.wrote('t354.w', $$ts < '2026-01-01'$$);
 select pgpm.adopt_partition('t354.w', p) from unnest(array['t354.w_over', 't354.w_after']::regclass[]) p;
 select pgpm._enforce_write_blocks('t354.w');
 select is(:'x_hi' || ' / ' || (select count(*) from pg_class where oid = 4290035407),

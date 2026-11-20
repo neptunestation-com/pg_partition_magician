@@ -64,9 +64,11 @@ $$;
 -- ============================================ PART A ============================================
 create table public.t303a (id bigint primary key, payload text);
 insert into public.t303a values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.t303a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.t303a', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.t303a', '60');
 insert into public.t303a values (25, 'd'), (55, 'frontier');
+select pgpm_formal.wrote('public.t303a', 'id in (25, 55)');
 select pgpm.set_archive_fn('public.t303a', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 select child_name as a_old, child_oid as a_old_oid from pgpm.part
  where parent_table = 'public.t303a'::regclass and lo = '0' \gset
@@ -115,9 +117,11 @@ select is((select n_partitions from pgpm.status() where parent = 'public.t303a':
 -- ============================================ PART B ============================================
 create table public.t303b (id bigint primary key, payload text);
 insert into public.t303b values (4, 'a'), (6, 'b'), (18, 'c');
+select pgpm_formal.baseline('public.t303b');
 call pgpm.transmute('public.t303b', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.t303b', '60');
 insert into public.t303b values (22, 'd'), (57, 'frontier');
+select pgpm_formal.wrote('public.t303b', 'id in (22, 57)');
 select pgpm.set_archive_fn('public.t303b', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 select child_name as b_old from pgpm.part where parent_table = 'public.t303b'::regclass and lo = '0' \gset
 select pgpm._enforce_write_blocks('public.t303b');
@@ -151,6 +155,7 @@ select is((select n_partitions from pgpm.status() where parent = 'public.t303b':
 -- ============================================ PART C ============================================
 create table public.t303c (ts timestamptz primary key);
 insert into public.t303c values (now());
+select pgpm_formal.baseline('public.t303c');
 call pgpm.transmute('public.t303c', 'ts', interval '1 day');
 select child_name as c_old, lo as c_lo, hi as c_hi from pgpm.part
  where parent_table = 'public.t303c'::regclass and lo::timestamptz > now() + interval '2 days'
@@ -181,9 +186,11 @@ select throws_like(format('select pgpm.adopt_partition(%L, %L)', 'public.t303a',
 
 create table public.t303d (id bigint primary key);
 insert into public.t303d values (3);
+select pgpm_formal.baseline('public.t303d');
 call pgpm.transmute('public.t303d', 'id', 10::bigint);
 select pgpm.extend_to('public.t303d', '60');
 insert into public.t303d values (13), (33);
+select pgpm_formal.wrote('public.t303d', 'id in (13, 33)');
 select child_name as d_old from pgpm.part where parent_table = 'public.t303d'::regclass and lo = '0' \gset
 -- restored under ANOTHER name: the stale row still records [0,10)
 select pg_temp.t303_restore('public.t303d', :'d_old', 't303d_restored', '0', '10', false);
@@ -202,12 +209,14 @@ select is((select string_agg(format('%s|%s', lo, hi), ',') from pgpm.part
 -- restored under the SAME name over a NARROWER range than the row records
 select child_name as d_narrow from pgpm.part where parent_table = 'public.t303d'::regclass and lo = '10' \gset
 select pg_temp.t303_restore('public.t303d', :'d_narrow', :'d_narrow', '10', '15', false);
+select pgpm_formal.operator_owns(format('public.%I', :'d_narrow'));   -- restored and attached by hand, never adopted
 select throws_like(format('select pgpm.adopt_partition(%L, %L)', 'public.t303d', 'public.' || :'d_narrow'),
   '%records ' || :'d_narrow' || ' over [10, 20)%', 'D: a same-named row over another range is refused');
 
 -- a bound the grid cannot express
 create table public.t303d_top (id bigint primary key);
 alter table public.t303d attach partition public.t303d_top for values from (1000) to (maxvalue);
+select pgpm_formal.operator_owns('public.t303d_top');
 select throws_like($$select pgpm.adopt_partition('public.t303d', 'public.t303d_top')$$,
   '%bounds%', 'D: a MAXVALUE bound is refused');
 select is((select count(*)::int from pgpm.part where parent_table = 'public.t303d'::regclass
@@ -219,13 +228,16 @@ select is((select count(*)::int from pgpm.part where parent_table = 'public.t303
 -- DETACH waits on it (and gives up at its lock_timeout), and the same DETACH goes through once it commits
 create table public.t303e (id bigint primary key);
 insert into public.t303e values (7);
+select pgpm_formal.baseline('public.t303e');
 call pgpm.transmute('public.t303e', 'id', 10::bigint);
 select pgpm.extend_to('public.t303e', '40');
 insert into public.t303e values (24);
+select pgpm_formal.wrote('public.t303e', 'id = 24');
 select child_name as e_old from pgpm.part where parent_table = 'public.t303e'::regclass and lo = '20' \gset
 select pg_temp.t303_restore('public.t303e', :'e_old', :'e_old', '20', '30', false);
 delete from pgpm.part where parent_table = 'public.t303e'::regclass and child_name = :'e_old';
 select format('set lock_timeout = ''300ms''; alter table public.t303e detach partition public.%I', :'e_old') as e_detach \gset
+select pgpm_formal.operator_owns(format('public.%I', :'e_old'));   -- detached by hand below and kept
 begin;
 select lives_ok(format('select pgpm.adopt_partition(%L, %L)', 'public.t303e', 'public.' || :'e_old'),
   'E: adopt_partition accepts the partition inside an open transaction');
@@ -244,11 +256,14 @@ select is((select count(*)::int from pg_inherits where inhparent = 'public.t303e
 -- pending, commits that first transaction, and gives up at its lock_timeout waiting for fa
 create table public.t303f (id bigint primary key, payload text);
 insert into public.t303f values (8, 'a');
+select pgpm_formal.baseline('public.t303f');
 call pgpm.transmute('public.t303f', 'id', 10::bigint);
 select pgpm.extend_to('public.t303f', '60');
 insert into public.t303f values (31, 'b'), (36, 'c'), (47, 'frontier');
+select pgpm_formal.wrote('public.t303f', 'id in (31, 36, 47)');
 select child_name as f_part from pgpm.part where parent_table = 'public.t303f'::regclass and lo = '30' \gset
 delete from pgpm.part where parent_table = 'public.t303f'::regclass and child_name = :'f_part';
+select pgpm_formal.operator_owns(format('public.%I', :'f_part'));   -- detached by hand below and kept
 select is((select string_agg(id::text, ',' order by id) from public.:"f_part")
             || '|' || (select count(*) from pgpm.part where parent_table = 'public.t303f'::regclass
                          and (child_name = :'f_part' or child_oid = to_regclass('public.' || :'f_part')::oid)),
@@ -287,11 +302,14 @@ select dblink_disconnect('fb') as fb_gone \gset
 -- which hands the partition to gd, and waits for session ga's transaction to finish the detach.
 create table public.t303g (id bigint primary key, payload text);
 insert into public.t303g values (9, 'a');
+select pgpm_formal.baseline('public.t303g');
 call pgpm.transmute('public.t303g', 'id', 10::bigint);
 select pgpm.extend_to('public.t303g', '60');
 insert into public.t303g values (33, 'b'), (38, 'c'), (39, 'd'), (44, 'frontier');
+select pgpm_formal.wrote('public.t303g', 'id in (33, 38, 39, 44)');
 select child_name as g_part from pgpm.part where parent_table = 'public.t303g'::regclass and lo = '30' \gset
 delete from pgpm.part where parent_table = 'public.t303g'::regclass and child_name = :'g_part';
+select pgpm_formal.operator_owns(format('public.%I', :'g_part'));   -- detached by hand below and kept
 -- <pid> waits, not granted, on a lock of <locktype> (for a relation lock: SHARE UPDATE EXCLUSIVE on <rel>).
 -- pg_locks is not snapshotted, so one call polls it until the wait shows, for at most five seconds
 create function pg_temp.t303_waits(p_pid int, p_locktype text, p_rel regclass) returns boolean

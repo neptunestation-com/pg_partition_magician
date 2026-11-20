@@ -72,16 +72,22 @@ begin
     execute format('insert into t346.%I values (now() - interval ''5 hours'', ''early1''), (now() - interval ''4 hours'', ''early2''), (now() - interval ''1 hour'', ''late'')', t);
   end loop;
 end $$;
+select pgpm_formal.baseline('t346.a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t346.b');
+select pgpm_formal.baseline('t346.w');
+select pgpm_formal.baseline('t346.f');
 call pgpm.transmute('t346.a', 'ts', interval '1 second', 3, p_retain => interval '0 seconds', p_paused => true);
 call pgpm.transmute('t346.b', 'ts', interval '1 second', 3, p_retain => interval '0 seconds', p_paused => true);
 call pgpm.transmute('t346.w', 'ts', interval '1 second', 3, p_retain => interval '0 seconds', p_paused => true);
 call pgpm.transmute('t346.f', 'ts', interval '1 second', 3, p_retain => interval '0 seconds', p_paused => true);
 create table t346.d (ts timestamptz not null, body text);
 insert into t346.d values (now() - interval '2 hours', 'd1');
+select pgpm_formal.baseline('t346.d');
 create table t346.d_orph (x int);
 call pgpm.transmute('t346.d', 'ts', interval '1 second', 3, p_paused => true);
 create table t346.e (ts timestamptz not null, body text);
 insert into t346.e values (now() - interval '2 hours', 'e1');
+select pgpm_formal.baseline('t346.e');
 call pgpm.transmute('t346.e', 'ts', interval '1 second', 3, p_paused => true);
 select pgpm.set_archive_fn(p, 't346.strategy(regclass, name, text, text)')
   from unnest(array['t346.a', 't346.b', 't346.w', 't346.f', 't346.d', 't346.e']::regclass[]) p;

@@ -19,6 +19,7 @@ select plan(16);
 create sequence public.free573_seq;
 create table public.s573 (id bigserial primary key, n serial, f bigint not null default nextval('public.free573_seq'), v text);
 insert into public.s573 (v) select 'old' from generate_series(1, 15);   -- ids 1..15 -> monolith [0, 20)
+select pgpm_formal.baseline('public.s573');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 
 -- ============================================== before: what there is to move
 select is(
@@ -61,6 +62,7 @@ select is(pg_get_serial_sequence('public.s573', 'id'), 'public.s573_id_seq',
 
 -- ============================================== retention: the monolith can now be retired
 insert into public.s573 (v) select 'new' from generate_series(1, 20);   -- ids 16..35: frontier to 35
+select pgpm_formal.wrote('public.s573', 'v = ''new''');
 select is((select array_agg(id order by id) from public.s573 where v = 'new'),
   array(select generate_series(16, 35)::bigint),
   'LIVENESS: the parent''s default kept issuing ids from the carried sequence, 16..35 with no gap or reuse');
@@ -79,12 +81,14 @@ select is((select array_agg(c.relname::text order by c.relname) from pg_class c
   array['free573_seq', 's573_id_seq', 's573_n_seq'],
   'all three sequences outlived the monolith');
 insert into public.s573 (v) values ('after');
+select pgpm_formal.wrote('public.s573', 'v = ''after''');
 select is((select id from public.s573 where v = 'after'), 36::bigint,
   'the next id after the drop continues the sequence');
 
 -- ============================================== untransmute hands ownership back
 create table public.u573 (id bigserial primary key, v text);
 insert into public.u573 (v) select 'x' from generate_series(1, 5);
+select pgpm_formal.baseline('public.u573');
 call pgpm.transmute('public.u573', 'id', 10::bigint, p_obtain => 2);
 select lives_ok($$ select pgpm.untransmute('public.u573') $$,
   'untransmute of a table whose parent owns its serial sequence goes through');
@@ -97,6 +101,7 @@ select is(
       and (select relkind from pg_class where oid = d.refobjid) = 'r'),
   'u573_id_seq:id', 'the restored plain table owns its serial sequence again');
 insert into public.u573 (v) values ('after');
+select pgpm_formal.wrote('public.u573', 'v = ''after''');
 select is((select id from public.u573 where v = 'after'), 6::bigint,
   'the restored table keeps issuing ids from the same sequence');
 

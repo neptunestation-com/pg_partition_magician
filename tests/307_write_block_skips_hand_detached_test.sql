@@ -35,17 +35,21 @@ create schema pgpm_test307;
 -- and [40000, 50000) are all at or below it.
 create table public.wb307 (id bigint primary key, payload text);
 insert into public.wb307 select g, 'base' from generate_series(1, 15000) g;
+select pgpm_formal.baseline('public.wb307');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.wb307', 'id', 10000, p_retain => 30000, p_paused => false);
 insert into public.wb307 values (25000, 'kept-a'), (26000, 'kept-b'), (35000, 'sib-30k'), (45000, 'sib-40k');
+select pgpm_formal.wrote('public.wb307', 'id in (25000, 26000, 35000, 45000)');
 select pgpm.obtain('public.wb307');
 
 create table pgpm_test307.wb_names as
   select lo, child_name, child_oid from pgpm.part where parent_table = 'public.wb307'::regclass;
 select child_name as wb_kept, child_oid as wb_kept_oid from pgpm_test307.wb_names where lo = '20000' \gset
+select pgpm_formal.operator_owns(format('public.%I', :'wb_kept')::regclass);
 
 -- the operator detaches [20000, 30000) to keep it, BEFORE retention reaches it
 select format('alter table public.wb307 detach partition public.%I', :'wb_kept') \gexec
 insert into public.wb307 values (85000, 'frontier');
+select pgpm_formal.wrote('public.wb307', 'id = 85000');
 
 select ok(not exists (select 1 from pg_inherits where inhparent = 'public.wb307'::regclass
                        and inhrelid = :'wb_kept_oid'::oid),
@@ -113,9 +117,11 @@ $$;
 
 create table public.ar307 (id bigint primary key, payload text);
 insert into public.ar307 select g, 'base' from generate_series(1, 50) g;
+select pgpm_formal.baseline('public.ar307');
 call pgpm.transmute('public.ar307', 'id', 10000, p_retain => 30000, p_paused => false);
 select pgpm.obtain('public.ar307');
 insert into public.ar307 values (25000, 'kept-a'), (26000, 'kept-b'), (35000, 'sib-30k'), (85000, 'frontier');
+select pgpm_formal.wrote('public.ar307', 'id in (25000, 26000, 35000, 85000)');
 update pgpm.config set archive_batch = null where parent_table = 'public.ar307'::regclass;
 select pgpm.set_archive_fn('public.ar307', 'pgpm_test307.recorder(regclass,name,text,text)');
 
@@ -125,6 +131,7 @@ select child_name as ar_kept, child_oid as ar_kept_oid from pgpm_test307.ar_name
 select child_name as ar_sib from pgpm_test307.ar_names where lo = '30000' \gset
 
 select pgpm._enforce_write_blocks('public.ar307');
+select pgpm_formal.operator_owns(format('public.%I', :'ar_kept')::regclass);
 select format('alter table public.ar307 detach partition public.%I', :'ar_kept') \gexec
 
 select ok(exists (select 1 from pg_trigger where tgrelid = :'ar_kept_oid'::oid and tgname = 'pgpm_write_block' and tgenabled = 'A'),
@@ -151,13 +158,16 @@ select is((select array_agg(child_name order by lo::bigint) from pgpm.archive_le
 -- the oldest every later call would pick it again: the parent's archiving would stop behind it for good.
 create table public.ab307 (id bigint primary key, payload text);
 insert into public.ab307 select g, 'base' from generate_series(1, 50) g;
+select pgpm_formal.baseline('public.ab307');
 call pgpm.transmute('public.ab307', 'id', 10000, p_retain => 30000, p_paused => false);
 select pgpm.obtain('public.ab307');
 insert into public.ab307 values (15000, 'next-a'), (17000, 'next-b'), (85000, 'frontier');
+select pgpm_formal.wrote('public.ab307', 'id in (15000, 17000, 85000)');
 select pgpm.set_archive_fn('public.ab307', 'pgpm_test307.recorder(regclass,name,text,text)');
 select child_name as ab_old, child_oid as ab_old_oid from pgpm.part where parent_table = 'public.ab307'::regclass and lo = '0' \gset
 select child_name as ab_next from pgpm.part where parent_table = 'public.ab307'::regclass and lo = '10000' \gset
 select pgpm._enforce_write_blocks('public.ab307');
+select pgpm_formal.operator_owns(format('public.%I', :'ab_old')::regclass);
 select format('alter table public.ab307 detach partition public.%I', :'ab_old') \gexec
 
 select ok((select archive_batch = 1 from pgpm.config where parent_table = 'public.ab307'::regclass)
@@ -176,9 +186,11 @@ select is((select array_agg(child || ':' || id order by id) from pgpm_test307.ha
 -- would bring it about: what is under test is that the write-block step treats such a child as its own.
 create table public.rt307 (id bigint primary key, payload text);
 insert into public.rt307 select g, 'base' from generate_series(1, 50) g;
+select pgpm_formal.baseline('public.rt307');
 call pgpm.transmute('public.rt307', 'id', 10000, p_retain => 30000, p_paused => false);
 select pgpm.obtain('public.rt307');
 insert into public.rt307 values (25000, 'retiring'), (35000, 'sib-30k'), (85000, 'frontier');
+select pgpm_formal.wrote('public.rt307', 'id in (25000, 35000, 85000)');
 select child_name as rt_ret, child_oid as rt_ret_oid from pgpm.part
  where parent_table = 'public.rt307'::regclass and lo = '20000' \gset
 select child_oid as rt_sib_oid from pgpm.part where parent_table = 'public.rt307'::regclass and lo = '30000' \gset
@@ -208,9 +220,11 @@ select throws_like(format('update public.%I set payload = ''late'' where id = 25
 -- missing relation and logs skip_write_block over its hi (tests/94), and the rest of the step goes on.
 create table public.dr307 (id bigint primary key, payload text);
 insert into public.dr307 select g, 'base' from generate_series(1, 50) g;
+select pgpm_formal.baseline('public.dr307');
 call pgpm.transmute('public.dr307', 'id', 10000, p_retain => 30000, p_paused => false);
 select pgpm.obtain('public.dr307');
 insert into public.dr307 values (35000, 'sib-30k'), (85000, 'frontier');
+select pgpm_formal.wrote('public.dr307', 'id in (35000, 85000)');
 select child_name as dr_gone from pgpm.part where parent_table = 'public.dr307'::regclass and lo = '20000' \gset
 select child_oid as dr_sib_oid from pgpm.part where parent_table = 'public.dr307'::regclass and lo = '30000' \gset
 select format('drop table public.%I', :'dr_gone') \gexec
@@ -236,6 +250,7 @@ select ok(not exists (select 1 from pgpm.log where action = 'skip_write_block'
 -- and then fail every swap on it ("is not a partition"), which held auto-regrain on it for good.
 create table public.rg307 (id bigint primary key, payload text);
 insert into public.rg307 select g, 'hist' from generate_series(1, 15000) g;
+select pgpm_formal.baseline('public.rg307');
 call pgpm.transmute('public.rg307', 'id', 10000, p_paused => false);
 select pgpm.obtain('public.rg307');
 select format('drop table public.%I', child_name) from pgpm.part
@@ -245,8 +260,10 @@ create table public.rg307_coarse2 partition of public.rg307 for values from (200
 insert into pgpm.part (parent_table, child_name, lo, hi, attached, child_oid)
   values ('public.rg307'::regclass, 'rg307_coarse2', '20000', '40000', true, 'public.rg307_coarse2'::regclass::oid);
 insert into public.rg307 values (25000, 'coarse2-a'), (35000, 'coarse2-b'), (55000, 'frontier');
+select pgpm_formal.wrote('public.rg307', 'id in (25000, 35000, 55000)');
 select child_name as rg_mono, child_oid as rg_mono_oid from pgpm.part
  where parent_table = 'public.rg307'::regclass and lo = '0' \gset
+select pgpm_formal.operator_owns(format('public.%I', :'rg_mono')::regclass);
 
 select is((select coarse_frozen from pgpm.progress('public.rg307')), 2::bigint,
   'LIVENESS: with both attached, the monolith [0, 20000) and [20000, 40000) are frozen coarse children');
@@ -289,6 +306,7 @@ select is((select count(*) from pgpm.log where parent_table = 'public.rg307'::re
   'auto-regrain logged no skip_regrain: it is not stuck failing a swap on the detached monolith');
 select lives_ok(format('truncate public.%I', :'rg_mono'),
   'the operator can TRUNCATE the table they detached');
+select pgpm_formal.deleted('public.rg307', 'id < 20000');
 
 -- ============== part F: a regrain in flight when its source is detached by hand is ended ==============
 -- Auto-regrain starts on the frozen coarse monolith [0, 20000) of ids 1..15000 (a prepare tick and a copy
@@ -299,9 +317,11 @@ select lives_ok(format('truncate public.%I', :'rg_mono'),
 -- table's rows untouched.
 create table public.rf307 (id bigint primary key, payload text);
 insert into public.rf307 select g, 'hist' from generate_series(1, 15000) g;
+select pgpm_formal.baseline('public.rf307');
 call pgpm.transmute('public.rf307', 'id', 10000, p_paused => false);
 select pgpm.obtain('public.rf307');
 insert into public.rf307 values (55000, 'frontier');
+select pgpm_formal.wrote('public.rf307', 'id = 55000');
 update pgpm.config set regrain_batch = 2000 where parent_table = 'public.rf307'::regclass;
 select pgpm.set_regrain('public.rf307', '5000');
 select child_name as rf_mono, child_oid as rf_mono_oid from pgpm.part
@@ -320,6 +340,7 @@ select is((select array_agg(tgname::text order by tgname) from pg_trigger
 select ok((select count(*) from pgpm_test307.rf_copies) > 0
           and (select bool_and(exists (select 1 from pg_class c where c.oid = k.child_oid)) from pgpm_test307.rf_copies k),
   'LIVENESS: the run has built unattached copies, and their tables exist');
+select pgpm_formal.operator_owns(format('public.%I', :'rf_mono')::regclass);
 
 select format('alter table public.rf307 detach partition public.%I', :'rf_mono') \gexec
 select ok(not exists (select 1 from pg_inherits where inhparent = 'public.rf307'::regclass and inhrelid = :'rf_mono_oid'::oid)
@@ -350,5 +371,6 @@ select results_eq(format('select count(*), min(id), max(id) from public.%I', :'r
   'the detached table keeps exactly its rows 1..15000');
 select lives_ok(format('truncate public.%I', :'rf_mono'),
   'the operator can TRUNCATE the table they detached mid-regrain');
+select pgpm_formal.deleted('public.rf307', 'id < 20000');
 
 select * from finish();
