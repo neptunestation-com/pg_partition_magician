@@ -1689,40 +1689,8 @@ run_lockview() {
 #
 # The jar and the JRE are pinned by checksum and digest (formal/tlc.sh), so the track needs Docker and
 # nothing the database tracks build. CI runs it as two jobs: --part=live is part 2 alone, --part=core the rest.
-run_formal() {
-  local f=formal/specs out c want
-  local clean="Custody CustodyFK CustodyLive"
-  out=$(mktemp -d "${TMPDIR:-/tmp}/pgpm_formal.XXXXXX")
-  case "$FORMAL_PART" in core) clean="Custody CustodyFK" ;; live) clean="CustodyLive" ;; esac
-  if [ "$FORMAL_PART" != live ]; then
-    echo ">>> formal: the harness's own checks discriminate"
-    python3 formal/mutations/mutate.py selftest
-    echo ">>> formal: liveness witnesses (archive, drop, dispatch, overtaken read, custody all reachable)"
-    python3 formal/mutations/mutate.py witness
-  fi
-  for c in $clean; do
-    echo ">>> formal: $c.cfg must check clean"
-    formal/tlc.sh "$f" Custody.tla "$c.cfg" > "$out/$c.out" 2>&1 || true
-    if ! grep -q 'No error has been found' "$out/$c.out"; then
-      tail -60 "$out/$c.out"; echo "FAIL: formal/specs/$c.cfg did not check clean"; exit 1
-    fi
-    grep -E 'Finished in' "$out/$c.out" | tail -1
-    python3 formal/mutations/mutate.py scope "$c.cfg" "$out/$c.out"
-  done
-  if [ "$FORMAL_PART" = live ]; then rm -rf "$out"; return; fi
-  # config:invariant for every claim still on record (C1 closed by #1452)
-  local asis="Custody-asisC2:DropOnlyCovered CustodyFK-asisC3:NoLostRow CustodyFK-asisC4:ResolveByRecord"
-  for c in $asis; do
-    want=${c#*:}; c=${c%%:*}
-    echo ">>> formal: $c.cfg must keep its claim's violation of $want"
-    formal/tlc.sh "$f" Custody.tla "$c.cfg" > "$out/$c.out" 2>&1 || true
-    if ! grep -q "Invariant $want is violated" "$out/$c.out"; then
-      tail -60 "$out/$c.out"; echo "FAIL: formal/specs/$c.cfg no longer reports its claim ($want)"; exit 1
-    fi
-  done
-  echo ">>> formal: retrodiction (every mutation's recorded outcome)"
-  python3 formal/mutations/mutate.py check
-  rm -rf "$out"
+run_formal() { # the track lives in formal/run.sh (#1444), so formal.yml need not watch this file
+  formal/run.sh --part="$FORMAL_PART"
 }
 
 # The `lint` track: every job .github/workflows/lint.yml's required `Lint summary` needs, run here the way

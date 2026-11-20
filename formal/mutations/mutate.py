@@ -391,13 +391,14 @@ def build(name, guards, dst, specs=None):
     open(p, 'w').write(s)
 
 
-def run_tlc(d, cfg, timeout=1800):
+def run_tlc(d, cfg, timeout=1800, final=False):
     open(os.path.join(d, 'M.cfg'), 'w').write(cfg)
     env = dict(os.environ)
     env.setdefault('FORMAL_WORKERS', '4')
     for attempt in (1, 2):
         try:
-            out = subprocess.run([TLC, d, 'Custody.tla', 'M.cfg'], capture_output=True, text=True, env=env,
+            out = subprocess.run([TLC, d, 'Custody.tla', 'M.cfg'] + (['-lncheck', 'final'] if final else []),
+                                 capture_output=True, text=True, env=env,
                                  timeout=timeout).stdout
         except subprocess.TimeoutExpired:
             return 'TIMEOUT', ''
@@ -431,7 +432,11 @@ def check_one(name):
         build(name, [], d0)
         # Without one of the claims' hypotheses, that claim's own invariant fails on the unmutated spec by design,
         # so the CLEAN run then holds the unmutated spec to the invariant the mutation is judged by, alone.
-        res['clean'], out0 = run_tlc(d0, clean_cfg(cfg) if set(hyp) >= set(DEFAULT_HYP) else cfg)
+        # A liveness mutation's clean run checks its property once, at the end (#1444, #1470): it is expected to
+        # pass, the verdict is the same, and periodic checks cost about a fifth of the run, which took M778's clean
+        # run past the timeout on a slow runner. The mutant run keeps them, so a violation is found as it appears.
+        res['clean'], out0 = run_tlc(d0, clean_cfg(cfg) if set(hyp) >= set(DEFAULT_HYP) else cfg,
+                                     final=m.get('live', False))
         d1 = os.path.join(t, 'mutant')
         build(name, m['guards'], d1)
         res['mutant'], out1 = run_tlc(d1, cfg)

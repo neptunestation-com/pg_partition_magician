@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **The formal track no longer starts on every `test.sh` edit, and its liveness runs expected to pass check their
+  property once, at the end** (#1444, #1470). The track's body moved from `test.sh` to `formal/run.sh` (`./test.sh
+  formal` still runs it), so `.github/workflows/formal.yml` watches `formal/` alone: a harness edit, lint-only ones
+  included, had been starting a two-to-four-hour job. `CustodyLive.cfg` and the clean run of every liveness mutation
+  pass TLC `-lncheck final`: measured on 16 cores, 8 min 7 s against 9 min 53 s for the same 1,556,162 states and
+  verdict, which also widens M778's clean run's margin under its 30-minute bound. A mutant run keeps the periodic
+  checks, so a violation is still reported as it appears.
 - **Two lock guards stop failing correct code on a slow runner** (#1456, #1408, #1066, #556).
   `bench/restore_fk_lock.sh` counted probe writes to the managed parent that timed out at a fixed 50 ms, so on
   a GitHub runner where the fixed restore's own short hold reached 95 to 167 ms it failed correct code. It now
