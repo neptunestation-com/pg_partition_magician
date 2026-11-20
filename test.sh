@@ -1075,6 +1075,11 @@ run_archive() {
   # pairs bench/discriminate.sh completes with each encoder's refusal taken out and each of its two rules dropped.
   echo "--- no archive_fn strategy writes over a recorded chunk it does not reproduce guard (issue #975) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk.sh" pgpm_test-archive pgpm_perf258 || fail=1
+  # The invariant oracle's ArchiveNoClobber as a guard (formal Phase 3 W5) re-runs tests/archive/db/42 and reads its
+  # retired objects back: the clean-code half of the pair discriminate.sh completes with
+  # formal_archive_recorded_chunk_rows_unchecked.
+  echo "--- the oracle finds every retired chunk's rows in its object (formal Phase 3 W5) ---"
+  bash "$(dirname "$0")/bench/formal_archive_no_clobber.sh" pgpm_test-archive pgpm_perf478 || fail=1
   # The extension-resolution guard (#984) re-runs tests/archive/db/44 for the same reason: the clean-code half
   # of the pairs bench/discriminate.sh completes with the signers' search_path pin taken out, HMAC called
   # through it, and the NDJSON upload naming the http types again.

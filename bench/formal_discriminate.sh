@@ -46,6 +46,28 @@ FILE_TIMEOUT="${FORMAL_FILE_TIMEOUT:-900}"   # a mutant can hang a file (W4: tes
 
 q() { docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" psql -U postgres -d "${QDB:-postgres}" -v ON_ERROR_STOP=1 -qtA "$@"; }
 
+# The archive mode reads objects back with pyarrow (tests/formal/load_store.py), from the venv run_archive makes; a job
+# that never ran the archive track (discriminate's) makes it here, as run_archive does.
+if [ -n "$ARCHIVE" ] && ! "$ROOT/.venv-verify/bin/python" -c 'import pyarrow' >/dev/null 2>&1; then
+  { [ -d "$ROOT/.venv-verify" ] || python3 -m venv "$ROOT/.venv-verify"; } &&
+    "$ROOT/.venv-verify/bin/pip" install -q -r "$ROOT/scripts/requirements-verify.txt" >/dev/null 2>&1 ||
+    { echo "FAIL  GUARD: could not make .venv-verify (pyarrow) to read the bucket back"; exit 1; }
+fi
+
+# MinIO ready and the bucket the archive files point at made, idempotently: run_archive makes it before any file runs,
+# run_discriminate does not (bench/archive_recorded_chunk.sh does the same, for the same reason).
+if [ -n "$ARCHIVE" ]; then
+  ready=""
+  for _ in $(seq 1 60); do
+    if docker run --rm --network "$NET" curlimages/curl -sf http://minio:9000/minio/health/cluster >/dev/null 2>&1; then ready=1; break; fi
+    sleep 1
+  done
+  [ -n "$ready" ] || { echo "FAIL  GUARD: MinIO on $NET never reported ready (/minio/health/cluster) within 60 s"; exit 1; }
+  code=$(docker run --rm --network "$NET" curlimages/curl -s -o /dev/null -w '%{http_code}' \
+           --aws-sigv4 aws:amz:us-east-1:s3 -u minioadmin:minioadmin -X PUT http://minio:9000/archive-test-bucket) || code="curl exit $?"
+  if [ "$code" != 200 ] && [ "$code" != 409 ]; then echo "FAIL  GUARD: the MinIO bucket could not be made (PUT returned $code)"; exit 1; fi
+fi
+
 tmpl="${DB}_tmpl"
 q -c "drop database if exists $tmpl" >/dev/null
 q -c "create database $tmpl" >/dev/null

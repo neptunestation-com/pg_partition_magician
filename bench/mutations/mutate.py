@@ -18549,6 +18549,12 @@ _formal("summarize_zero_judged_passes", "bench/formal_summarize_selftest.sh",
         [("    for inv in REQUIRED[track]:\n        if stats[inv][\"ids\"] == 0:\n"
           "            fail.append(\"%s judged zero identities on the %s track, which should reach it\" % (inv, track))\n",
           "", 1)], "tests/formal/summarize.py")
+_formal("formal_archive_recorded_chunk_rows_unchecked", "bench/formal_archive_no_clobber.sh",
+        "The oracle's ArchiveNoClobber over archive_recorded_chunk_rows_unchecked (#975 F5-03, as #1069 left it): the "
+        "overwrite refusal compares a recorded chunk's range and never its rows, so a direct call with a retired chunk's "
+        "own [lo, hi) reads no row and PUTs an empty object over the only copy. tests/archive/db/42 reports every row "
+        "of both retired chunks through check() (t42.nd [1] in t42.nd_0.ndjson, t42.pq [1] in t42.pq_0.parquet).",
+        MUTATIONS["archive_recorded_chunk_rows_unchecked"][2], "pgpm_archive/install.sql")
 MUTATION_COST.update({"formal_regrain_reconcile_discards_delta": 10, "formal_retire_drops_uncovered": 8,
                       "formal_archive_retired_unmarked": 8, "formal_retire_drop_child_oid_ignored": 5,
                       "formal_mark_retired_chunks_unplaced_live_marked": 5})
