@@ -17254,7 +17254,7 @@ begin
       -- it is not going to be worked; it stays in status().coarse_partitions, which counts by the grid's
       -- step alone. A row whose partition was detached (#705) or dropped by hand is not counted (#1038): it reads
       -- the rows through _part_built, as status().coarse_partitions does, so the two cannot disagree about a cell
-      -- that is not there. (The candidate scan does take a dropped one, and refuses it as gone, skip_regrain.)
+      -- that is not there, and maintain()'s candidate scan reads through the same filter (#1478).
       v_floor := pgpm._grid_floor(r.control_kind, r.partition_step, r.partition_anchor, v_frontier, r.partition_tz);
       select count(*) into coarse_frozen from pgpm.part p
        where p.parent_table = r.parent_table and p.attached
