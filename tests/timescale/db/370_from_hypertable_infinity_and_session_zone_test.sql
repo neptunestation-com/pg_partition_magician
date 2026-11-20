@@ -149,7 +149,7 @@ call pgpm.from_hypertable('public.n370', 'ts', interval '1 day', p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.n370'::regclass) || ':'
           || (select string_agg(v::text, ',' order by v) from public.n370) || ':'
           || (select partition_tz from pgpm.config where parent_table = 'public.n370'::regclass), 'p:41,42:UTC',
-  'WITNESS: under the same zone a naive timestamp hypertable migrates (its grid is UTC), so the rule is asked of timestamptz alone');
+  'LIVENESS: under the same zone a naive timestamp hypertable migrates (its grid is UTC), so the rule is asked of timestamptz alone');
 
 -- the remedy works: a named zone, then the cutover (the copy is the one made above)
 set timezone = 'UTC';
