@@ -480,15 +480,17 @@ end $$;
 -- range ends at infinity and starts past every finite bound it renders, or null (#1328). A predicate bounded at
 -- its range_start raises 'timestamp out of range' in TimescaleDB, so the copy's chunk-bounded read cannot reach
 -- it, and it stays when the rows in it are deleted. from_hypertable_copy refuses while it exists, and the
--- frontier check's infinity refusal names it for the remedy.
+-- frontier check's infinity refusal names it for the remedy. plpgsql, not sql: a sql body is resolved at CREATE,
+-- and the module installs where TimescaleDB is absent (the perf and discriminate tracks verify its guards there).
 create or replace function pgpm._from_hypertable_infinite_chunk(p_hypertable regclass)
-returns regclass language sql stable as $$
-  select format('%I.%I', ch.chunk_schema, ch.chunk_name)::regclass
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace
-    join timescaledb_information.chunks ch on ch.hypertable_schema = n.nspname and ch.hypertable_name = c.relname
-   where c.oid = p_hypertable and ch.range_end = 'infinity'::timestamptz
-   order by ch.chunk_name limit 1
-$$;
+returns regclass language plpgsql stable as $$
+begin
+  return (select format('%I.%I', ch.chunk_schema, ch.chunk_name)::regclass
+            from pg_class c join pg_namespace n on n.oid = c.relnamespace
+            join timescaledb_information.chunks ch on ch.hypertable_schema = n.nspname and ch.hypertable_name = c.relname
+           where c.oid = p_hypertable and ch.range_end = 'infinity'::timestamptz
+           order by ch.chunk_name limit 1);
+end $$;
 
 -- _from_hypertable_check_frontier: transmute's frontier refusal (#457), asked of the hypertable before the
 -- swap (#792). A newest row further ahead of now() than one step plus an hour (a device with a wrong clock)
