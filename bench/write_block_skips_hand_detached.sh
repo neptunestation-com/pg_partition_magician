@@ -26,8 +26,8 @@
 #                                           of logging skip_write_block (tests/94's path). Part D.
 #   regrain_trusts_part_attached         -- the auto-regrain candidate scan trusts attached again, the
 #                                           pre-fix shape. Part E.
-#   progress_coarse_counts_hand_detached -- progress().coarse_frozen stops mirroring that scan and counts
-#                                           the detached coarse child. Part E.
+#   progress_coarse_counts_hand_detached -- progress().coarse_frozen reads attached rows without _part_built,
+#                                           and counts the detached coarse child. Part E.
 #   regrain_detached_source_orphaned     -- a run already in flight when its source is detached by hand is
 #                                           never ended: triggers, copies and cursor stay. Part F.
 #   regrain_detached_logged_as_cancel    -- the run is ended but logged regrain_cancel. Part F.

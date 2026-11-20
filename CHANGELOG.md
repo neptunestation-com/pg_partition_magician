@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+- **`incoming_fk_orphans` counts orphans under a collation mismatch** (#958). It joined each referencing column to
+  the column it references with no `COLLATE`, so a foreign key whose two text columns carry different collations
+  (PostgreSQL accepts one, and `preserve` re-adds it as written) raised `could not determine which collation to use`
+  instead of counting what blocks `validate_incoming_fks`. They are now compared under the referenced column's
+  collation, as `VALIDATE` compares them. tests/388; guard `bench/incoming_fk_orphans_collation.sh`, mutation
+  `incoming_fk_orphans_join_uncollated`.
+- **The archive step no longer wedges on a `text_time` key without the declared shape** (#709, the archive
+  step's bullet). `_next_archive_chunk` decoded the window's newest value, the next distinct value past it and the
+  first row past a native unit, so such a key (string bounds admit one) at any of the three raised on every tick:
+  `skip_archive` each time, no chunk past it, and the aged partition never covered nor retired. A chunk now ends
+  only at a key that has a native value, and the odd key travels inside the chunk whose encoded bounds hold it.
+  tests/389; guard `bench/archive_chunk_unshaped_key.sh`, one mutation per read.
+- **`progress().coarse_frozen` no longer counts a coarse partition dropped by hand** (#1038). It left out one
+  detached by hand but counted one dropped, whose `pgpm.part` row stays attached, while `status().coarse_partitions`
+  did not; both now read the rows through `_part_built`. tests/390; guard `bench/progress_coarse_frozen_built.sh`,
+  mutation `coarse_frozen_counts_dropped`.
+- **An idle archive step and `obtain`'s stand-in lookup read a bounded slice of their tables** (#1219, #1038).
+  Every archive step's `_mark_gone_chunks` and #511 orphan query read every retired ledger row of the parent to
+  find the few that are not, so an idle tick's cost grew with the whole archive history: a partial index
+  `archive_ledger_live_child_idx` on `(parent_table, child_name)` over the rows not retired bounds both. And
+  `pgpm.log`, never pruned, had only its identity key, so `_obtain_name`'s stand-in lookup read all of it, possibly
+  while `obtain` held `ACCESS EXCLUSIVE` on the parent: `log_parent_action_idx` on `(parent_table, action)` serves
+  it, and `status().archive_skips` too. Re-running `install.sql` builds both (on a long log, that read takes a
+  moment once). tests/391; guard `bench/idle_reads_indexed.sh`, mutations `archive_ledger_live_index_dropped` and
+  `log_parent_action_index_dropped`.
+- **`archive.configure` writes an endpoint's port as the number the client sends** (#1327). The signers sign the
+  endpoint's authority as the `Host`, and libcurl reads the port as a number, so `http://minio:09000` was signed
+  `minio:09000` and sent `minio:9000`, and the default port spelled `:080` or as a bare `:` was signed and left
+  out: every request refused 403. The canonical endpoint, which configure stores and both signers apply, now writes
+  a port as its number and drops the scheme's default port however it is spelled. tests/archive/db/53 part K;
+  guard `bench/archive_configure_endpoint.sh`, mutation `archive_endpoint_port_spelling_kept`.
 - **`obtain` builds around a partition attached by hand instead of failing on it every tick** (#1119). Whether a
   forward cell was built was judged from `pgpm.part` alone, which records pgpm's partitions and nobody else's, so a
   table the operator attached with `ALTER TABLE ... ATTACH PARTITION` over a cell's range was invisible: `obtain`'s

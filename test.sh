@@ -1401,6 +1401,10 @@ run_perf() {
     "bench/archive_ledger_wedges.sh pgpm_perf449"
     "bench/archive_skips_scans.sh pgpm_perf450"
     "bench/obtain_builds_around_hand_attached.sh pgpm_perf452"
+    "bench/incoming_fk_orphans_collation.sh pgpm_perf466"
+    "bench/archive_chunk_unshaped_key.sh pgpm_perf467"
+    "bench/progress_coarse_frozen_built.sh pgpm_perf468"
+    "bench/idle_reads_indexed.sh pgpm_perf469"
   )
   local selected=()
   local n=${#guards[@]} idx

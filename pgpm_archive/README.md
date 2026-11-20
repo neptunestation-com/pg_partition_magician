@@ -37,9 +37,11 @@ optionally a path prefix (Supabase Storage's is `https://<project-ref>.supabase.
 are handed, and refuses the spellings below before it writes anything:
 
 - **Canonical form**: trailing slashes are dropped (`http://minio:9000/` is `http://minio:9000`).
-- **Canonical form**: the scheme's default port, spelled `:80` after `http://` or `:443` after
-  `https://`, is dropped (`http://host:80` is `http://host`, `https://host:443` is `https://host`). A
-  port spelled any other way is kept as written.
+- **Canonical form**: a port is written as its number, the way the HTTP client sends it
+  (`http://minio:09000` is `http://minio:9000`), and the scheme's default port (80 after `http://`,
+  443 after `https://`, however it is spelled) is dropped, as is a `:` with no port after it
+  (`http://host:80`, `http://host:080` and `http://host:` are `http://host`; `https://host:443` is
+  `https://host`).
 - **Refused, naming `p_endpoint`**: a value that does not start with `http://` or `https://`.
 - **Refused, naming `p_endpoint`**: a value with no host, which is one with nothing after the scheme
   (`http://`), nothing before the next `/` (`http:///s3`), or a `:` with nothing before it

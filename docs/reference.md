@@ -3856,8 +3856,9 @@ produced, not what you meant them to.
   `freeze_margin` instead.
 - `coarse_frozen` -- coarse partitions whose whole range is already behind the frontier: frozen, and
   eligible for regrain; with `regrain_to` set, only those the target subdivides, which is exactly what
-  `maintain` will select. A coarse partition detached by hand is not counted. `coarse_frozen > 0` beside a null `regrain_to` is a history that is not going to
-  split by itself. `coarse_frozen = 0` beside `coarse_partitions > 0` and a set `regrain_to` is coarse
+  `maintain` will select. A coarse partition detached or dropped by hand is not counted, as
+  `status().coarse_partitions` does not count it. `coarse_frozen > 0` beside a null `regrain_to` is a history
+  that is not going to split by itself. `coarse_frozen = 0` beside `coarse_partitions > 0` and a set `regrain_to` is coarse
   history that is either not frozen yet (see `freeze_in`) or that the target cannot split.
 
 **How far along is the regrain, and when does it finish?** Populated while a regrain is in flight
@@ -4099,7 +4100,9 @@ pgpm.incoming_fk_orphans(p_parent regclass)
 For each re-added-but-unvalidated FK, the count of orphan rows blocking validation, under the key's own match
 type: for `MATCH SIMPLE` (the default), referencing rows with no FK column null that match no parent key; for
 `MATCH FULL`, those plus every row with some but not all of its FK columns null, which `VALIDATE` refuses
-whatever the parent holds. Handles composite FKs. Use it to find what to clear before `validate_incoming_fks`.
+whatever the parent holds. Handles composite FKs. A referencing column whose collation differs from the column it
+references is compared under the referenced column's, as `VALIDATE` compares it. Use it to find what to clear
+before `validate_incoming_fks`.
 
 ### `suspend_incoming_fks`
 

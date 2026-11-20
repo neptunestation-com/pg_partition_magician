@@ -10,7 +10,7 @@
 # '//<bucket>/<key>'. And configure refuses by name an endpoint the signers cannot use (no http(s) scheme, no
 # host, a port with no host before it, a query string or a fragment; credentials before the host; an empty, '.'
 # or '..' path segment, spelled or percent-encoded; the scheme's default port is canonicalised away rather than
-# refused) and a bucket that is not a bare bucket name ('/my-bucket' addressed '//my-bucket/<key>'), and none of
+# refused, and any other port written as its number, as the client sends it, #1327) and a bucket that is not a bare bucket name ('/my-bucket' addressed '//my-bucket/<key>'), and none of
 # its refusals prints a value that holds an '@'. The file's own witnesses (the same export through the endpoint
 # spelled without the slash lands both rows, each key cleared and witnessed absent first) say the store was
 # reachable; a failure of a LIVENESS witness alone is reported as that, not as a catch.
@@ -36,6 +36,9 @@
 #   archive_configure_refusal_shows_userinfo -- a refusal quotes a value that holds an '@', so credentials the
 #                                           credentials check does not recognise are printed by the refusal
 #                                           that does fire (part J)
+#   archive_endpoint_port_spelling_kept  -- the canonical endpoint keeps a port as spelled, so 'http://minio:09000'
+#                                           is signed 'minio:09000' while libcurl sends 'minio:9000', and every
+#                                           request is refused 403 (part K, #1327)
 #
 # Usage: archive_configure_endpoint.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs and

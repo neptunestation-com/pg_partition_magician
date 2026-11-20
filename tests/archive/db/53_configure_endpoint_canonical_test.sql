@@ -43,7 +43,7 @@
 -- Each export's object is stated by identity (the rows it holds, two of them, by id and payload), its key
 -- cleared and witnessed absent first, because the bucket outlives the test database; the prefix carries the
 -- database's name so a parallel run of this file in another database cannot meet it.
-select plan(89);
+select plan(100);
 
 create schema t53;
 create table t53.evt (id bigint primary key, payload text not null);
@@ -304,5 +304,27 @@ select is(t53.judge($$ select t53.cfgx('t53.evt', 'archive-test-bucket', 8388608
   'that refusal, without the password', 'nor the page-size refusal');
 select is(t53.stored() || ' ' || t53.bucket(), 'http://minio:9000 archive-test-bucket',
   'and every one of them leaves the stored row as it was');
+
+-- ---- K. a port is written as the number the client sends (#1327) ------------------------------------------------
+-- libcurl reads the port as a number, so 'http://minio:09000' went out as Host 'minio:9000' while the signers signed
+-- 'minio:09000': 403 on every request. The endpoint is stored, and used by both signers, with the port's number.
+select t53.cfg('http://minio:09000');
+select is(t53.stored(), 'http://minio:9000', 'a zero-padded port is stored as its number');
+select is(t53.export(), 'ok', 'an export through an endpoint configured with a zero-padded port is not refused by the store');
+select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
+update archive.config set endpoint = 'http://minio:09000/' where parent_table = 't53.evt'::regclass;
+select is(t53.export(), 'ok', 'an export through a row stored by hand with a zero-padded port is not refused by the store');
+select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared after the zero-padded exports');
+-- the default port however it is spelled, which the client leaves out of the Host (part H's stand-in shows the export)
+select t53.cfg('http://minio:080');
+select is(t53.stored(), 'http://minio', 'the default port spelled with a leading zero is dropped');
+select t53.cfg('https://minio:0443/s3');
+select is(t53.stored(), 'https://minio/s3', 'and after https://, its path prefix kept');
+select t53.cfg('http://minio:');
+select is(t53.stored(), 'http://minio', 'a '':'' with no port after it is dropped');
+select t53.cfg('http://[::1]:09000/');
+select is(t53.stored(), 'http://[::1]:9000', 'an IPv6 literal keeps its colons, and its port is written as its number');
 
 select * from finish();
