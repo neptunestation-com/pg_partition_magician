@@ -247,6 +247,8 @@ end $$;
 select current_database() || '/t41/' || txid_current() || '/' as p \gset
 create table t41.ev (id bigint primary key, payload text not null);
 insert into t41.ev select g, 'r' || g from generate_series(1, 30) g;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t41.ev');
 call pgpm.transmute('t41.ev', 'id', 10::bigint, p_paused => true);
 select archive.configure('t41.ev', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 

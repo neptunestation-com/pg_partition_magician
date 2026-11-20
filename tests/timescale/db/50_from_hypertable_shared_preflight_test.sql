@@ -38,6 +38,8 @@ select plan(21);
 -- ======================================================================================================
 create table public.t50_sweep (id bigint primary key, ts timestamptz not null default now());
 insert into public.t50_sweep values (1), (2);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.t50_sweep');
 
 create function pg_temp.t50_sample(p_type oid) returns text language plpgsql as $$
 begin
@@ -191,6 +193,7 @@ create table public.t50_a (id bigint not null, ts timestamptz not null, v int, p
 select create_hypertable('public.t50_a', 'ts', chunk_time_interval => interval '1 day');
 insert into public.t50_a select g, timestamptz '2026-09-01 00:00+00' + g * interval '1 hour', g
   from generate_series(1, 60) g;
+select pgpm_formal.baseline('public.t50_a');
 create table public.t50_a_ref (rid int primary key, id bigint, ts timestamptz,
   constraint t50_a_ref_fk foreign key (id, ts) references public.t50_a (id, ts));
 insert into public.t50_a_ref select 1, id, ts from public.t50_a where id = 7;
@@ -223,6 +226,7 @@ select is(pg_temp.t50_keys('public.t50_a'), 't50_a_ref_fk:true:t50_a_ref->t50_a'
 create table public.t50_nv (id bigint not null, ts timestamptz not null, primary key (id, ts));
 select create_hypertable('public.t50_nv', 'ts');
 insert into public.t50_nv values (1, timestamptz '2026-09-20 00:00+00'), (2, timestamptz '2026-09-21 12:00+00');
+select pgpm_formal.baseline('public.t50_nv');
 create table public.t50_nv_dirty (cid int primary key, pid bigint, pts timestamptz);
 create table public.t50_nv_clean (cid int primary key, pid bigint, pts timestamptz);
 insert into public.t50_nv_dirty values (1, 1, timestamptz '2026-09-20 00:00+00'), (2, 99, timestamptz '2026-09-22 00:00+00');
@@ -253,6 +257,7 @@ create table public.t50_w (id bigint not null, ts timestamptz not null, v int, p
 select create_hypertable('public.t50_w', 'ts', chunk_time_interval => interval '1 day');
 insert into public.t50_w select g, timestamptz '2026-09-10 00:00+00' + g * interval '2 hours', g
   from generate_series(1, 40) g;
+select pgpm_formal.baseline('public.t50_w');
 create table public.t50_w_ref (rid int primary key, id bigint, ts timestamptz);
 insert into public.t50_w_ref select 1, id, ts from public.t50_w where id = 5;
 call pgpm.from_hypertable_copy('public.t50_w', 'ts');
@@ -283,6 +288,7 @@ insert into public.t50_par values (1);
 create table public.t50_out (ts timestamptz not null, k int, v int);
 select create_hypertable('public.t50_out', 'ts');
 insert into public.t50_out values (timestamptz '2026-09-15 00:00+00', 1, 1), (timestamptz '2026-09-15 06:00+00', 2, 2);
+select pgpm_formal.baseline('public.t50_out');
 alter table public.t50_out add constraint t50_out_fk foreign key (k) references public.t50_par (k) not valid;
 select throws_like(
   $$ call pgpm.from_hypertable('public.t50_out', 'ts', interval '1 day') $$,

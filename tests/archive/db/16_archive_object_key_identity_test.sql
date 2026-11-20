@@ -108,9 +108,12 @@ $$;
 -- A frontier row at 45000 with retain 5000 puts the horizon at 40000, so both are eligible in one tick.
 create table public.negk (id bigint primary key, payload text);
 insert into public.negk select g, 'neg' from generate_series(-10000, -1) g;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.negk');
 call pgpm.transmute('public.negk', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into public.negk select g, 'pos' from generate_series(10000, 10009) g;
 insert into public.negk values (45000, 'frontier');
+select pgpm_formal.wrote('public.negk', 'id >= 10000');
 
 select mk_archive_config('negk', false);
 update pgpm.config set retain_batch = 0, archive_batch = null where parent_table = 'public.negk'::regclass;
@@ -176,9 +179,11 @@ select is(
 -- [10000, 20000), so the two objects cannot be confused by size.
 create table public.negkp (id bigint primary key, payload text);
 insert into public.negkp select g, 'neg' from generate_series(-1000, -1) g;
+select pgpm_formal.baseline('public.negkp');
 call pgpm.transmute('public.negkp', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into public.negkp select g, 'pos' from generate_series(10000, 10009) g;
 insert into public.negkp values (45000, 'frontier');
+select pgpm_formal.wrote('public.negkp', 'id >= 10000');
 
 select mk_archive_config('negkp', false);
 update pgpm.config set retain_batch = 0, archive_batch = null where parent_table = 'public.negkp'::regclass;

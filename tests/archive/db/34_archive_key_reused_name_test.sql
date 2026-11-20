@@ -58,8 +58,11 @@ select current_database() || '/t34/' as p \gset
 
 create table t34.evt (id bigint primary key, payload text not null);
 insert into t34.evt values (1, 'old'), (2, 'old');
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t34.evt');
 call pgpm.transmute('t34.evt', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t34.evt values (45000, 'frontier');   -- horizon 40000: [0, 10000) is aged
+select pgpm_formal.wrote('t34.evt', 'id = 45000');
 select archive.configure('t34.evt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t34.evt', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't34.evt'::regclass::oid as a_oid \gset
@@ -75,6 +78,7 @@ select is(t34.rows(:'p' || 't34.evt_0.ndjson'), '1:old,2:old',
 select is((select parent_oid from archive.object_key_owner where key_base = :'p' || 't34.evt'), :a_oid::oid,
   'the key base <prefix>t34.evt is recorded as the first table''s');
 
+select pgpm_formal.deleted('t34.evt', 'true');
 drop table t34.evt cascade;
 select is((select partitions_forgotten from pgpm.forget_missing() where parent_oid = :a_oid::oid) > 0, true,
   'LIVENESS: forget_missing() cleared the dropped table, as the runbook directs');
@@ -85,8 +89,10 @@ select is((select parent_oid from archive.object_key_owner where key_base = :'p'
 
 create table t34.evt (id bigint primary key, payload text not null);
 insert into t34.evt values (1, 'new');
+select pgpm_formal.baseline('t34.evt');
 call pgpm.transmute('t34.evt', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t34.evt values (45000, 'frontier');
+select pgpm_formal.wrote('t34.evt', 'id = 45000');
 select archive.configure('t34.evt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t34.evt', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't34.evt'::regclass::oid as b_oid \gset
@@ -109,8 +115,10 @@ select is(t34.rows((select s3_key from pgpm.archive_ledger where parent_table = 
 
 create table t34.pq (id bigint primary key, payload text not null);
 insert into t34.pq values (1, 'old'), (2, 'old');
+select pgpm_formal.baseline('t34.pq');
 call pgpm.transmute('t34.pq', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t34.pq values (45000, 'frontier');
+select pgpm_formal.wrote('t34.pq', 'id = 45000');
 select archive.configure('t34.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t34.pq', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 select 't34.pq'::regclass::oid as pa_oid \gset
@@ -124,14 +132,17 @@ select is((select s3_key from pgpm.archive_ledger where parent_table = :pa_oid::
 select encode(t34.bytes(:'p' || 't34.pq_0.parquet'), 'hex') as pa_hex \gset
 select is(:'pa_hex' <> '', true, 'LIVENESS: the first Parquet table''s file is in the bucket');
 
+select pgpm_formal.deleted('t34.pq', 'true');
 drop table t34.pq cascade;
 select is((select partitions_forgotten from pgpm.forget_missing() where parent_oid = :pa_oid::oid) > 0, true,
   'LIVENESS: forget_missing() cleared the dropped Parquet table');
 
 create table t34.pq (id bigint primary key, payload text not null);
 insert into t34.pq values (1, 'new');
+select pgpm_formal.baseline('t34.pq');
 call pgpm.transmute('t34.pq', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t34.pq values (45000, 'frontier');
+select pgpm_formal.wrote('t34.pq', 'id = 45000');
 select archive.configure('t34.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t34.pq', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 select 't34.pq'::regclass::oid as pb_oid \gset
@@ -155,8 +166,10 @@ select isnt(encode(t34.bytes(:'p' || 't34.pq.' || :'pb_oid' || '_0.parquet'), 'h
 
 create table t34.up (id bigint primary key, payload text not null);
 insert into t34.up values (1, 'old'), (2, 'old');
+select pgpm_formal.baseline('t34.up');
 call pgpm.transmute('t34.up', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t34.up values (45000, 'frontier');
+select pgpm_formal.wrote('t34.up', 'id = 45000');
 select archive.configure('t34.up', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t34.up', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't34.up'::regclass::oid as ua_oid \gset
@@ -172,13 +185,16 @@ select archive._claim_archived_key_bases();
 select is((select parent_oid from archive.object_key_owner where key_base = :'p' || 't34.up'), :ua_oid::oid,
   'install seeds the claim on <prefix>t34.up from the key the first table''s ledger row records');
 
+select pgpm_formal.deleted('t34.up', 'true');
 drop table t34.up cascade;
 select is((select partitions_forgotten from pgpm.forget_missing() where parent_oid = :ua_oid::oid) > 0, true,
   'LIVENESS: forget_missing() cleared the dropped table');
 create table t34.up (id bigint primary key, payload text not null);
 insert into t34.up values (1, 'new');
+select pgpm_formal.baseline('t34.up');
 call pgpm.transmute('t34.up', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t34.up values (45000, 'frontier');
+select pgpm_formal.wrote('t34.up', 'id = 45000');
 select archive.configure('t34.up', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t34.up', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't34.up'::regclass::oid as ub_oid \gset

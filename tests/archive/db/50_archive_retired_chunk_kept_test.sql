@@ -44,9 +44,12 @@ select current_database() || '/t50/' || txid_current() || '/' as p \gset
 
 create table t50.ev (id bigint primary key, payload text not null);
 insert into t50.ev select g, 'old' || g from generate_series(1, 90) g;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t50.ev');
 call pgpm.transmute('t50.ev', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t50.ev select g, 'mid' || g from generate_series(101, 107) g;
 insert into t50.ev values (450, 'frontier');
+select pgpm_formal.wrote('t50.ev', 'id > 100');
 select archive.configure('t50.ev', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 update pgpm.config set retain_batch = 0 where parent_table = 't50.ev'::regclass;
 select pgpm.set_archive_fn('t50.ev', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
@@ -68,6 +71,7 @@ select is((select format('%s|%s|%s|%s|%s', lo, hi, child_name, s3_key = :'k0', r
 
 -- late rows for the retired range, in a partition created by plain DDL and adopted
 create table t50.ev_late partition of t50.ev for values from (0) to (100);
+select pgpm_formal.operator_owns('t50.ev_late');
 insert into t50.ev select g, 'late' || g from generate_series(1, 90) g;
 select lives_ok($$ select pgpm.adopt_partition('t50.ev', 't50.ev_late') $$,
   'LIVENESS: adopt_partition records the re-created partition over [0, 100)');

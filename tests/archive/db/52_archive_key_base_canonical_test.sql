@@ -60,6 +60,8 @@ select current_database() || '/t52/' as p \gset
 -- ======================= PART A: the namesake's prefix spelled with a leading '/' (F5-02) =======================
 create table t52.f (id bigint primary key, payload text not null);
 insert into t52.f select g, 'old' from generate_series(1, 25) g;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t52.f');
 call pgpm.transmute('t52.f', 'id', 10::bigint, p_paused => true);
 select archive.configure('t52.f', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select 't52.f'::regclass::oid as f1_oid \gset
@@ -71,11 +73,13 @@ select is(t52.rows(:'p' || 't52.f_0.ndjson'), '1:old,2:old,3:old,4:old,5:old,6:o
   'LIVENESS: (A) the object holds the first t52.f''s nine rows');
 
 -- the documented drop: the object is now the only copy of those rows
+select pgpm_formal.deleted('t52.f', 'true');
 drop table t52.f cascade;
 
 create table t52.f (id bigint primary key, payload text not null);
 insert into t52.f select g, 'new' from generate_series(1, 4) g;
 insert into t52.f select g, 'new' from generate_series(11, 25) g;
+select pgpm_formal.baseline('t52.f');
 call pgpm.transmute('t52.f', 'id', 10::bigint, p_paused => true);
 select archive.configure('t52.f', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => '/' || :'p');
 select 't52.f'::regclass::oid as f2_oid \gset
@@ -92,10 +96,12 @@ select is(t52.rows(:'p' || 't52.f.' || :'f2_oid' || '_0.ndjson'), '1:new,2:new,3
   'A: and the namesake''s four rows are at its own key');
 
 -- a third t52.f, its prefix with a leading '//' and every '/' doubled
+select pgpm_formal.deleted('t52.f', 'true');
 drop table t52.f cascade;
 create table t52.f (id bigint primary key, payload text not null);
 insert into t52.f select g, 'third' from generate_series(5, 6) g;
 insert into t52.f select g, 'third' from generate_series(11, 25) g;
+select pgpm_formal.baseline('t52.f');
 call pgpm.transmute('t52.f', 'id', 10::bigint, p_paused => true);
 select archive.configure('t52.f', 'archive-test-bucket', p_endpoint => 'http://minio:9000',
                          p_prefix => '//' || replace(:'p', '/', '//'));
@@ -111,8 +117,10 @@ select is(t52.rows(:'p' || 't52.f_0.ndjson') || '/' || t52.rows(:'p' || 't52.f.'
 -- ======================= PART B: an older install's claims and ledger row, spelled '/<p>' =======================
 create table t52.g (id bigint primary key, payload text not null);
 insert into t52.g values (1, 'old'), (2, 'old'), (3, 'old'), (7, 'old');
+select pgpm_formal.baseline('t52.g');
 call pgpm.transmute('t52.g', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t52.g values (45000, 'frontier');   -- horizon 40000: [0, 10000) is aged
+select pgpm_formal.wrote('t52.g', 'id = 45000');
 select archive.configure('t52.g', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t52.g', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't52.g'::regclass::oid as g1_oid \gset
@@ -145,9 +153,11 @@ select throws_like($$ select pgpm.archive_to_s3_ndjson('t52.g', 'unused', '0', '
 select is(t52.rows(:'p' || 't52.g_0.ndjson'), '1:old,2:old,3:old,7:old',
   'B: and the chunk object still holds rows 1, 2, 3 and 7');
 
+select pgpm_formal.deleted('t52.g', 'true');
 drop table t52.g cascade;
 create table t52.g (id bigint primary key, payload text not null);
 insert into t52.g values (1, 'new'), (2, 'new');
+select pgpm_formal.baseline('t52.g');
 call pgpm.transmute('t52.g', 'id', 10000::bigint, p_paused => true);
 select archive.configure('t52.g', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select 't52.g'::regclass::oid as g2_oid \gset
@@ -160,6 +170,7 @@ select is(t52.rows(:'p' || 't52.g_0.ndjson') || '/' || t52.rows(:'p' || 't52.g.'
 -- ======================= PART C: a '.' or '..' segment =======================
 create table t52.h (id bigint primary key, payload text not null);
 insert into t52.h values (1, 'h'), (2, 'h'), (11, 'h');
+select pgpm_formal.baseline('t52.h');
 call pgpm.transmute('t52.h', 'id', 10::bigint, p_paused => true);
 select throws_like(format($$ select archive.configure('t52.h', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => %L) $$, :'p' || 'x/../'),
   '%p_prefix ''' || :'p' || 'x/../'' has a "." or ".." segment%',

@@ -67,8 +67,11 @@ select ok((select length(bytes) > :n_off + 16 from t21.enc where label = 'range'
 create table public.nkm21 (id bigint not null, payload text);
 insert into public.nkm21 select g, 'r' || g from generate_series(1, 20) g;
 insert into public.nkm21 values (7, 'dup');
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.nkm21');
 call pgpm.transmute('public.nkm21', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into public.nkm21 values (45000, 'frontier');
+select pgpm_formal.wrote('public.nkm21', 'id = 45000');
 select mk_archive_config('nkm21', false);
 update pgpm.config set retain_batch = 0 where parent_table = 'public.nkm21'::regclass;
 

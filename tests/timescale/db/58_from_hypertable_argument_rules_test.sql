@@ -32,14 +32,18 @@ create table public.a58 (ts timestamptz not null, v int);
 select create_hypertable('public.a58', 'ts', chunk_time_interval => interval '1 day');
 insert into public.a58 values
   (now() - interval '2 days', 10), (now() - interval '20 hours', 20), (now() - interval '1 hour', 30);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.a58');
 create table public.b58 (ts timestamptz not null, v int);
 select create_hypertable('public.b58', 'ts', chunk_time_interval => interval '1 day');
 insert into public.b58 values (now() - interval '3 days', 7), (now() - interval '2 hours', 8);
+select pgpm_formal.baseline('public.b58');
 -- each hypertable's own oid, the key of its pgpm.scratch records, taken while the names are still its own (#1283)
 create table pg_temp.ht58 as
   select c.relname::text as ht, c.oid from pg_class c where c.oid in ('public.a58'::regclass, 'public.b58'::regclass);
 create table public.p58 (ts timestamptz not null, v int);
 insert into public.p58 values (now() - interval '1 hour', 1);
+select pgpm_formal.baseline('public.p58');
 
 -- ================================ the rules are transmute's ================================
 select throws_like(

@@ -67,16 +67,21 @@ select current_database() || '/t42/' || txid_current() || '/' as p \gset
 -- of 1, so the first tick archives the oldest partition, [0, 100), alone.
 create table t42.nd (id bigint primary key, payload text not null);
 insert into t42.nd select g, 'n' || g from generate_series(1, 90) g;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t42.nd');
 call pgpm.transmute('t42.nd', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t42.nd values (450, 'frontier');
+select pgpm_formal.wrote('t42.nd', 'id = 450');
 select archive.configure('t42.nd', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 update pgpm.config set retain_batch = 0 where parent_table = 't42.nd'::regclass;
 select pgpm.set_archive_fn('t42.nd', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 
 create table t42.pq (id bigint primary key, payload text not null);
 insert into t42.pq select g, 'q' || g from generate_series(1, 70) g;
+select pgpm_formal.baseline('t42.pq');
 call pgpm.transmute('t42.pq', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t42.pq values (450, 'frontier');
+select pgpm_formal.wrote('t42.pq', 'id = 450');
 select archive.configure('t42.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 update pgpm.config set retain_batch = 0 where parent_table = 't42.pq'::regclass;
 select pgpm.set_archive_fn('t42.pq', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);

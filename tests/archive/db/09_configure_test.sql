@@ -7,6 +7,8 @@
 select plan(9);
 
 call mk_archive_table('c09', 100, 1000);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.c09');
 
 create table public.unmanaged09 (id int);
 

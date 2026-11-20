@@ -80,9 +80,12 @@ select is((select substring(bytes from :tstz_off + 1 for 24) from t19.enc where 
 create table public.infm19 (id bigint primary key, expires_at timestamptz);
 insert into public.infm19 select g, now() from generate_series(1, 20) g;
 update public.infm19 set expires_at = 'infinity' where id = 7;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.infm19');
 call pgpm.transmute('public.infm19', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into public.infm19 select g, now() from generate_series(10000, 10009) g;
 insert into public.infm19 values (45000, now());
+select pgpm_formal.wrote('public.infm19', 'id >= 10000');
 select mk_archive_config('infm19', false);
 update pgpm.config set retain_batch = 0 where parent_table = 'public.infm19'::regclass;
 select pgpm.set_archive_fn('public.infm19', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);

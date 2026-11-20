@@ -71,16 +71,21 @@ create table t48.target ();
 create table t48.nd (id bigint primary key, payload text not null, at timestamptz not null,
                      ref regclass not null default 't48.target');
 insert into t48.nd select * from t48.seed('n', 90);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t48.nd');
 call pgpm.transmute('t48.nd', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t48.nd values (450, 'frontier', '2024-06-01 00:00:00+00');
+select pgpm_formal.wrote('t48.nd', 'id = 450');
 select archive.configure('t48.nd', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 update pgpm.config set retain_batch = 0 where parent_table = 't48.nd'::regclass;
 select pgpm.set_archive_fn('t48.nd', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 
 create table t48.pq (id bigint primary key, payload text not null, at timestamptz not null);
 insert into t48.pq select * from t48.seed('q', 70);
+select pgpm_formal.baseline('t48.pq');
 call pgpm.transmute('t48.pq', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t48.pq values (450, 'frontier', '2024-06-01 00:00:00+00');
+select pgpm_formal.wrote('t48.pq', 'id = 450');
 select archive.configure('t48.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 update pgpm.config set retain_batch = 0 where parent_table = 't48.pq'::regclass;
 select pgpm.set_archive_fn('t48.pq', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
@@ -151,8 +156,10 @@ select is((select count(*)::int from t48.nd where id < 100) + (select count(*)::
 -- Partitions re-created over the retired range by plain DDL, holding as many rows as each chunk recorded:
 -- t48.nd 90 rows of which every payload differs, t48.pq 70 rows of which only id 70's payload differs.
 create table t48.nd_redo partition of t48.nd for values from (0) to (100);
+select pgpm_formal.operator_owns('t48.nd_redo');
 insert into t48.nd select id, 'X' || id, at from t48.seed('n', 90);
 create table t48.pq_redo partition of t48.pq for values from (0) to (100);
+select pgpm_formal.operator_owns('t48.pq_redo');
 insert into t48.pq select id, case when id = 70 then 'Q70' else payload end, at from t48.seed('q', 70);
 
 select is((select count(*)::int from t48.nd where id >= 0 and id < 100), 90,
@@ -227,14 +234,18 @@ select is(t48.rows(:'knd'), t48.expect('n', 1, 90),
 -- Parquet with a column s, 40 as NDJSON with a column t), archived and retired by maintain() alone.
 create table t48.ps (id bigint primary key, s text not null);
 insert into t48.ps select g, 's' || g from generate_series(1, 60) g;
+select pgpm_formal.baseline('t48.ps');
 call pgpm.transmute('t48.ps', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t48.ps values (450, 'frontier');
+select pgpm_formal.wrote('t48.ps', 'id = 450');
 select archive.configure('t48.ps', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t48.ps', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 create table t48.nt (id bigint primary key, t text not null);
 insert into t48.nt select g, 't' || g from generate_series(1, 40) g;
+select pgpm_formal.baseline('t48.nt');
 call pgpm.transmute('t48.nt', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t48.nt values (450, 'frontier');
+select pgpm_formal.wrote('t48.nt', 'id = 450');
 select archive.configure('t48.nt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t48.nt', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 create temp table t48_alias_child as
