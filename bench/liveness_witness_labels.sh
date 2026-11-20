@@ -219,7 +219,9 @@ transmute_claim_squat|D|the claim row is gone
 regrain_outgoing_fk_lock|W|the regrain was pre-copied up to its swap
 regrain_outgoing_fk_lock|W|the probe overlapped a running swap
 regrain_outgoing_fk_lock|W|at least one write landed inside it
-regrain_outgoing_fk_lock|D|writes to the MANAGED PARENT are not blocked
+regrain_outgoing_fk_lock|W|no autovacuum worker was on the fixture as the swap began
+regrain_outgoing_fk_lock|W|the copy.s FK scan takes a measurable time here
+regrain_outgoing_fk_lock|D|the swap blocks parent writes for under half that scan
 retire_detach_lock|W|the probe overlapped a running retirement
 retire_detach_lock|W|^(LIVENESS: )?reads landed inside it
 retire_detach_lock|W|^(LIVENESS: )?writes landed inside it

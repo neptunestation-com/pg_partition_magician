@@ -9,13 +9,13 @@
 # known not to be a flake. One line per failed job says which.
 #
 # The signatures are deliberately narrow, so a real regression is never retried:
-#   lock_guard_probe   bench/regrain_outgoing_fk_lock.sh's probe assertion, with its liveness witness
-#                      PASSED and no other FAIL line in the job (issue #556: the count of 50 ms timeouts
-#                      cannot discriminate on a loaded runner; five occurrences, always exactly 20); and,
-#                      since 2026-10-08, bench/restore_fk_lock.sh's identical assertion with ITS two
-#                      liveness witnesses PASSED ("the probe was writing before the restore began",
-#                      "attempts overlapped the restore's own window") and "the FK was actually re-added"
-#                      PASSED (issue #1066: 1 of 66 overlapping writes timed out in #1063's merge group)
+#   (lock_guard_probe, retired) the count of 50 ms probe timeouts in bench/regrain_outgoing_fk_lock.sh (#556)
+#                      and bench/restore_fk_lock.sh (#1066, #1408, #1456) is gone from both guards, and with it
+#                      the assertion this signature matched. restore_fk_lock now asks whether the parent's
+#                      blocked span grows with the referencing table's size; regrain_outgoing_fk_lock bounds its
+#                      longest wait by this runner's own time for the scan the defect holds the lock across, and
+#                      vacuums the copy so no autovacuum worker (#556's constant 20) stands in the swap's way. A
+#                      failure of either guard is a finding now, not a retry.
 #   registry_quota     a third-party image pull refused with toomanyrequests / Data limit exceeded, and
 #                      no test output at all (the job never ran a test)
 #   regrain_perf_discriminate  a discriminate shard whose ONLY non-discriminating guard is bench/regrain_perf.sh
@@ -124,18 +124,7 @@ while IFS=$'\t' read -r j status concl steps name; do
     echo "job $j ($name): could not read the log (gh api returned nothing for it); no signature was checked, so this is not a known flake; do not retry"
     unread=1; continue
   fi
-  other_fails=$(grep -E "^FAIL " <<<"$log" | grep -vc "writes to the MANAGED PARENT are not blocked")
-  if grep -qE "^FAIL +writes to the MANAGED PARENT are not blocked +got [0-9]+, want 0" <<<"$log" \
-     && [ "$other_fails" = "0" ] \
-     && grep -qE "^PASS +LIVENESS: the probe overlapped a running swap" <<<"$log"; then
-    echo "job $j: known flake lock_guard_probe (regrain_outgoing_fk_lock's probe timed out under load; liveness passed; #556)"
-  elif grep -qE "^FAIL +writes to the MANAGED PARENT are not blocked +got [0-9]+, want 0" <<<"$log" \
-     && [ "$other_fails" = "0" ] \
-     && grep -qE "^PASS +LIVENESS: the probe was writing before the restore began" <<<"$log" \
-     && grep -qE "^PASS +LIVENESS: attempts overlapped the restore's own window" <<<"$log" \
-     && grep -qE "^PASS +the FK was actually re-added" <<<"$log"; then
-    echo "job $j: known flake lock_guard_probe (restore_fk_lock's probe timed out under load; both liveness witnesses and the re-add passed; #1066)"
-  elif grep -qE "toomanyrequests|Data limit exceeded" <<<"$log" && ! grep -qE "^FAIL |not ok" <<<"$log"; then
+  if grep -qE "toomanyrequests|Data limit exceeded" <<<"$log" && ! grep -qE "^FAIL |not ok" <<<"$log"; then
     echo "job $j: known flake registry_quota (third-party image pull refused; no test ran)"
   elif [ "$(grep -cE '^FAIL +bench/[^ ]+ PASSED against its own defect' <<<"$log")" = "1" ] \
      && grep -qE '^FAIL +bench/regrain_perf\.sh PASSED against its own defect' <<<"$log" \
