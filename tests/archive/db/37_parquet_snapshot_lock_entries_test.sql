@@ -21,12 +21,22 @@ select plan(13);
 
 create schema t37;
 
--- Lock entries held by this backend, one text key per entry, by identity (test 22's instrument).
+-- Lock entries held by this backend, one text key per entry, by identity (test 22's instrument), less the
+-- system catalogs' own relations (#1153, #1340): planning a statement takes AccessShareLock on the indexes of
+-- the catalogs it reads, held to transaction end, and a cache reset that any session of the cluster (any
+-- database) can cause by overflowing the shared invalidation queue makes the batch below re-plan statements
+-- that were generic plans at its warm-up, so it took up to nine of those (pg_class, pg_inherits,
+-- pg_constraint, pg_index indexes) and counted them as growth on correct code. The defect this file guards
+-- holds what the snapshot relation is made of: the table, its TOAST table and index (relations past the
+-- catalogs' oid range), its two row types (object locks); none of those is a catalog relation, and the
+-- control below still sees them.
 create function t37.my_locks() returns text[] language sql as $$
   select coalesce(array_agg(k order by k), '{}') from (
     select concat_ws('|', locktype, database, relation, page, tuple, virtualxid, transactionid,
                      classid, objid, objsubid, mode) as k
-      from pg_locks where pid = pg_backend_pid()) s
+      from pg_locks
+     where pid = pg_backend_pid()
+       and not (locktype = 'relation' and relation < 16384)) s   -- 16384: FirstNormalObjectId
 $$;
 
 -- Run p_sql once to warm up, then p_reps more times, all in the caller's one transaction; return the

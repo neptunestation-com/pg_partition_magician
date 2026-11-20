@@ -42,7 +42,7 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(36);
+select plan(37);
 
 create temp table t333_state (k text primary key, v text);
 -- the other database, made and dropped by this file
@@ -64,6 +64,25 @@ select dblink_connect('x333', 'dbname=' || current_database() || '_x user=postgr
 select dblink_exec('x333', 'begin');
 insert into t333_state select 'xxid', x from dblink('x333', 'select pg_current_xact_id()::text') as t(x text);
 insert into t333_state select 'xpid', p::text from dblink('x333', 'select pg_backend_pid()') as t(p int);
+-- THE PAIR'S PREMISE (#1340). I's backend_xmin is the xmin of E's export, B's that of its own statement, and the two
+-- agree only if X is already the oldest transaction running anywhere in the cluster when E exports: an older one
+-- (autovacuum's ANALYZE, a session of any database) that ends between the export and B's statement leaves I its xid
+-- and B X's, and the LIVENESS that says they agree fails on correct code. So E exports only once a fresh snapshot's
+-- xmin IS X's xid. Older transactions have then ended and none older can begin, so every snapshot taken from here
+-- until X ends has that same xmin. READ COMMITTED takes a new snapshot for every statement of the loop. Its budget
+-- (300 s) is a backstop against a transaction that never ends, and the GUARD says what it was for.
+do $$
+declare
+  v_x xid8 := (select v::xid8 from t333_state where k = 'xxid');
+  v_until timestamptz := clock_timestamp() + interval '300 seconds';
+begin
+  loop
+    exit when pg_snapshot_xmin(pg_current_snapshot()) = v_x or clock_timestamp() > v_until;
+    perform pg_sleep(0.05);
+  end loop;
+end $$;
+select is(pg_snapshot_xmin(pg_current_snapshot())::text, (select v from t333_state where k = 'xxid'),
+  'GUARD: (A) X is the oldest transaction running in the cluster, so E''s export and B''s statement get the same xmin');
 -- E: REPEATABLE READ in this database, its snapshot taken before any copy and exported; no lock on the table
 select dblink_connect('e333', 'dbname=' || current_database() || ' user=postgres');
 select dblink_exec('e333', 'begin isolation level repeatable read');

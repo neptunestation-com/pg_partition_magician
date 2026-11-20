@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **Test witnesses that failed on correct code under load now wait on events, not on samples or fixed budgets**
+  (#1469, #1340). Test-only; no module changes. `tests/162` judged "the second session is waiting on a lock" by
+  re-reading `pg_stat_activity.wait_event_type` after its poll had already seen it, and never read whether the
+  second call was sent: the probe now records what it saw, the second session blocked by the first in
+  `pg_blocking_pids`, or says the call never went out or finished without waiting. `tests/328` and
+  `tests/timescale/db/67` wait for a driver's snapshot wait by the marker the wait holds for its whole length (an
+  advisory lock in `pg_locks`) instead of catching a `PgSleep` sample inside an 800 x 10 ms budget, and record
+  what each poll saw rather than looking again; 67 also waits, as 328 already did, until no transaction older than
+  the copy runs anywhere in the cluster before it pins "1 snapshot(s)", and waits the same way for the premises of
+  part C's reader and part G's two exported snapshots. `tests/333` waits until its foreign
+  transaction is the oldest in the cluster before the exporter's snapshot, so the importer and the fresh statement
+  it pairs get the same xmin. `tests/192`'s second sweep reaches the overrunning table straight after the one
+  before it instead of after every table in the file. `tests/136` rebuilds its fixture with a longer lead when
+  the clock passes its anchor before the transmutes finish. `tests/archive/db/37` no longer counts the catalog
+  index locks a re-plan takes after another session overflows the invalidation queue (#1153). The backstops that
+  remain (`tests/167`'s sweeper, `tests/328` R to T, `tests/149`'s shell wait) are generous and end as soon as the
+  work does. `tests/149`'s is read off the clock rather than counted in iterations, and cancels a regrain still running
+  at it, so the run fails naming 57014 instead of hanging the suite.
+
 - **Auto-regrain passes over a coarse partition dropped by hand** (#1478). `maintain()`'s candidate scan left out
   a coarse child detached by hand but not one dropped, whose `pgpm.part` row stays attached, so it picked that one
   as the oldest on every tick, `regrain_step` refused it as gone (`skip_regrain`), and the coarse children behind
@@ -158,6 +177,7 @@
   chunks were the source's read every past whole-step skip as a current stall until its fine partitions archived. It
   now runs from the later of the latest chunk and the latest `archive_coverage_reset`, which the swap logs.
   tests/367 part G; mutation `archive_skips_whole_step_reset_ignored`.
+
 - **Two archive ledger rows that wedged a partition for good are discarded, and a recurring `skip_archive` is
   counted** (#1439, #1440). The ledger is keyed `(parent_table, lo)`, so a row a partition's next chunk collides
   with stopped that partition being archived or retired, and at `archive_batch`'s default of 1 every partition of

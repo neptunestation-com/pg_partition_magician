@@ -20,9 +20,11 @@
 --
 -- The holder and the sweeper are both real second backends (dblink): the holder so the row is held by
 -- someone other than the sweep, the sweeper so the sweep runs as a top-level CALL (it commits) and a
--- failure is returned as a value here rather than ending this file. The sweeper runs under a 6 s
+-- failure is returned as a value here rather than ending this file. The sweeper runs under a 60 s
 -- statement_timeout, so the unguarded first-parent stamp, which would wait on the holder forever, ends as
--- an error instead of hanging the suite.
+-- an error instead of hanging the suite. That is a backstop for the defect, never a budget for correct code:
+-- a correct sweep returns the moment it is done, but it also builds every Part A parent's lookahead (about
+-- 70 partitions, a second or two idle), and under CPU load that ran past the 6 s this used to be (#1340).
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
@@ -41,7 +43,7 @@ end $$;
 
 select dblink_connect('h167', 'dbname=' || current_database());
 select dblink_connect('sw167', 'dbname=' || current_database());
-select dblink_exec('sw167', 'set statement_timeout = ''6s''');
+select dblink_exec('sw167', 'set statement_timeout = ''60s''');
 
 -- ---------------------------------------------------------------------------------------------------
 -- Part A: maintain_all's sweep_turn_at stamps (F4-04)

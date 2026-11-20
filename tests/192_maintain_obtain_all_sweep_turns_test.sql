@@ -22,7 +22,11 @@
 --      sweep's statement_timeout (an event trigger sleeps in its partition's CREATE TABLE); sb behind it
 --      needs one partition. Sweep 1 must be cut in sa; sweep 2 must lead with sb and build its partition.
 --      The event trigger counts its entries in a SEQUENCE, which a cancellation does not roll back, so "sa
---      was entered and cut short" is observed rather than inferred from nothing having happened.
+--      was entered and cut short" is observed rather than inferred from nothing having happened. Before
+--      sweep 2 every other table's turn is stamped again, newer than sa's, so sweep 2 reaches sa straight
+--      after sb: with every managed table of the file between them, the walk to sa overran the clock under
+--      load and sa was never entered on correct code (#1340). The timeout is 3 s and the trigger sleeps
+--      30 s, so sa never fits and a sweep costs the timeout, not the sleep.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
@@ -145,7 +149,7 @@ begin
   if exists (select 1 from pg_event_trigger_ddl_commands() c join pg_inherits i on i.inhrelid = c.objid
               where c.command_tag = 'CREATE TABLE' and i.inhparent = 'public.sa'::regclass) then
     perform nextval('s192.sa_entered');
-    perform pg_sleep(3);   -- sa's obtain never fits the sweep's 1.5 s
+    perform pg_sleep(30);   -- sa's obtain never fits the sweep's 3 s
   end if;
 end $$;
 create event trigger s192_slow_sa on ddl_command_end when tag in ('CREATE TABLE') execute function s192.slow_sa();
@@ -154,7 +158,7 @@ select coalesce(max(id), 0) as mark_c from pgpm.log \gset
 select ok('public.sa'::regclass::oid < 'public.sb'::regclass::oid,
   'LIVENESS: sa precedes sb in the fixed order');
 
-set statement_timeout = '1500ms';
+set statement_timeout = '3s';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_obtain_all();
 \set ON_ERROR_STOP 1
@@ -168,7 +172,11 @@ select ok(not exists (select 1 from pgpm.log where id > :mark_c and parent_table
                        and action = 'obtain'),
   'LIVENESS: sweep 1 never reached sb');
 
-set statement_timeout = '1500ms';
+-- sweep 2's order: sb (no turn), then sa (its turn stamped as sweep 1's first table), then the rest, all
+-- stamped again now; the turns of sa and sb are the sweeps' own
+update pgpm.config set sweep_turn_at = clock_timestamp()
+ where parent_table not in ('public.sa'::regclass, 'public.sb'::regclass);
+set statement_timeout = '3s';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_obtain_all();
 \set ON_ERROR_STOP 1

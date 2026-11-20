@@ -14,7 +14,13 @@
 --
 -- The time kind's frontier is now(), so a monolith freezes only when the clock passes its hi. The grid
 -- is anchored three seconds ahead of the clock, which puts the monolith's hi there, so the file waits
--- about three seconds for that instead of up to a whole step. The regrain target is 30 minutes on the
+-- about three seconds for that instead of up to a whole step. That holds only while the three transmutes
+-- finish before the anchor: transmute puts hi at the grid step above greatest(max, now()), so one that
+-- ends past it gets hi a minute later, and under load the three took 11 s (#1340). So the fixture is
+-- built in a loop that checks the monoliths' bounds and, when the clock beat them, drops the tables,
+-- forgets them and starts again with a lead four times longer (12 s, then 48 s; a lead past the 1-minute
+-- step would put hi below the anchor instead). A quick machine pays three seconds, a slow one a retry, and
+-- the LIVENESS on the monoliths' bounds still fails if no attempt fits. The regrain target is 30 minutes on the
 -- 1-minute grid (the hierarchical split regrain_history makes), which keeps the run to ten sub-ranges
 -- while the misfiled key still has a fine child 3.5 hours up the range to land in.
 --
@@ -39,27 +45,44 @@ create extension if not exists pgtap;
 select plan(26);
 set timezone = 'UTC';
 
--- the grid's anchor, and so the monolith's hi: three whole seconds ahead of the clock
-select (date_trunc('second', clock_timestamp()) + interval '3 seconds')::text as anc \gset
-select set_config('t136.anc', :'anc', false) \g /dev/null
-
 -- ======================================================================================================
--- fixtures: a timestamptz control column and a naive (timestamp) one, the same rows on each
+-- fixtures: a timestamptz control column and a naive (timestamp) one, the same rows on each, transmuted on
+-- a grid anchored a few whole seconds ahead of the clock (the anchor is the monoliths' hi: see the header)
 -- ======================================================================================================
-create table public.ev (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
-insert into public.ev values
-  (1, :'anc'::timestamptz - interval '4 hours 30 minutes' + interval '10 s', 'doomed'),
-  (2, :'anc'::timestamptz - interval '4 hours 30 minutes' + interval '20 s', 'kept'),
-  (3, :'anc'::timestamptz - interval '5 hours' + interval '5 s', 'oldest'),
-  (4, :'anc'::timestamptz - interval '2 minutes', 'newest');
-create table public.evn (id bigint, ts timestamp not null, payload text, primary key (id, ts));
-insert into public.evn select id, ts at time zone 'UTC', payload from public.ev;
-create table public.evd (like public.ev including all);
-insert into public.evd select * from public.ev;
-
-call pgpm.transmute('public.ev', 'ts', interval '1 minute', p_obtain => 2, p_anchor => :'anc'::timestamptz);
-call pgpm.transmute('public.evn', 'ts', interval '1 minute', p_obtain => 2, p_anchor => :'anc'::timestamptz);
-call pgpm.transmute('public.evd', 'ts', interval '1 minute', p_obtain => 2, p_anchor => :'anc'::timestamptz);
+do $$
+declare
+  v_lead interval := interval '3 seconds';
+  v_anc timestamptz;
+begin
+  for attempt in 1 .. 3 loop   -- leads of 3, 12 and 48 s: under the 1-minute step, or hi would land below the anchor
+    v_anc := date_trunc('second', clock_timestamp()) + v_lead;
+    perform set_config('t136.anc', v_anc::text, false);
+    create table public.ev (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
+    insert into public.ev values
+      (1, v_anc - interval '4 hours 30 minutes' + interval '10 s', 'doomed'),
+      (2, v_anc - interval '4 hours 30 minutes' + interval '20 s', 'kept'),
+      (3, v_anc - interval '5 hours' + interval '5 s', 'oldest'),
+      (4, v_anc - interval '2 minutes', 'newest');
+    create table public.evn (id bigint, ts timestamp not null, payload text, primary key (id, ts));
+    insert into public.evn select id, ts at time zone 'UTC', payload from public.ev;
+    create table public.evd (like public.ev including all);
+    insert into public.evd select * from public.ev;
+    commit;
+    call pgpm.transmute('public.ev', 'ts', interval '1 minute', p_obtain => 2, p_anchor => v_anc);
+    call pgpm.transmute('public.evn', 'ts', interval '1 minute', p_obtain => 2, p_anchor => v_anc);
+    call pgpm.transmute('public.evd', 'ts', interval '1 minute', p_obtain => 2, p_anchor => v_anc);
+    exit when (select count(*) from pgpm.part
+                where parent_table in ('public.ev'::regclass, 'public.evn'::regclass, 'public.evd'::regclass)
+                  and attached and lo::timestamptz = v_anc - interval '5 hours' and hi::timestamptz = v_anc) = 3
+              or attempt = 3;   -- the last attempt is kept as it is, for the LIVENESS below to judge
+    -- the clock passed the anchor before a transmute finished: start again with a longer lead
+    drop table public.ev, public.evn, public.evd;
+    perform pgpm.forget_missing();
+    commit;
+    v_lead := v_lead * 4;
+  end loop;
+end $$;
+select current_setting('t136.anc') as anc \gset
 select child_name as mono_ev from pgpm.part
  where parent_table = 'public.ev'::regclass and attached order by lo::timestamptz limit 1 \gset
 select child_name as mono_evn from pgpm.part
@@ -77,9 +100,9 @@ select is(
   array['-05:00:00 00:00:00', '-05:00:00 00:00:00', '-05:00:00 00:00:00'],
   'LIVENESS: each monolith spans the five hours below the anchor');
 
--- wait for the clock to pass the anchor: the monoliths freeze
+-- wait for the clock to pass the anchor: the monoliths freeze (bounded by the anchor itself, whatever the lead)
 do $$ begin
-  for i in 1 .. 100 loop
+  loop
     exit when clock_timestamp() > current_setting('t136.anc')::timestamptz + interval '200 ms';
     perform pg_sleep(0.1);
   end loop;

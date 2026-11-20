@@ -27,8 +27,13 @@
 -- holds its step open in a transaction, the second is sent only then, and they are collected only once the
 -- second is seen WAITING while the first is still idle in its transaction. Those are the liveness
 -- witnesses: without them every outcome below also passes for a second call that simply ran after the
--- first had committed. bench/regrain_drivers_serialize.sh runs this file against mutants with the lock
--- removed and with the retarget refusal removed, and `./test.sh discriminate` requires it to FAIL on both.
+-- first had committed. The wait is judged by what the probe SAW, never by a second look (#1469): the second
+-- session is blocked by the first in pg_blocking_pids, a lock-table fact that holds for as long as the wait
+-- lasts (a sampled wait_event goes blank whenever the waiter's latch wakes), and pg_temp.c162_send_and_await
+-- returns that verdict as it observed it, or says the second call never went out, or finished without
+-- waiting, or was still running unblocked at the backstop. The verdict is what the LIVENESS assertion pins.
+-- bench/regrain_drivers_serialize.sh runs this file against mutants with the lock removed and with the
+-- retarget refusal removed, and `./test.sh discriminate` requires it to FAIL on both.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
@@ -133,7 +138,30 @@ select dblink_connect('c162_b', 'dbname=' || current_database());
 select pid as apid from dblink('c162_a', 'select pg_backend_pid()') as t(pid int) \gset
 select pid as bpid from dblink('c162_b', 'select pg_backend_pid()') as t(pid int) \gset
 select set_config('c162.bpid', :'bpid', false);
+select set_config('c162.apid', :'apid', false);
 create table public.c162_outcome (who text primary key, state text, result text);
+-- Sends p_sql to session B and returns what was seen of it, from fresh reads of the lock table: 'blocked by A'
+-- the moment pg_blocking_pids(B) names A, or why not. The verdict is taken as observed and never re-sampled: a
+-- later look can find B granted, or between two latch waits, and say nothing about whether it waited. A send that
+-- failed, and a B that finished without being seen blocked, say so at once instead of spending the budget; the
+-- budget (120 s of wall clock, a backstop for a B that runs on unblocked) never ends a wait that is seen. The loop
+-- is one statement, but it holds no lock B could queue on, and B judges nothing by snapshots.
+create function pg_temp.c162_send_and_await(p_sql text) returns text language plpgsql as $$
+declare
+  v_a int := current_setting('c162.apid')::int;
+  v_b int := current_setting('c162.bpid')::int;
+  v_until timestamptz := clock_timestamp() + interval '120 seconds';
+begin
+  if dblink_send_query('c162_b', p_sql) <> 1 then
+    return 'B''s statement was not sent: ' || coalesce(dblink_error_message('c162_b'), '?');
+  end if;
+  loop
+    if v_a = any(pg_blocking_pids(v_b)) then return 'blocked by A'; end if;
+    if dblink_is_busy('c162_b') = 0 then return 'B finished without being seen blocked by A'; end if;
+    if clock_timestamp() > v_until then return 'B still running, never seen blocked by A, after 120 s'; end if;
+    perform pg_sleep(0.005);
+  end loop;
+end $$;
 
 -- A: one step of 700, held open
 select dblink_exec('c162_a', 'begin');
@@ -141,22 +169,12 @@ select is((select x from dblink('c162_a',
             format('select pgpm.regrain_step(%L, %L, %L, 700)', 'public.rd', :'mon_c', '5000')) as t(x text)),
   'copied:700', 'LIVENESS: (C) session A copied its batch of 700 and holds its transaction open');
 -- B: a second driver on the same parent, one step of 500
-select dblink_send_query('c162_b',
-  format('select pgpm.regrain_step(%L, %L, %L, 500)', 'public.rd', :'mon_c', '5000'));
--- pg_stat_activity is read once per transaction and then frozen (the documented snapshot; a DO block is
--- one transaction), so without clearing it each turn this loop saw its first read 6000 times and could
--- pass only when B was already waiting at that read: measured on PG 15, 400 turns never saw a wait a
--- fresh transaction saw at once (#713).
-do $$ begin
-  for i in 1 .. 6000 loop
-    perform pg_stat_clear_snapshot();
-    exit when exists (select 1 from pg_stat_activity where pid = current_setting('c162.bpid')::int
-                       and wait_event_type = 'Lock');
-    perform pg_sleep(0.005);
-  end loop;
-end $$;
-select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS: (C) session B is waiting on a lock...');
+-- (pg_blocking_pids reads the lock table, not pg_stat_activity, whose once-per-transaction snapshot made an
+-- earlier form of this loop see its first read 6000 times, #713)
+select is(pg_temp.c162_send_and_await(
+            format('select pgpm.regrain_step(%L, %L, %L, 500)', 'public.rd', :'mon_c', '5000')),
+  'blocked by A',
+  'LIVENESS: (C) session B is waiting on a lock session A holds...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
   'LIVENESS: (C) ...while session A''s step is still uncommitted');
 select dblink_exec('c162_a', 'commit');
@@ -193,17 +211,9 @@ select dblink_exec('c162_a', 'begin');
 select is((select x from dblink('c162_a',
             format('select pgpm.regrain_step(%L, %L, %L)', 'public.rp', :'mon_d', '5000')) as t(x text)),
   'prepared', 'LIVENESS: (D) session A prepared a run at 5000 and holds its transaction open');
-select dblink_send_query('c162_b', $q$select pgpm.set_regrain('public.rp', '2500')::text$q$);
-do $$ begin
-  for i in 1 .. 6000 loop
-    perform pg_stat_clear_snapshot();   -- see (C)
-    exit when exists (select 1 from pg_stat_activity where pid = current_setting('c162.bpid')::int
-                       and wait_event_type = 'Lock');
-    perform pg_sleep(0.005);
-  end loop;
-end $$;
-select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS: (D) set_regrain is waiting on a lock...');
+select is(pg_temp.c162_send_and_await($q$select pgpm.set_regrain('public.rp', '2500')::text$q$),
+  'blocked by A',
+  'LIVENESS: (D) set_regrain is waiting on a lock session A holds...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
   'LIVENESS: (D) ...while the prepare is still uncommitted');
 select dblink_exec('c162_a', 'commit');
@@ -253,18 +263,10 @@ select max(id) as mark_e from pgpm.log \gset
 select dblink_exec('c162_a', 'begin');
 select is((select x::int from dblink('c162_a', $q$select pgpm.regrain_cancel('public.rc')::text$q$) as t(x text)), 1,
   'LIVENESS: (E) session A cancelled the run (one copy dropped) and holds its transaction open');
-select dblink_send_query('c162_b',
-  format('select pgpm.regrain_step(%L, %L, %L, 1000)', 'public.rc', :'mon_e', '5000'));
-do $$ begin
-  for i in 1 .. 6000 loop
-    perform pg_stat_clear_snapshot();   -- see (C)
-    exit when exists (select 1 from pg_stat_activity where pid = current_setting('c162.bpid')::int
-                       and wait_event_type = 'Lock');
-    perform pg_sleep(0.005);
-  end loop;
-end $$;
-select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS: (E) the second step is waiting on a lock...');
+select is(pg_temp.c162_send_and_await(
+            format('select pgpm.regrain_step(%L, %L, %L, 1000)', 'public.rc', :'mon_e', '5000')),
+  'blocked by A',
+  'LIVENESS: (E) the second step is waiting on a lock session A holds...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
   'LIVENESS: (E) ...while the cancel is still uncommitted');
 select dblink_exec('c162_a', 'commit');
