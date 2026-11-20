@@ -72,6 +72,16 @@ jobs:
           service: postgres17old
       - name: Run the perf track, shard ${{ matrix.shard }}
         run: ./test.sh perf --shard=${{ matrix.shard }}
+      # The invariant oracle's per-file reports and the track's summary (formal methods Phase 3 W4): kept whatever
+      # the result, so a report-mode violation can be read without rerunning. The summary is in the log above,
+      # and its liveness witness failing fails the step before this one.
+      - name: Keep the invariant oracle's reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-log-perf-${{ strategy.job-index }}
+          path: oracle-log/
+          if-no-files-found: ignore
       - name: Save the PG17 test image for the cache
         if: ${{ !cancelled() }}
         uses: ./.github/actions/test-image-save

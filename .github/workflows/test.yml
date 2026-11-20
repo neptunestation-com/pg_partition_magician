@@ -52,6 +52,16 @@ jobs:
           service: postgres${{ matrix.pg_version }}
       - name: Test the ${{ matrix.channel }} channel on PostgreSQL ${{ matrix.pg_version }}
         run: ./test.sh ${{ matrix.pg_version }} --channel=${{ matrix.channel }}
+      # The invariant oracle's per-file reports and the track's summary (formal methods Phase 3 W4): kept whatever
+      # the result, so a report-mode violation can be read without rerunning. The summary is in the log above,
+      # and its liveness witness failing fails the step before this one.
+      - name: Keep the invariant oracle's reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-log-pg${{ matrix.pg_version }}-${{ matrix.channel }}
+          path: oracle-log/
+          if-no-files-found: ignore
       # On a miss, after the tests whatever their result, so the next run loads what this one built.
       - name: Save the test image for the cache
         if: ${{ !cancelled() }}
