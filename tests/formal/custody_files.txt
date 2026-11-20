@@ -1,0 +1,151 @@
+# The custody set of formal-methods Phase 3 (docs/formal/phase3-design.md, W3): every pgTAP file that sets a
+# retention horizon (set_retain, p_retain, a positional retain in the archive fixture's mk_archive_table, or a
+# hypertable drop_chunks policy from_hypertable carries in as one), sets an archive strategy (set_archive_fn,
+# p_archive_fn), or calls a retire, recall or forget path (retire, retain, forget_missing). Chosen by grep, then
+# read; tests/formal/migrate_baseline.py check holds the list and the files to each other.
+#
+# One path per line. A custody file that has no correct place for pgpm_formal.baseline carries
+# `# not baselined: <reason>` on its line, so the W6 liveness witness sees it as unjudged rather than missing.
+# Borderline files the grep matched and the set leaves out are the `# excluded:` lines at the end.
+#
+# Archive-track files that build their table with tests/archive/fixtures.sql's mk_archive_table baseline AFTER that
+# call: the helper creates, fills and transmutes in one procedure, so the ledger cannot see a row the transmute itself
+# lost (the core files' transmute conservation tests cover that), only what every later step does.
+
+tests/07_retain_test.sql
+tests/59_retain_batch_test.sql
+tests/60_retire_test.sql   # not baselined: drops every parent it builds (rt60, rt60b, rt60c) at its end, so none is judged
+tests/61_write_block_test.sql
+tests/63_archive_chunk_ledger_test.sql
+tests/64_retire_archive_gate_test.sql
+tests/66_set_archive_fn_test.sql
+tests/74_regrain_archive_gate_test.sql
+tests/77_retain_incoming_fk_test.sql   # not baselined: drops every parent it builds in its closing cleanup, so none is judged
+tests/78_retain_detach_dispatch_test.sql   # not baselined: drops its only parent, public.dp78, in its closing cleanup on `postgres`
+tests/79_status_survives_dropped_parent_test.sql   # not baselined: drops every parent it builds (gone79 on purpose, orph79, keep79), so none is judged
+tests/93_archive_batch_test.sql
+tests/94_write_block_loop_isolation_test.sql
+tests/97_set_obtain_test.sql
+tests/98_set_retain_test.sql
+tests/102_archive_identity_test.sql
+tests/103_retire_identity_unreferenced_test.sql
+tests/104_write_block_identity_test.sql
+tests/105_progress_freeze_test.sql   # not baselined: drops every parent it builds (fz_gone, fz_time, fz_id) before it ends
+tests/106_progress_regrain_test.sql   # not baselined: drops both its parents (public.pr, public.pa) at its end
+tests/108_retain_sign_test.sql
+tests/110_triggers_enable_always_test.sql
+tests/114_write_block_lift_coverage_test.sql
+tests/115_archive_contract_test.sql
+tests/116_detach_reap_liveness_test.sql   # not baselined: drops public.lv116 and its hand-detached children at cleanup
+tests/120_regrain_reconcile_offgrid_lo_test.sql
+tests/121_regrain_recheck_aged_at_swap_test.sql
+tests/124_datestyle_independent_bounds_test.sql
+tests/124_quoted_schema_test.sql
+tests/125_archive_chunk_ties_test.sql
+tests/125_archive_ledger_identity_test.sql
+tests/125_untransmute_residue_test.sql
+tests/125_uuidv7_regrain_archive_test.sql
+tests/129_coverage_reset_identity_test.sql
+tests/129_retire_regrain_source_test.sql
+tests/129_set_archive_fn_return_type_test.sql
+tests/130_retire_unguarded_coverage_test.sql
+tests/131_retain_interval_sign_test.sql
+tests/133_transmute_serial_sequence_owner_test.sql
+tests/136_regrain_reconcile_datestyle_test.sql
+tests/137_archive_chunk_uuidv7_ties_test.sql
+tests/147_maintain_all_sweep_turns_test.sql
+tests/148_regrain_candidate_lock_race_deferred_test.sql
+tests/167_config_stamp_lock_test.sql
+tests/168_retain_nan_test.sql
+tests/170_write_block_enabled_state_test.sql
+tests/171_retire_detached_unreferenced_test.sql
+tests/177_untransmute_monolith_identity_test.sql
+tests/191_maintain_regrain_reads_target_under_lock_test.sql
+tests/194_retain_recall_armed_detach_test.sql
+tests/197_moved_parent_lifecycle_test.sql
+tests/204_retain_recall_moved_parent_test.sql
+tests/213_ts_text_archive_chunk_transmute_min_test.sql
+tests/228_archive_step_child_isolation_test.sql
+tests/229_retire_one_step_disarm_test.sql
+tests/231_crossing_keys_datestyle_test.sql
+tests/237_regrain_moved_parent_identity_test.sql
+tests/239_moved_parent_recorded_identity_test.sql   # not baselined: uninstalls pgpm in part S5, after which check() judges the drop history alone
+tests/241_reads_under_caller_rls_conformance_test.sql
+tests/246_forget_missing_disarms_detach_test.sql
+tests/248_transmute_null_arguments_refused_test.sql
+tests/253_crossing_keys_control_collation_test.sql
+tests/263_retain_loop_per_child_isolation_test.sql
+tests/266_retire_crossing_delete_parent_rls_test.sql
+tests/268_shared_preflight_refusals_test.sql
+tests/273_archive_covered_hi_canonical_test.sql
+tests/278_obtain_rebuilds_unanchored_cell_test.sql
+tests/286_archive_partition_whole_contract_test.sql
+tests/289_archive_partition_whole_follows_step_test.sql
+tests/292_archive_covered_hi_column_type_test.sql
+tests/303_adopt_partition_test.sql
+tests/307_write_block_skips_hand_detached_test.sql
+tests/309_archive_retired_chunk_kept_test.sql
+tests/311_retain_horizon_ambiguous_wall_time_test.sql
+tests/313_archive_whole_skips_hand_detached_test.sql
+tests/314_ledger_backfill_origin_only_block_test.sql
+tests/315_regrain_swap_lock_budget_test.sql
+tests/317_over_retired_chunks_range_first_test.sql
+tests/318_forget_missing_logs_object_keys_test.sql
+tests/323_regrain_reconcile_unshaped_key_test.sql
+tests/325_archive_hold_detach_in_flight_test.sql
+tests/327_retire_pending_detach_test.sql
+tests/330_retirement_mark_needs_dispatch_test.sql
+tests/334_over_retired_chunks_grid_zone_test.sql
+tests/339_retain_disown_remedy_test.sql
+tests/345_retire_locks_by_oid_test.sql
+tests/346_archive_coverage_unnamed_bound_test.sql
+tests/347_over_retired_chunks_unnamed_widest_test.sql
+tests/349_regrain_swap_detach_by_oid_test.sql
+tests/354_native_bound_reach_every_offset_test.sql
+tests/355_retire_referenced_by_anchor_test.sql
+tests/357_archive_log_bounds_canonical_test.sql
+tests/358_archive_remedy_encoded_bounds_test.sql
+tests/361_retain_recall_renamed_detached_test.sql
+tests/362_retain_unanchored_marks_test.sql
+tests/363_retire_renamed_detached_test.sql
+tests/364_write_block_reads_mark_test.sql
+tests/365_unrecorded_mark_refused_test.sql
+tests/366_retire_default_partition_test.sql
+tests/367_archive_ledger_wedges_test.sql
+tests/382_set_retain_hand_detached_test.sql
+tests/383_untransmute_disarms_detach_test.sql
+tests/387_write_block_stranger_leftover_named_test.sql
+tests/389_archive_chunk_unshaped_key_test.sql
+tests/391_idle_reads_indexed_test.sql
+tests/archive/db/04_parquet_and_sync_archive_test.sql
+tests/archive/db/08_archive_fn_s3_test.sql
+tests/archive/db/09_configure_test.sql
+tests/archive/db/16_archive_object_key_identity_test.sql
+tests/archive/db/16_to_s3_compress_test.sql
+tests/archive/db/19_parquet_timestamp_infinity_test.sql
+tests/archive/db/21_parquet_keyless_test.sql
+tests/archive/db/26_archive_key_schema_zone_test.sql
+tests/archive/db/27_parquet_timestamp_range_test.sql
+tests/archive/db/29_signer_non_utf8_database_test.sql   # not baselined: its one managed table lives in a LATIN1 sibling database (dblink) the oracle is not in, dropped at the end
+tests/archive/db/31_parquet_decimal_nan_test.sql
+tests/archive/db/33_ndjson_row_alias_shadowed_test.sql
+tests/archive/db/34_archive_key_reused_name_test.sql
+tests/archive/db/39_archive_key_owner_every_path_test.sql
+tests/archive/db/40_archive_key_full_claim_test.sql
+tests/archive/db/41_archive_null_arguments_test.sql
+tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql
+tests/archive/db/44_archive_extension_resolution_test.sql
+tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql
+tests/archive/db/50_archive_retired_chunk_kept_test.sql
+tests/archive/db/52_archive_key_base_canonical_test.sql
+tests/archive/db/57_core_uninstall_with_archive_test.sql   # not baselined: uninstalls pgpm core, after which check() judges the drop history alone
+tests/timescale/db/06_retention_translation_test.sql
+tests/timescale/db/50_from_hypertable_shared_preflight_test.sql
+tests/timescale/db/58_from_hypertable_argument_rules_test.sql
+tests/timescale/db/59_from_hypertable_handoff_remedy_test.sql
+
+# excluded: tests/65_observe_no_pgfr_test.sql: writes pgpm.log rows (retain_drop) by hand for impact_report to read; no retention runs and no row moves
+# excluded: tests/279_progress_write_child_exists_test.sql: reads retiring_at as a premise of progress(); sets no horizon and retires nothing
+# excluded: tests/280_obtain_rebuilds_detached_cell_test.sql: hand-writes a retirement mark to test obtain's rebuild; sets no horizon and no retirement runs
+# excluded: tests/timescale/db/65_from_hypertable_cutover_moved_delta_by_record_test.sql: "retires" in a comment (the swap retires oids); no horizon
+# excluded: tests/timescale/db/66_from_hypertable_column_unit_rules_test.sql: refuses a negative retain argument; no horizon is ever set
