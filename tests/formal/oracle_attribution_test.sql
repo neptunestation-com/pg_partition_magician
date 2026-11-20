@@ -10,7 +10,7 @@
 -- Each case's row is selected by the dropped table's name, so a case whose drop never happened fails on a null.
 create extension if not exists pgtap;
 
-select plan(23);
+select plan(26);
 
 create schema at;
 
@@ -137,9 +137,9 @@ select is(pgpm.regrain_history('at.rg', '10'), 5, 'fixture: [0, 50), a child reg
 select is(
   (select string_agg(object_name || ' part_row=' || part_row || ' as ' || coalesce(recorded_as, '-') || ' pgpm=' || by_pgpm, '; ' order by id)
      from pgpm_formal.drop_history where schema_name = 'at' and object_name like 'rg\_p0%'),
-  'rg_p0000000000000000000_to_0000000000000000100 part_row=false as pgpm.config monolith_oid pgpm=true; '
-  || 'rg_p0000000000000000000_to_0000000000000000050 part_row=false as created by pgpm pgpm=true',
-  'regrain''s swaps drop their sources with no pgpm.part row left; the monolith is named by config, the child by its creation');
+  'rg_p0000000000000000000_to_0000000000000000100 part_row=false as pgpm.config monolith_oid, anchored earlier pgpm=true; '
+  || 'rg_p0000000000000000000_to_0000000000000000050 part_row=false as anchored earlier, created by pgpm pgpm=true',
+  'regrain''s swaps drop their sources with no pgpm.part row left; the monolith is named by config, the child by its creation and an earlier anchor');
 
 -- 10. untransmute drops the partitioned parent: recorded through pgpm.config
 create table at.ut (id bigint primary key, body text);
@@ -152,10 +152,31 @@ select is(
   'ut recorded=true pgpm=true',
   'untransmute''s drop of the partitioned parent is recorded through pgpm.config');
 
+-- 11. an operator's table adopted into pgpm.part, then regrained: regrain's swap deletes the source's pgpm.part row
+-- before its DROP (after renaming the table to its _to_ name) and pgpm did not create the table, so only the anchor history (seen at an earlier statement) records
+-- it (tests/309 part B is where W2 met it)
+create table at.ad (id bigint primary key, body text);
+insert into at.ad select g, 'b' || g from generate_series(1, 20) g;
+call pgpm.transmute('at.ad', 'id', 100, p_obtain => 3, p_paused => true);
+insert into at.ad values (250, 'frontier');
+select child_name as ad0 from pgpm.part where parent_table = 'at.ad'::regclass and lo = '0' \gset
+select format('drop table if exists at.%I', :'ad0') \gexec
+select format('create table at.%I partition of at.ad for values from (0) to (100)', :'ad0') \gexec
+insert into at.ad select g, 'late' || g from generate_series(1, 30) g;
+select lives_ok(format('select pgpm.adopt_partition(%L, %L)', 'at.ad', 'at.' || quote_ident(:'ad0')),
+  'fixture: the operator''s table is adopted into pgpm.part');
+select lives_ok(format('select pgpm.regrain(%L, %L, %L)', 'at.ad', :'ad0', '50'),
+  'fixture: the adopted partition is regrained to step 50');
+select is(
+  (select string_agg(format('pgpm=%s created_by_pgpm=%s as %s', by_pgpm, recorded_as like '%created by pgpm%', recorded_as), '; ' order by id)
+     from pgpm_formal.drop_history where schema_name = 'at' and object_name like :'ad0' || '%' and by_pgpm),
+  'pgpm=t created_by_pgpm=f as anchored earlier',
+  'regrain''s drop of an adopted table pgpm did not create is recorded by the anchor history alone');
+
 -- the whole record: no drop the test made is attributed to pgpm, and every drop pgpm made was of a relation it recorded
 select is(
   (select array_agg(distinct object_name order by object_name) from pgpm_formal.drop_history
-    where schema_name = 'at' and by_pgpm and object_name !~ '^(r[1-7]|rg|ut)'),
+    where schema_name = 'at' and by_pgpm and object_name !~ '^(r[1-7]|rg|ut|ad)'),
   null::text[], 'no drop of a table the test created is attributed to pgpm');
 select is(
   (select array_agg(object_name order by object_name) from pgpm_formal.drop_history

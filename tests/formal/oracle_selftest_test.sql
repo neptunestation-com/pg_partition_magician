@@ -14,7 +14,7 @@
 -- to return exactly the one declaration left unmatched.
 create extension if not exists pgtap;
 
-select plan(52);
+select plan(54);
 
 create schema st;
 
@@ -41,6 +41,22 @@ begin
   execute format('insert into %s select g, ''p'' || g from generate_series(12, 89, 7) g', p_rel);
   execute format('insert into %s values (95, ''frontier'')', p_rel);
 end $$;
+
+-- ==================================================================== no dependency on pgpm
+-- pgpm's uninstall refuses while anything outside pgpm depends on it (tests/239 runs it), so the oracle must not
+create function st.deps_on_pgpm() returns text[] language sql as $$
+  select coalesce(array_agg(distinct pg_describe_object(d.classid, d.objid, d.objsubid)), '{}')
+    from pg_depend d
+   where ((d.classid = 'pg_proc'::regclass and d.objid in (select oid from pg_proc where pronamespace = 'pgpm_formal'::regnamespace))
+       or (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where relnamespace = 'pgpm_formal'::regnamespace))
+       or (d.classid = 'pg_type'::regclass and d.objid in (select oid from pg_type where typnamespace = 'pgpm_formal'::regnamespace)))
+     and ((d.refclassid = 'pg_proc'::regclass and d.refobjid in (select oid from pg_proc where pronamespace = 'pgpm'::regnamespace))
+       or (d.refclassid = 'pg_class'::regclass and d.refobjid in (select oid from pg_class where relnamespace = 'pgpm'::regnamespace))
+       or (d.refclassid = 'pg_type'::regclass and d.refobjid in (select oid from pg_type where typnamespace = 'pgpm'::regnamespace)));
+$$;
+select cmp_ok((select count(*) from pg_proc where pronamespace = 'pgpm_formal'::regnamespace), '>', 10::bigint,
+  'LIVENESS: the oracle''s functions are installed');
+select is(st.deps_on_pgpm(), '{}'::text[], 'nothing of the oracle depends on an object of pgpm''s');
 
 -- ==================================================================== nothing baselined: not judged
 select is((select count(*) from pgpm_formal.check()), 0::bigint, 'fixture: an empty database has no violation');
@@ -245,7 +261,7 @@ select is(pgpm.retain('st.rb'), 6, 'fixture: retention drops [0, 60), the operat
 select is(
   (select string_agg(object_name || ':' || by_pgpm || ':' || coalesce(recorded_as, '-'), ' ' order by id)
      from pgpm_formal.drop_history where schema_name = 'st' and object_name = 'rb_p0000000000000000030'),
-  'rb_p0000000000000000030:true:pgpm.part child_oid, created by pgpm',
+  'rb_p0000000000000000030:true:pgpm.part child_oid, anchored earlier, created by pgpm',
   'LIVENESS: pgpm''s drop of a partition it made and recorded is attributed to pgpm and recorded twice over');
 select is(st.found_like('ResolveByRecord', 'st.%'),
   array['st.rb_p0000000000000000010', 'st.rb_p0000000000000000020'],

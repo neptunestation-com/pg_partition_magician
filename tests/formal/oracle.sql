@@ -91,8 +91,9 @@ create table if not exists pgpm_formal.expectation (
 --   by_query    the top-level statement's text in pg_stat_activity begins `call pgpm.` or `select pgpm.`. The
 --               attribution the design note first proposed, kept for the measurement that retired it (see
 --               docs/formal/phase3-design.md, "Measured before it is relied on"); nothing reads it.
---   recorded    pgpm's catalog named the oid when the trigger fired (pgpm.part, pgpm.config, pgpm.scratch), or pgpm
---               created the relation (create_history); recorded_as says which. Null: the catalog could not be read
+--   recorded    pgpm's catalog named the oid when the trigger fired (pgpm.part, pgpm.config, pgpm.scratch), or named
+--               it at an earlier DDL statement or drop (anchor_seen), or pgpm created the relation (create_history);
+--               recorded_as says which. Null: the catalog could not be read
 --               (an install mid-way, an older one).
 --   xact_start / stmt_start   now() and statement_timestamp() at the drop: a drop in a transaction that began
 --               after its top-level statement did ran after a COMMIT inside a procedure.
@@ -138,6 +139,15 @@ create table if not exists pgpm_formal.create_history (
   by_pgpm boolean
 );
 create index if not exists create_history_objid_idx on pgpm_formal.create_history (objid);
+
+-- Every oid pgpm's catalog has anchored, as seen at each DDL statement and each drop (pgpm_formal._note_anchors).
+-- Measured (W2, tests/309): an operator's table adopted into pgpm.part (adopt_partition) and then regrained loses its
+-- pgpm.part row before regrain's swap drops it, and pgpm did not create it, so neither the catalog at the drop nor
+-- the creation history names it. It was anchored when the regrain began, which this keeps.
+create table if not exists pgpm_formal.anchor_seen (
+  objid      oid primary key,
+  first_seen timestamptz not null default clock_timestamp()
+);
 
 -- Archive object contents, loaded by the archive track's harness before check() runs (the oracle cannot read a
 -- bucket, and judging the archive with pgpm_archive's own code would be the code under test grading itself).
@@ -189,12 +199,28 @@ begin
     union all select 'pgpm.config monolith_oid' from pgpm.config where monolith_oid = p_oid
     union all select 'pgpm.config regrain_delta_oid' from pgpm.config where regrain_delta_oid = p_oid
     union all select 'pgpm.scratch obj' from pgpm.scratch where obj = p_oid
+    union all select 'anchored earlier' from pgpm_formal.anchor_seen where objid = p_oid
     union all select 'created by pgpm' from (select h.by_pgpm from pgpm_formal.create_history h where h.objid = p_oid
                                               order by h.id desc limit 1) c where c.by_pgpm
   ) s;
   return coalesce(v, '');
 exception when others then
   return null;
+end;
+$$;
+
+-- Record every oid pgpm's catalog anchors now. Called by both event triggers; never raises.
+create or replace function pgpm_formal._note_anchors()
+returns void language plpgsql set search_path = pg_catalog, pg_temp as $$
+begin
+  insert into pgpm_formal.anchor_seen (objid)
+  select o from (select child_oid from pgpm.part union select retiring_oid from pgpm.part
+                 union select detach_dispatched_oid from pgpm.part union select parent_table::oid from pgpm.config
+                 union select monolith_oid from pgpm.config) a(o)
+   where o is not null
+  on conflict do nothing;
+exception when others then
+  null;
 end;
 $$;
 
@@ -240,6 +266,7 @@ begin
             case when v_rec is null then null else v_rec <> '' end, nullif(v_rec, ''),
             coalesce(v_rec like '%pgpm.part%', false), left(v_ctx, 2000));
   end loop;
+  perform pgpm_formal._note_anchors();
 exception when others then
   raise warning 'pgpm_formal: drop history not recorded: %', sqlerrm;
 end;
@@ -254,6 +281,7 @@ begin
   get diagnostics v_ctx = pg_context;
   select a.backend_type, a.application_name into v_btype, v_app from pg_stat_activity a where a.pid = pg_backend_pid();
   v_by_pgpm := pgpm_formal._ctx_is_pgpm(v_ctx) or v_btype = 'pg_cron' or v_app = 'pg_cron';
+  perform pgpm_formal._note_anchors();
   for r in select distinct c.objid, c.command_tag from pg_event_trigger_ddl_commands() c
             where c.classid = 'pg_class'::regclass and c.object_type = 'table' loop
     if r.command_tag = 'ALTER TABLE' then
@@ -306,11 +334,10 @@ $$;
 -- parent, whose root is the parent now. Else the name: the monolith retention dropped leaves only the name.
 create or replace function pgpm_formal._current_parent(p_parent_oid oid)
 returns regclass language plpgsql stable as $$
-declare v_name text; v_part boolean; v_exists boolean; v_byname regclass; v_relname text;
+declare v_name text; v_part boolean; v_exists boolean; v_byname regclass;
 begin
   select parent_name into v_name from pgpm_formal.ledger_parent where parent_oid = p_parent_oid;
-  select true, c.relispartition, format('%I.%I', n.nspname, c.relname) into v_exists, v_part, v_relname
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent_oid;
+  select true, c.relispartition into v_exists, v_part from pg_class c where c.oid = p_parent_oid;
   if v_exists and v_part then
     return pg_partition_root(p_parent_oid);
   end if;
@@ -453,11 +480,16 @@ $$;
 
 -- ------------------------------------------------------------------------------------------- the checks
 
--- A row's control value as pgpm's native grid value (numeric for id, timestamptz text otherwise), or null.
-create or replace function pgpm_formal._native_of(p_cfg pgpm.config, p_row jsonb)
+-- A row's control value as pgpm's native grid value (numeric for id, timestamptz text otherwise), or null. The config
+-- comes as jsonb, never as a pgpm.config parameter: a parameter of pgpm's type is a pg_depend edge onto pgpm, and
+-- pgpm's uninstall refuses to drop a schema something else depends on (measured in W2: tests/239's uninstall failed).
+-- Nothing in pgpm_formal may depend on a pgpm object.
+create or replace function pgpm_formal._native_of(p_cfg jsonb, p_row jsonb)
 returns text language plpgsql stable as $$
+declare cfg pgpm.config;
 begin
-  return pgpm._col_to_native(p_cfg, p_row ->> p_cfg.control_column::text);
+  cfg := jsonb_populate_record(null::pgpm.config, p_cfg);
+  return pgpm._col_to_native(cfg, p_row ->> cfg.control_column::text);
 exception when others then
   return null;
 end;
@@ -490,13 +522,16 @@ $$;
 -- operator's relation. A side relation that lacks a key column is skipped (its name in p_skipped).
 create or replace function pgpm_formal._row_states(p_lp oid, p_cur regclass, out p_sql text, out p_skipped text[])
 language plpgsql stable as $$
-declare v_keys name[]; v_ident text; v_parts text[] := '{}'; r record;
+declare v_keys name[]; v_ident_q text; v_parts text[] := '{}'; r record;
 begin
   select key_cols into v_keys from pgpm_formal.ledger_parent where parent_oid = p_lp;
-  v_ident := pgpm_formal._ident_sql(v_keys);
+  -- pgpm_formal._ident_sql's expression, spelled out so the quoting is visible where the local is assigned
+  v_ident_q := case when coalesce(array_length(v_keys, 1), 0) = 0 then 'to_jsonb(t)::text'
+                    else format('jsonb_build_array(%s)::text',
+                                (select string_agg(format('t.%I', k), ', ') from unnest(v_keys) k)) end;
   p_skipped := '{}';
   if p_cur is not null then
-    v_parts := v_parts || format('select %s as i, 1 as s from %s t', v_ident, p_cur::text);
+    v_parts := v_parts || format('select %s as i, 1 as s from %s t', v_ident_q, p_cur::text);
     for r in select s.rel, s.src from pgpm_formal._side_rels(p_cur) s loop
       if exists (select 1 from unnest(v_keys) k
                   where not exists (select 1 from pg_attribute a where a.attrelid = r.rel and a.attname = k
@@ -504,7 +539,7 @@ begin
         p_skipped := p_skipped || r.rel::regclass::text;
         continue;
       end if;
-      v_parts := v_parts || format('select %s as i, %s as s from %s t', v_ident, r.src, r.rel::regclass::text);
+      v_parts := v_parts || format('select %s as i, %s as s from %s t', v_ident_q, r.src, r.rel::regclass::text);
     end loop;
   end if;
   p_sql := format(
@@ -527,7 +562,7 @@ language plpgsql
 set timezone = 'UTC' set datestyle = 'ISO, MDY' set intervalstyle = 'postgres' set extra_float_digits = 1
 set bytea_output = 'hex' as $$
 declare
-  lp record; r record; v_cur regclass; cfg pgpm.config; v_have_cfg boolean; v_t text; v_bound text;
+  lp record; r record; v_cur regclass; cfg jsonb; v_have_cfg boolean; v_t text; v_bound text;
   v_sql text; v_skipped text[]; v_listed boolean; v_nrows bigint;
   -- judged counters
   n_lost_par int := 0; n_lost_id bigint := 0;
@@ -535,6 +570,26 @@ declare
   n_rbr_id bigint := 0; n_wedge_id bigint := 0; n_mark_unjudged int := 0;
   v_unjudged_par text[] := '{}'; v_cron text;
 begin
+  -- pgpm uninstalled (tests/239 runs uninstall.sql): nothing of pgpm's is left to judge but the drop history
+  if to_regclass('pgpm.config') is null or to_regclass('pgpm.part') is null or to_regclass('pgpm.archive_ledger') is null then
+    for r in
+      select h.* from pgpm_formal.drop_history h
+       where h.by_pgpm and not h.is_temporary and h.schema_name not in ('pgpm', 'pgpm_formal', 'archive')
+         and h.recorded is false
+    loop
+      invariant := 'ResolveByRecord'; parent_table := r.parent_oid::regclass;
+      identity := r.schema_name || '.' || r.object_name;
+      detail := format('pgpm dropped %s (oid %s), which pgpm did not create and its catalog never named (pgpm.part, pgpm.config, pgpm.scratch)',
+                       identity, r.objid);
+      return next;
+    end loop;
+    delete from pgpm_formal.judged_last;
+    insert into pgpm_formal.judged_last (invariant, judged, parents, identities, expected, note)
+    select i, i = 'ResolveByRecord', 0, 0, 0, 'pgpm is not installed: only the drop history was judged'
+      from unnest(array['NoLostRow', 'NoDuplicateRow', 'DropOnlyCovered', 'ArchiveNoClobber', 'ResolveByRecord', 'NoWedge']) i;
+    return;
+  end if;
+
   -- -------------------------------------------------- the row invariants, per baselined parent
   for lp in select * from pgpm_formal.ledger_parent order by parent_oid loop
     v_cur := pgpm_formal._current_parent(lp.parent_oid);
@@ -547,13 +602,14 @@ begin
       continue;
     end if;
     v_t := null; v_bound := null;
-    select * into cfg from pgpm.config c where c.parent_table = v_cur;
-    v_have_cfg := found;
+    -- the config is held as jsonb, never in a local of pgpm's row type: a declared pgpm type stops the function from
+    -- compiling once a file has uninstalled pgpm (tests/239), and the check must still judge the drop history then
+    cfg := (select to_jsonb(pgpm._control_followed(c)) from pgpm.config c where c.parent_table = v_cur);
+    v_have_cfg := cfg is not null;
     if v_have_cfg then
-      cfg := pgpm._control_followed(cfg);
-      v_t := pgpm._native_type(cfg.control_kind);
+      v_t := pgpm._native_type((cfg ->> 'control_kind')::name);
       begin
-        v_bound := pgpm._retain_boundary(cfg);
+        v_bound := pgpm._retain_boundary(jsonb_populate_record(null::pgpm.config, cfg));
       exception when others then
         v_bound := null;
       end;
@@ -561,7 +617,7 @@ begin
     select s.p_sql, s.p_skipped into v_sql, v_skipped from pgpm_formal._row_states(lp.parent_oid, v_cur) s;
     v_listed := exists (select 1 from pgpm_formal.store_listing sl where sl.parent_table = v_cur);
     n_lost_par := n_lost_par + 1;
-    if v_have_cfg and cfg.archive_fn is not null then n_doc_par := n_doc_par + 1; end if;
+    if v_have_cfg and cfg ->> 'archive_fn' is not null then n_doc_par := n_doc_par + 1; end if;
     if v_listed then n_anc_par := n_anc_par + 1; end if;
     select count(*) into v_nrows from pgpm_formal.ledger l where l.parent_oid = lp.parent_oid and not l.deleted;
     n_lost_id := n_lost_id + v_nrows;
@@ -609,7 +665,7 @@ begin
         continue;
       end if;
       -- aged out by retention: DropOnlyCovered and ArchiveNoClobber judge how
-      if cfg.archive_fn is not null then
+      if cfg ->> 'archive_fn' is not null then
         n_doc_id := n_doc_id + 1;
         if r.c_lo is null then
           invariant := 'DropOnlyCovered'; parent_table := v_cur; identity := r.identity;
@@ -681,7 +737,7 @@ begin
     if r.recorded is false then
       invariant := 'ResolveByRecord'; parent_table := r.parent_oid::regclass;
       identity := r.schema_name || '.' || r.object_name;
-      detail := format('pgpm dropped %s (oid %s), which pgpm did not create and no pgpm.part, pgpm.config or pgpm.scratch row named when it was dropped',
+      detail := format('pgpm dropped %s (oid %s), which pgpm did not create and its catalog never named (pgpm.part, pgpm.config, pgpm.scratch)',
                        identity, r.objid);
       return next;
     end if;
@@ -728,8 +784,8 @@ begin
       return next;
     end;
   end loop;
-  -- (3) no dispatched retirement mark stands on a partition nothing will detach: still attached, not pending, no
-  -- recall in progress, and no pgpm_detach job holding its command. Judged only where cron.job can be read, or
+  -- (3) no dispatched retirement mark stands on a partition nothing will detach: still attached, its anchors agreeing
+  -- with it, not pending, no recall in progress, and no pgpm_detach job holding its command. Judged only where cron.job can be read, or
   -- where pg_cron is absent (then no job can hold it).
   v_cron := case when to_regclass('cron.job') is null then 'absent'
                  when has_table_privilege('cron.job', 'select') then 'readable' else 'unreadable' end;
@@ -737,6 +793,11 @@ begin
     select p.parent_table as par, p.child_name, p.detach_dispatched_oid as rel, n.nspname, c.relname
       from pgpm.part p join pg_class c on c.oid = p.detach_dispatched_oid join pg_namespace n on n.oid = c.relnamespace
      where p.retiring_at is not null and p.recall_idle_at is null and p.recall_idle_xact is null
+       -- the anchors agree: the relation still carries its recorded name and every oid pgpm.part holds names it. A
+       -- mark they disagree on is refused on identity (fail_retain_identity, logged each tick, tests/204 C, tests/361
+       -- D and E): a reported refusal, which is layer C's to judge, not a silent wedge
+       and c.relname = p.child_name
+       and coalesce(p.child_oid, c.oid) = c.oid and coalesce(p.retiring_oid, c.oid) = c.oid
        and exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p.parent_table
                                                  and not i.inhdetachpending)
        and (p_scope is null or p.parent_table = any (p_scope))

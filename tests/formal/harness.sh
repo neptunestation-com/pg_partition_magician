@@ -13,21 +13,8 @@ c="${1:?usage: harness.sh <container> [tests/formal/file_test.sql ...]}"
 shift
 cd "$(dirname "$0")/../.."
 
-q() { docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$c" psql -U postgres -d "${DB:-postgres}" -v ON_ERROR_STOP=1 -qtA "$@"; }
-
-build_template() {  # <template db>
-  local t="$1"
-  q -c "drop database if exists $t" >/dev/null
-  q -c "create database $t" >/dev/null
-  DB="$t" q -c "create extension if not exists pgtap" >/dev/null
-  DB="$t" q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null
-  DB="$t" q -c "alter database \"$t\" set poc.seed_count = 8000; alter database \"$t\" set poc.events_count = 4000;" >/dev/null
-  DB="$t" q -f /repo/fixtures/demo.sql >/dev/null
-  DB="$t" q -f /repo/tests/formal/oracle.sql >/dev/null
-}
-
-# Only when sourced for its functions (tests/formal/measure_cost.sh) does the caller skip the run below.
-if [ "${HARNESS_LIB:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
+# shellcheck source=tests/formal/lib.sh
+source tests/formal/lib.sh
 
 files=("$@")
 if [ "${#files[@]}" -eq 0 ]; then
