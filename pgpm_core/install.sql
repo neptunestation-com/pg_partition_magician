@@ -15942,7 +15942,10 @@ begin
   -- A coarse child the operator DETACHed by hand is not a candidate (#705, _part_detached_by_hand), as it
   -- is not one for the write-block and archive steps: picked, it got the capture and TRUNCATE-guard
   -- triggers on the operator's table and its rows copied, then every swap failed on it ("is not a
-  -- partition") and, being the oldest, it held auto-regrain there for good.
+  -- partition") and, being the oldest, it held auto-regrain there for good. Nor is one DROPped by hand
+  -- (#1478): its pgpm.part row stays attached, regrain_step refused it as gone (skip_regrain) on every tick,
+  -- and, being the oldest, it held auto-regrain the same way. So the rows are read through _part_built, the
+  -- predicate status() asks, which is false for both (and for an unanchored row whose relation cannot exist).
   if cfg.regrain_to is not null then
     begin   -- #590: the candidate search is part of the regrain step
       perform pgpm._regrain_lock(p_parent);   -- #729: before the re-read
@@ -15950,7 +15953,7 @@ begin
       if v_regrain_to is not null then   -- #729: off since the top of the tick, so no candidate either
         execute format(
         'select child_name from pgpm.part p where p.parent_table = %L::regclass and p.attached'
-        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705
+        || ' and pgpm._part_built(p.parent_table, p.child_oid, p.retiring_at)'   -- #705, #1478
         || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'
         || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it
         || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',

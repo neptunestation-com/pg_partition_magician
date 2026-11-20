@@ -3549,7 +3549,9 @@ while a tick is in an earlier step (archiving, say) stops that tick from startin
 only a frozen coarse child the target subdivides, so a child the target cannot split (a 30-day cell that
 starts in February, on a monthly grid) is left alone rather than retried forever; it stays counted in
 `status().coarse_partitions`. A coarse child detached by hand is not selected either: it is the operator's
-table, so no capture or `TRUNCATE` guard goes on it and nothing is copied out of it. A run already in
+table, so no capture or `TRUNCATE` guard goes on it and nothing is copied out of it. Nor is one dropped by
+hand, which `regrain_step` would refuse as gone: it is passed over, so the coarse children behind it are
+still regrained, rather than logged `skip_regrain` on every tick. A run already in
 flight on a child when it is detached by hand is ended by the next `maintain` tick, which takes the capture
 and the guard back off it, drops the run's copies and clears the cursor (`regrain_source_detached`). A `p_target_step` coarser than `partition_step` (compared at
 `partition_anchor`) is refused.

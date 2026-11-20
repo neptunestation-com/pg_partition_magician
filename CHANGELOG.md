@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **Auto-regrain passes over a coarse partition dropped by hand** (#1478). `maintain()`'s candidate scan left out
+  a coarse child detached by hand but not one dropped, whose `pgpm.part` row stays attached, so it picked that one
+  as the oldest on every tick, `regrain_step` refused it as gone (`skip_regrain`), and the coarse children behind
+  it were never regrained. The scan now reads the rows through `_part_built`, as `status()` does. tests/394; guard
+  `bench/autoregrain_skips_dropped.sh`, mutation `autoregrain_picks_dropped`.
 - **`bench/regrain_perf.sh` fails against its delta-analyze mutant on any runner** (#871). On a CI runner the guard
   read a reconcile tick's scan of the delta as 0 against mutation `regrain_no_delta_analyze` and passed its own
   defect. The cause was autovacuum: the delta takes 50000 inserts with no row estimate, which is past

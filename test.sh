@@ -1418,6 +1418,7 @@ run_perf() {
     "bench/uninstall_keeps_dependants.sh pgpm_perf470"
     "bench/regrain_history_coarse_child.sh pgpm_perf465"
     "bench/obtain_backoff_headroom_logs.sh pgpm_perf451"
+    "bench/autoregrain_skips_dropped.sh pgpm_perf471"
   )
   local selected=()
   local n=${#guards[@]} idx
