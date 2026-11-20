@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` refuses an `infinity` newest value in its own words, before the copy and the swap** (#1328).
+  TimescaleDB accepts an `infinity` row, and the frontier check died raw `cannot subtract infinite timestamps` on
+  its own message's arithmetic; with `p_force_frontier` it skipped the read and the copy died raw `timestamp out of
+  range` on the chunk holding the row, after committing the chunks before it. The check now refuses the value
+  whatever `p_force_frontier` says (no partition can hold it, as `transmute` says), and `from_hypertable_copy`
+  refuses the chunk TimescaleDB makes for it, which outlives the rows, naming the `DROP TABLE` that removes it.
+  tests/timescale/db/370; mutations `hypertable_frontier_infinity_unrefused`,
+  `hypertable_copy_infinite_chunk_unrefused`.
+- **`from_hypertable` asks `transmute`'s session-zone rule before the swap** (#1221). A `timestamptz` grid records
+  the session `TimeZone`, and `transmute` refuses one it cannot record (`'UTC+3'`, `localtime`); asked only by the
+  handoff, it came after the cutover's swap had dropped the hypertable, leaving a plain table pgpm does not manage.
+  `from_hypertable` now refuses before its copy and the cutover before its pre-drain. tests/timescale/db/370;
+  mutation `hypertable_session_zone_unasked`.
+- **A re-run of `from_hypertable_copy` hands the previous copy's objects to the hypertable's owner, or refuses up
+  front** (#1037). After `ALTER TABLE <hypertable> OWNER TO`, the new owner's re-run died raw `must be owner` on the
+  old owner's capture function (or copy), where every other path that drops them refuses `42501` naming
+  `pgpm.hand_over_scratch`. tests/timescale/db/371; mutation `hypertable_copy_rerun_owner_not_followed`.
+- **The hypertable path reads a key's `INCLUDE` columns as no part of the key** (#1413). The tracking copy refused a
+  `PRIMARY KEY (id, ts) INCLUDE (note)` with a nullable `note` as a nullable key and put a `NOT NULL` one in the
+  delta, and the append-only cutover skipped such a key, went keyless, and refused the swap over a row at the copy
+  watermark. tests/timescale/db/372; four mutations, one per read.
+- **The hypertable capture follows its delta when the freed name goes to a materialized view or a sequence**
+  (#1061). A write queued on the delta while an operator renamed it and gave its name to a relation `LOCK TABLE`
+  cannot take died `42809` instead of writing the renamed delta. tests/timescale/db/373; mutation
+  `hypertable_capture_lock_wrong_type_uncaught`.
 - **Test witnesses that failed on correct code under load now wait on events, not on samples or fixed budgets**
   (#1469, #1340). Test-only; no module changes. `tests/162` judged "the second session is waiting on a lock" by
   re-reading `pg_stat_activity.wait_event_type` after its poll had already seen it, and never read whether the

@@ -11374,7 +11374,7 @@ CAPTURE_HELD_HYPERTABLE = """    execute format('create function %I.%I() returns
         if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
           begin
             lock table only %I.%I in row exclusive mode;
-          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
             null;
           end;
           if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
@@ -11395,7 +11395,7 @@ CAPTURE_HELD_HYPERTABLE = """    execute format('create function %I.%I() returns
           end if;
           begin
             execute ''lock table only '' || n || '' in row exclusive mode'';
-          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then
             if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
               raise;
             end if;
@@ -16418,6 +16418,104 @@ select is((select write_ceiling from pgpm.progress('public.pg279')), null,
 """, 1)],
 )
 MUTATION_SRC["detached_write_child_scalar_null_279"] = "tests/279_progress_write_child_exists_test.sql"
+
+# Issues #1328 and #1221: from_hypertable refuses an infinity newest value (whatever p_force_frontier says) and a
+# session TimeZone pgpm cannot record before its copy and its swap, and from_hypertable_copy refuses the chunk
+# TimescaleDB makes for an infinity value. tests/timescale/db/370 through bench/hypertable_infinity_and_session_zone.sh.
+_G1328_HT = "bench/hypertable_infinity_and_session_zone.sh"
+MUTATIONS["hypertable_frontier_infinity_unrefused"] = (
+    _G1328_HT,
+    "Pre-#1328 pgpm_hypertable: _from_hypertable_check_frontier returns at once under p_force_frontier and never "
+    "refuses an infinity newest value, so its far-future refusal dies raw 'cannot subtract infinite timestamps' "
+    "(22008) on its own message's v_max - now(), and with p_force_frontier from_hypertable goes on to the copy. "
+    "One site, the infinity refusal (with the early return put back above it). tests/timescale/db/370's #1328 "
+    "part fails: from_hypertable and the cutover, with and without p_force_frontier.",
+    [("  if v_max = 'infinity'::timestamptz then\n",
+      "  if p_force_frontier then return; end if;\n  if false then\n", 1)],
+)
+MUTATIONS["hypertable_copy_infinite_chunk_unrefused"] = (
+    _G1328_HT,
+    "#1328's copy half put back: from_hypertable_copy does not refuse the chunk that ends at infinity, so it "
+    "commits its skeleton and dies raw 'timestamp out of range' bounding a read of that chunk, the infinity row "
+    "in it or not. One site, the refusal's condition. tests/timescale/db/370's copy assertions fail (the copy "
+    "dies at its first COMMIT inside throws_like with 2D000).",
+    [("  if v_inf_chunk is not null then\n", "  if false then\n", 1)],
+)
+MUTATIONS["hypertable_session_zone_unasked"] = (
+    _G1328_HT,
+    "Pre-#1221 pgpm_hypertable: _from_hypertable_check_arguments does not ask transmute's session-zone rule "
+    "(_canonical_tz), so under a POSIX-rule TimeZone a timestamptz hypertable is copied and swapped, the "
+    "hypertable dropped, before the handoff's transmute refuses. One site, the rule's condition. "
+    "tests/timescale/db/370's #1221 part fails (the copy's or the swap's COMMIT dies 2D000 inside throws_like).",
+    [("     and pgpm._canonical_tz(current_setting('TimeZone')) is null then\n", "     and false then\n", 1)],
+)
+# Issue #1037 bullet 2: a re-run of from_hypertable_copy follows the hypertable's owner before it drops what the
+# previous copy recorded. tests/timescale/db/371 through bench/hypertable_copy_rerun_owner_follow.sh.
+MUTATIONS["hypertable_copy_rerun_owner_not_followed"] = (
+    "bench/hypertable_copy_rerun_owner_follow.sh",
+    "Pre-#1037-bullet-2 pgpm_hypertable: from_hypertable_copy drops the previous copy's recorded function, delta "
+    "and copy without calling _scratch_owner_follow, so the hypertable's new owner's re-run dies raw 'must be "
+    "owner of function <rel>_pgpm_delta_fn' (or 'permission denied for table <rel>_pgpm_dest') instead of the "
+    "42501 hand_over_scratch refusal. One site, the call. tests/timescale/db/371 part A fails.",
+    [("  perform pgpm._scratch_owner_follow(p_hypertable, 'from_hypertable_copy');\n", "", 1)],
+)
+# Issue #1413 bullet 1: the tracking copy's key and the cutover's catch-up key are the index's key columns, the
+# first indnkeyatts of indkey, never its INCLUDE columns. One mutation per read. tests/timescale/db/372 through
+# bench/hypertable_include_columns_not_key.sh.
+_G1413_HT = "bench/hypertable_include_columns_not_key.sh"
+MUTATIONS["hypertable_copy_key_reads_include"] = (
+    _G1413_HT,
+    "Pre-#1413 from_hypertable_copy key list: the tracked key, the delta's columns and the capture's value lists "
+    "take the whole of indkey, so a NOT NULL INCLUDE column is a delta column and a reconcile key component. One "
+    "site. tests/timescale/db/372 part A fails (b372's delta holds id, ts and tag; a372's too, with note).",
+    [("     where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;", "     where i.indexrelid = v_keyidx;", 1)],
+)
+MUTATIONS["hypertable_copy_nullable_check_reads_include"] = (
+    _G1413_HT,
+    "Pre-#1413 from_hypertable_copy nullable-key refusal: it asks every column of indkey to be NOT NULL, so a "
+    "PRIMARY KEY (id, ts) INCLUDE (note) with a nullable note is refused tracking as 'a key with a nullable "
+    "column'. One site. tests/timescale/db/372 part A fails (a372's tracking copy is refused).",
+    [("                where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts   -- #1413: key columns, not INCLUDE\n",
+      "                where i.indexrelid = v_keyidx\n", 1)],
+)
+MUTATIONS["hypertable_catchup_key_reads_include"] = (
+    _G1413_HT,
+    "Pre-#1413 cutover key pick: the append-only catch-up's key must have every column of indkey NOT NULL, so a "
+    "key with a nullable INCLUDE column is skipped, the catch-up goes keyless with its strict `>`, misses a row "
+    "at the copy watermark, and the conservation check refuses the swap. One site. tests/timescale/db/372 part B "
+    "fails (c372 is not swapped).",
+    [("                        where kc.ord <= i.indnkeyatts and not a.attnotnull)   -- #1413: key columns, not INCLUDE\n",
+      "                        where not a.attnotnull)\n", 1)],
+)
+MUTATIONS["hypertable_catchup_antijoin_reads_include"] = (
+    _G1413_HT,
+    "Pre-#1413 cutover anti-join: the catch-up's row constructors take the whole of indkey, so a NULL INCLUDE "
+    "value never matches and the copied row at the watermark is inserted a second time (a duplicate key on the "
+    "copy's pre-built key index). One site. tests/timescale/db/372 part B fails (c372 is not swapped).",
+    [("       where i.indexrelid = v_akey and kc.ord <= i.indnkeyatts;   -- #1413\n",
+      "       where i.indexrelid = v_akey;\n", 1)],
+)
+# Issue #1061, the hypertable twin: from_hypertable_copy's capture catches wrong_object_type from its LOCK through
+# the minted name. tests/timescale/db/373 through bench/hypertable_capture_freed_name_not_a_table.sh.
+MUTATIONS["hypertable_capture_lock_wrong_type_uncaught"] = (
+    "bench/hypertable_capture_freed_name_not_a_table.sh",
+    "Pre-#1061 hypertable capture: the fast path's LOCK handler catches undefined_table, invalid_schema_name and "
+    "insufficient_privilege only, so a writer queued on the delta while an operator renamed it and gave the freed "
+    "name to a materialized view or a sequence dies 42809 'cannot lock relation' instead of following the delta. "
+    "One site, the fast path's handler. tests/timescale/db/373 fails (both races' writes die, and the cutover "
+    "loses their changes).",
+    [("            lock table only %I.%I in row exclusive mode;\n"
+      "          exception when undefined_table or invalid_schema_name or insufficient_privilege or wrong_object_type then\n",
+      "            lock table only %I.%I in row exclusive mode;\n"
+      "          exception when undefined_table or invalid_schema_name or insufficient_privilege then\n", 1)],
+)
+for _name in ("hypertable_frontier_infinity_unrefused", "hypertable_copy_infinite_chunk_unrefused",
+              "hypertable_session_zone_unasked", "hypertable_copy_rerun_owner_not_followed",
+              "hypertable_copy_key_reads_include", "hypertable_copy_nullable_check_reads_include",
+              "hypertable_catchup_key_reads_include", "hypertable_catchup_antijoin_reads_include",
+              "hypertable_capture_lock_wrong_type_uncaught"):
+    MUTATION_SRC[_name] = "pgpm_hypertable/install.sql"
+    MUTATION_TRACK[_name] = "timescale"
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

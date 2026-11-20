@@ -660,6 +660,17 @@ run_timescale() {
       /repo/tests/timescale/db/14_from_hypertable_online_drain_test.sql || fail=1
     bash "$(dirname "$0")/bench/tests_witness_the_step.sh" pgpm_test-timescale pgpm_perf443 \
       /repo/tests/timescale/db/47_from_hypertable_scratch_tables_in_pg_temp_test.sql || fail=1
+    # #1328 and #1221, #1037 bullet 2, #1413 bullet 1 and #1061's hypertable twin: each wrapper re-runs its
+    # tests/timescale/db file (370 to 373) against the real install, the clean-code half of the pairs
+    # discriminate.sh completes with their nine mutants.
+    echo "--- an infinity row and a session zone pgpm cannot record are refused before the swap (issues #1328, #1221) ---"
+    bash "$(dirname "$0")/bench/hypertable_infinity_and_session_zone.sh" pgpm_test-timescale pgpm_perf454 || fail=1
+    echo "--- a re-run copy follows the hypertable's owner or refuses up front (issue #1037) ---"
+    bash "$(dirname "$0")/bench/hypertable_copy_rerun_owner_follow.sh" pgpm_test-timescale pgpm_perf455 || fail=1
+    echo "--- a key's INCLUDE columns are no part of the tracked or catch-up key (issue #1413) ---"
+    bash "$(dirname "$0")/bench/hypertable_include_columns_not_key.sh" pgpm_test-timescale pgpm_perf456 || fail=1
+    echo "--- the change capture follows its delta past a freed name LOCK cannot take (issue #1061) ---"
+    bash "$(dirname "$0")/bench/hypertable_capture_freed_name_not_a_table.sh" pgpm_test-timescale pgpm_perf457 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
