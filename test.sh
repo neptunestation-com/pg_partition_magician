@@ -183,6 +183,14 @@ install_channel() {  # <channel> <profile> <service> [db]
   esac
 }
 
+# The invariant oracle's schema pgpm_formal and its event triggers (tests/formal/oracle.sql), test-only: every runner of
+# a file that calls pgpm_formal.baseline() installs it (tests/formal/migrate_baseline.py check holds them to that). It
+# depends on nothing of pgpm's, so a file may uninstall and reinstall pgpm under it, and a second run is a no-op.
+install_oracle() {  # <profile> <service> <db>
+  $DC --profile "$1" exec -T -e PGOPTIONS='-c client_min_messages=warning' "$2" \
+    psql -U postgres -d "$3" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null
+}
+
 load_fixtures() {  # <profile> <service> [db] -- build the demo tables for the pgTAP suite
   local p="$1" s="$2" db="${3:-postgres}"
   psql_db "$p" "$s" "$db" -c "ALTER DATABASE \"$db\" SET poc.seed_count = 8000; ALTER DATABASE \"$db\" SET poc.events_count = 4000;" >/dev/null
@@ -303,6 +311,9 @@ run_version() {  # <pg_version>
     psql_db "$p" "$s" pgpm_tmpl -c "create extension if not exists pgtap;" >/dev/null
     install_channel "$ch" "$p" "$s" pgpm_tmpl
     load_fixtures "$p" "$s" pgpm_tmpl
+    # The invariant oracle (formal methods Phase 3, docs/formal/phase3-design.md): the custody files listed in
+    # tests/formal/custody_files.txt call pgpm_formal.baseline() and fail without it. Test-only, after pgpm.
+    install_oracle "$p" "$s" pgpm_tmpl
 
     # The files run PGPM_JOBS at a time (4 by default: a GitHub runner has four cores, and a channel's
     # 272 files are a second each of mostly idle waiting on docker exec, psql and pg_prove start-up), each
@@ -368,6 +379,7 @@ run_version() {  # <pg_version>
       if [ "$pg_ready" != "$ch" ]; then
         install_channel "$ch" "$p" "$s"
         load_fixtures "$p" "$s"
+        install_oracle "$p" "$s" postgres   # tests/78 is a custody file (tests/formal/custody_files.txt)
         pg_ready="$ch"
       fi
       echo; echo "### $b (on postgres)"
@@ -450,6 +462,7 @@ run_timescale() {
         --single-transaction -f /repo/pgpm_core/install.sql >/dev/null
       $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/pgpm_hypertable/install.sql >/dev/null
       $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/tests/timescale/fixtures.sql >/dev/null
+      $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null   # the invariant oracle
       # -tA gives clean TAP (no table chrome); no ON_ERROR_STOP so every assertion reports. psql's exit
       # status is kept, not left to `set -e` (which would end the track there with no verdict and no
       # teardown): a session lost part-way exits 2 and is judged below.
@@ -806,6 +819,9 @@ run_archive() {
   $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q -f /repo/tests/archive/fixtures.sql >/dev/null
   $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null
   $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q -f /repo/pgpm_archive/install.sql >/dev/null
+  # the invariant oracle, as run_version's template has it (named here, not through install_oracle, so
+  # scripts/check_track_filters.py sees that this track reads it and holds archive.yml's path filter to it)
+  $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null
 
   local an=0
   for af in tests/archive/db/*.sql; do

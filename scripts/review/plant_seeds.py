@@ -328,6 +328,14 @@ class SuiteRunner:
         r = self.psql(track, db, "-tAq", "-f", path, check=False, stop=False)
         return suite_verdict((r.stdout or "") + (r.stderr or ""))
 
+    def oracle(self, track, db, tree):
+        """The invariant oracle (tests/formal/oracle.sql), as test.sh installs it after pgpm and the fixtures: the custody
+        files (tests/formal/custody_files.txt) call pgpm_formal.baseline() and fail without it. A tree from before the
+        oracle has neither, so nothing is installed there."""
+        path = os.path.join(tree, "tests", "formal", "oracle.sql")
+        if os.path.exists(path):
+            self.file(track, db, "-q", path=path)
+
     def core(self, tree, sid):
         remote, tmpl = f"/tmp/pgpm_seed_{sid.lower()}", f"pgpm_seed_{sid.lower()}_tmpl"
         self.ship("core", tree, remote)
@@ -337,6 +345,7 @@ class SuiteRunner:
         self.file("core", tmpl, "-q", "--single-transaction", path=os.path.join(tree, "pgpm_core", "install.sql"))
         self.psql("core", "postgres", "-qc", f"alter database {tmpl} set poc.seed_count = 8000; alter database {tmpl} set poc.events_count = 4000")
         self.file("core", tmpl, "-q", path=os.path.join(tree, "fixtures", "demo.sql"))
+        self.oracle("core", tmpl, tree)
         failed, skipped, ran, cron_ready = [], [], 0, None
         files = sorted(f for f in os.listdir(os.path.join(tree, "tests")) if f.endswith(".sql"))
         for n, b in enumerate(files, 1):
@@ -351,6 +360,7 @@ class SuiteRunner:
                         self.file("core", "postgres", "-q", "--single-transaction", path=os.path.join(tree, "pgpm_core", "install.sql"))
                         self.psql("core", "postgres", "-qc", "alter database postgres set poc.seed_count = 8000; alter database postgres set poc.events_count = 4000")
                         self.file("core", "postgres", "-q", path=os.path.join(tree, "fixtures", "demo.sql"))
+                        self.oracle("core", "postgres", tree)
                 if not cron_ready:
                     skipped.append(f"tests/{b}")
                     continue
@@ -381,6 +391,7 @@ class SuiteRunner:
         self.file("archive", tmpl, "-q", path=os.path.join(tree, "tests", "archive", "fixtures.sql"))
         self.file("archive", tmpl, "-q", "--single-transaction", path=os.path.join(tree, "pgpm_core", "install.sql"))
         self.file("archive", tmpl, "-q", path=os.path.join(tree, "pgpm_archive", "install.sql"))
+        self.oracle("archive", tmpl, tree)
         failed, ran = [], 0
         files = sorted(f for f in os.listdir(os.path.join(tree, "tests", "archive", "db")) if f.endswith(".sql"))
         for n, b in enumerate(files, 1):
@@ -408,6 +419,7 @@ class SuiteRunner:
             self.file("timescale", db, "-q", "--single-transaction", path=os.path.join(tree, "pgpm_core", "install.sql"))
             self.file("timescale", db, "-q", path=os.path.join(tree, "pgpm_hypertable", "install.sql"))
             self.file("timescale", db, "-q", path=os.path.join(tree, "tests", "timescale", "fixtures.sql"))
+            self.oracle("timescale", db, tree)
             ran += 1
             if self.run_file("timescale", db, f"{remote}/tests/timescale/db/{b}"):
                 failed.append(f"tests/timescale/db/{b}")

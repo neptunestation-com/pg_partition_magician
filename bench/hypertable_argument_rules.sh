@@ -50,6 +50,11 @@ if [ "$fail" = 0 ] && ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/timescal
   printf 'FAIL  %-58s %s\n' "the timescale fixtures loaded" "tests/timescale/fixtures.sql"
   fail=1
 fi
+# the invariant oracle (tests/formal/oracle.sql): the test file calls pgpm_formal.baseline()
+if [ "$fail" = 0 ] && ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null 2>&1; then
+  printf 'FAIL  %-58s %s\n' "the invariant oracle installed" "tests/formal/oracle.sql"
+  fail=1
+fi
 
 if [ "$fail" = 0 ]; then
   # >>> pgTAP verdict: the same in every timescale wrapper; bench/wrapper_tap_verdicts.sh evaluates it.

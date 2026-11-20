@@ -445,8 +445,9 @@ if ! { q -d postgres -q -c "create database $TMPL" </dev/null &&
        q -d postgres -q -c "alter database $TMPL set poc.seed_count = 8000" </dev/null &&
        q -d postgres -q -c "alter database $TMPL set poc.events_count = 4000" </dev/null &&
        q -d "$TMPL" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/fixtures/demo.sql" &&
+       q -d "$TMPL" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/formal/oracle.sql" &&
        docker exec -i "$C" sh -c "cat > $UNINSTALL" <"$ROOT/pgpm_core/uninstall.sql"; } >"$work/tmpl.log" 2>&1; then
-  say FAIL "fixture: the template (pgtap, install.sql, fixtures/demo.sql) was built" "$(grep -m1 ERROR "$work/tmpl.log")"
+  say FAIL "fixture: the template (pgtap, install.sql, fixtures/demo.sql, tests/formal/oracle.sql) was built" "$(grep -m1 ERROR "$work/tmpl.log")"
   exit 1
 fi
 fresh() {

@@ -101,7 +101,8 @@ then
   exit 1
 fi
 
-# load <module install.sql>: a fresh <db> holding TimescaleDB, pgtap, the core, that module and the fixtures.
+# load <module install.sql>: a fresh <db> holding TimescaleDB, pgtap, the core, that module, the fixtures and the
+# invariant oracle (tests/formal/oracle.sql: a custody file here calls pgpm_formal.baseline()).
 load() {
   q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
   q -d postgres -q -c "create database $DB" </dev/null >"$work/install.log" 2>&1 &&
@@ -109,7 +110,8 @@ load() {
     q -d "$DB" -v ON_ERROR_STOP=1 -q -c "create extension if not exists timescaledb; create extension if not exists pgtap;" </dev/null >>"$work/install.log" 2>&1 &&
     q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f - <"$ROOT/pgpm_core/install.sql" >>"$work/install.log" 2>&1 &&
     q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$1" >>"$work/install.log" 2>&1 &&
-    q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/timescale/fixtures.sql" >>"$work/install.log" 2>&1
+    q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/timescale/fixtures.sql" >>"$work/install.log" 2>&1 &&
+    q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/formal/oracle.sql" >>"$work/install.log" 2>&1   # the invariant oracle
 }
 
 # The records whose parent no longer exists, by kind: what a swap that kept them leaves of a dropped hypertable.
