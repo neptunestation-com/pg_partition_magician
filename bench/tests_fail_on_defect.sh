@@ -192,6 +192,10 @@ PY
     #
     # pass 12 G26: its arms go on the lines below this one.
     # (end of pass 12 G26's arms)
+    #
+    # issue #962 (A962-4): tests/100, defined with its defect at the end of this file
+    100_obtain_backoff_low_headroom_test.sql:*|*:tests/100_obtain_backoff_low_headroom_test.sql) SEL=" 100 "; F100="$ONLY" ;;
+    # (end of issue #962's arms)
     *) g19_only "$base" "$src" ||
          { say FAIL "GUARD: the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1; } ;;
   esac
@@ -1239,6 +1243,43 @@ fi
 #
 # pass 12 G26: its blocks go on the lines below this one.
 # (end of pass 12 G26's blocks)
+#
+# issue #962 (A962-4) ------------------------------------------------------------------------------------------
+# tests/100 judged every tick that bypasses obtain's back-off on low headroom by a count of attached partitions,
+# the top cell and a write at the top, all of which hold for an obtain that skips the FIRST cell it should build
+# and builds one past the top instead (#913's shifted cell): as many partitions, the same top, and a hole just
+# past the old grid where every write is refused. It passed all 22 assertions over that hole. It now names the
+# cells and writes into the first one each bypass must build.
+# The defect: this checkout's install.sql with mutation obtain_backoff_bypass_shifts_cell applied (the guard's
+# own copy of #913's shape, built by mutate.py, so the two cannot drift apart).
+# LIVENESS, read from the database the file leaves: public.ob's attached cells from 6000 up, and a write at 7501
+# made here, after the file. Under the clean install [6000,7000) .. [9000,10000) and the write is accepted; under
+# the defect [7000,8000) is missing, [10000,11000) is there instead, and the write is refused.
+# The mutation (bench/mutations/mutate.py):
+#   t100_bypass_cells_by_count -- tests/100's bypass checks back to the count, the top cell and the write at 9999
+T100="tests/100_obtain_backoff_low_headroom_test.sql"; F100="${F100:-$ROOT/$T100}"
+[ -z "$ONLY" ] && SEL="${SEL}100 "
+
+# ---- tests/100: the cells a back-off bypass builds, by identity ----------------------------------------------
+OB100="select string_agg(lo || '-' || hi, ',' order by lo::numeric)
+         from pgpm.part where parent_table = 'public.ob'::regclass and attached and lo::numeric >= 6000"
+OB100_WRITE="insert into public.ob (id, body) values (7501, 'witness') returning 'accepted'"
+if sel 100; then
+  judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T100 passes against the clean install" pass "$F100"
+  expect_v "clean, ob's bypass built [7000,8000) .. [9000,10000)" "6000-7000,7000-8000,8000-9000,9000-10000" "$OB100"
+  expect_v "clean, a write at 7501 is accepted" "accepted" "$OB100_WRITE"
+  if python3 "$ROOT/bench/mutations/mutate.py" obtain_backoff_bypass_shifts_cell \
+       "$ROOT/pgpm_core/install.sql" "$work/shifted_cell.sql" >"$work/mutate.log" 2>&1; then
+    judge_on "$work/shifted_cell.sql" "DEFECT: $T100 fails when the bypass skips its first cell" fail "$F100"
+    expect_v "defect, ob's bypass left [7000,8000) a hole" "6000-7000,8000-9000,9000-10000,10000-11000" "$OB100"
+    got=$(v "$OB100_WRITE" | head -1)
+    if [[ "$got" == *ERROR* ]]; then say PASS "LIVENESS: defect, a write at 7501 into the hole is refused" "${got:0:70}"
+    else say FAIL "LIVENESS: defect, a write at 7501 into the hole is refused" "${got:-no output}"; fail=1; fi
+  else
+    say FAIL "fixture: planted the defect: obtain_backoff_bypass_shifts_cell" "$(tail -1 "$work/mutate.log")"; fail=1
+  fi
+fi
+# (end of issue #962's blocks)
 
 if [ "$fail" = 0 ]; then say PASS "every judged test file fails against its defect" "${SEL# }"
 else say FAIL "every judged test file fails against its defect" "${SEL# }"; fi

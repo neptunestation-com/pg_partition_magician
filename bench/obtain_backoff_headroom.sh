@@ -55,6 +55,11 @@
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
 fail=0
+# This run's own logs (#962): a fixed host path such as /tmp/obh_install.log is shared by every run on the host,
+# so two at once (discriminate.sh and a perf run, or two shards) printed each other's install errors.
+# bench/obtain_backoff_headroom_logs.sh proves two concurrent runs each print their own.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 q()   { docker exec "$C" psql -U postgres -d "$DB" -qtA -c "$1"; }
 run() { docker exec -e PGOPTIONS='-c client_min_messages=warning' "$C" \
@@ -68,10 +73,10 @@ cells() { q "select string_agg(lo || '-' || hi, ',' order by lo::bigint) from pg
              where parent_table = '$1'::regclass and attached"; }
 # A write must be accepted: the cell it targets really exists and takes rows, whatever pgpm.part says.
 accepts() { # <label> <table> <id>
-  if run "insert into $2 (id, body) values ($3, 'probe')" >/tmp/obh_insert.log 2>&1; then
+  if run "insert into $2 (id, body) values ($3, 'probe')" >"$work/insert.log" 2>&1; then
     check "$1" "accepted" "accepted"
   else
-    check "$1" "rejected: $(grep -m1 'ERROR' /tmp/obh_insert.log | cut -c1-70)" "accepted"
+    check "$1" "rejected: $(grep -m1 'ERROR' "$work/insert.log" | cut -c1-70)" "accepted"
   fi
 }
 
@@ -99,8 +104,8 @@ raced_tick() { # <table> <label prefix>
 
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
-if ! docker exec "$C" psql -U postgres -d "$DB" -q -v ON_ERROR_STOP=1 -f "$INSTALL" >/tmp/obh_install.log 2>&1; then
-  echo "FAIL  install did not complete"; sed 's/^/      /' /tmp/obh_install.log; exit 1
+if ! docker exec "$C" psql -U postgres -d "$DB" -q -v ON_ERROR_STOP=1 -f "$INSTALL" >"$work/install.log" 2>&1; then
+  echo "FAIL  install did not complete"; sed 's/^/      /' "$work/install.log"; exit 1
 fi
 
 # ------------------------------------------------------------------ public.ob_race: forward grid headroom
