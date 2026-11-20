@@ -64,6 +64,18 @@ create table if not exists pgpm_formal.ledger (
   primary key (parent_oid, identity)
 );
 
+-- Every parent a baselined table has been a partition of, as the event triggers saw it (pgpm_formal._note_anchors). What
+-- finds the parent once the original table stops being a partition: transmute makes it the monolith of a NEW parent,
+-- and when the monolith is later dropped (a regrain swap, retire) or released (retain_disown) the name is all the
+-- ledger had, which a schema move takes away and a namesake answers to (measured in W3: tests/197, 204, 349, 355).
+-- Insert-only with no unique key, like anchor_seen, so a trigger never waits on another session's row.
+create table if not exists pgpm_formal.parent_seen (
+  orig_oid   oid not null,
+  parent_oid oid not null,
+  seen_at    timestamptz not null default clock_timestamp()
+);
+create index if not exists parent_seen_orig_idx on pgpm_formal.parent_seen (orig_oid);
+
 -- Relations the test made the operator's. parent_oid: the table it was a partition of when registered (null if
 -- none), so a later DETACH can be attributed through alter_history from hist_mark on. rows_for: the parent whose
 -- rows it counts for.
@@ -144,10 +156,17 @@ create index if not exists create_history_objid_idx on pgpm_formal.create_histor
 -- Measured (W2, tests/309): an operator's table adopted into pgpm.part (adopt_partition) and then regrained loses its
 -- pgpm.part row before regrain's swap drops it, and pgpm did not create it, so neither the catalog at the drop nor
 -- the creation history names it. It was anchored when the regrain began, which this keeps.
+--
+-- NO unique key (measured in W3, tests/345 part C): two sessions noting the same oid would make the second insert wait
+-- for the first's transaction, and when that one is pgpm's, waiting for a lock the test's session holds, the oracle
+-- had built a deadlock the file never has. A row a concurrent transaction has not committed yet is noted again, which
+-- costs a duplicate and nothing else: the table is only ever asked whether an oid is in it.
 create table if not exists pgpm_formal.anchor_seen (
-  objid      oid primary key,
+  objid      oid not null,
   first_seen timestamptz not null default clock_timestamp()
 );
+alter table pgpm_formal.anchor_seen drop constraint if exists anchor_seen_pkey;
+create index if not exists anchor_seen_objid_idx on pgpm_formal.anchor_seen (objid);
 
 -- Archive object contents, loaded by the archive track's harness before check() runs (the oracle cannot read a
 -- bucket, and judging the archive with pgpm_archive's own code would be the code under test grading itself).
@@ -199,6 +218,9 @@ begin
     union all select 'pgpm.config monolith_oid' from pgpm.config where monolith_oid = p_oid
     union all select 'pgpm.config regrain_delta_oid' from pgpm.config where regrain_delta_oid = p_oid
     union all select 'pgpm.scratch obj' from pgpm.scratch where obj = p_oid
+    -- the hypertable pgpm_hypertable is converting: pgpm.scratch keys the copy's working relations by its oid, and the
+    -- cutover drops it (measured in W3: every tests/timescale file that cuts over read as an unrecorded drop)
+    union all select 'pgpm.scratch parent_oid' from pgpm.scratch where parent_oid = p_oid
     union all select 'anchored earlier' from pgpm_formal.anchor_seen where objid = p_oid
     union all select 'created by pgpm' from (select h.by_pgpm from pgpm_formal.create_history h where h.objid = p_oid
                                               order by h.id desc limit 1) c where c.by_pgpm
@@ -216,9 +238,16 @@ begin
   insert into pgpm_formal.anchor_seen (objid)
   select o from (select child_oid from pgpm.part union select retiring_oid from pgpm.part
                  union select detach_dispatched_oid from pgpm.part union select parent_table::oid from pgpm.config
-                 union select monolith_oid from pgpm.config) a(o)
-   where o is not null
-  on conflict do nothing;
+                 union select monolith_oid from pgpm.config union select parent_oid from pgpm.scratch) a(o)
+   where o is not null and not exists (select 1 from pgpm_formal.anchor_seen s where s.objid = a.o);
+  -- and the parent each baselined table is a partition of now (see parent_seen)
+  insert into pgpm_formal.parent_seen (orig_oid, parent_oid)
+  select lp.parent_oid, r.root
+    from pgpm_formal.ledger_parent lp
+    join pg_class c on c.oid = lp.parent_oid and c.relispartition
+    cross join lateral (select pg_partition_root(lp.parent_oid)::oid as root) r
+   where r.root is not null
+     and not exists (select 1 from pgpm_formal.parent_seen s where s.orig_oid = lp.parent_oid and s.parent_oid = r.root);
 exception when others then
   null;
 end;
@@ -243,6 +272,13 @@ exception when others then
 end;
 $$;
 
+-- Does an event touch temporary tables and nothing else? p_temp: one element per table the event names, true for a
+-- temporary one; null or empty (no table) is false, so such an event is recorded as before.
+create or replace function pgpm_formal._temporary_only(p_temp boolean[])
+returns boolean language sql immutable as $$
+  select coalesce(cardinality(p_temp) > 0 and true = all (p_temp), false);
+$$;
+
 -- sql_drop: one drop_history row per dropped table. SECURITY DEFINER so a test that drops under SET ROLE still
 -- writes its row; it never raises, since an oracle that breaks a DROP changes what the file tests.
 create or replace function pgpm_formal._on_sql_drop()
@@ -250,6 +286,14 @@ returns event_trigger language plpgsql security definer set search_path = pg_cat
 declare
   v_ctx text; v_query text; v_btype text; v_app text; v_by_pgpm boolean; r record; v_rec text;
 begin
+  -- A drop of temporary tables alone is left alone (check() never reads one), and touches no relation: reading
+  -- pgpm's catalog or writing the history would take locks the dropping transaction did not hold, which pgpm_archive's
+  -- archive._refuse_foreign_read reads as a misdirected read (measured in W3: tests/archive/db/08 failed with the
+  -- oracle installed, its snapshot table's drop and re-create inside the window it audits).
+  if pgpm_formal._temporary_only((select array_agg(o.is_temporary) from pg_event_trigger_dropped_objects() o
+                                   where o.object_type = 'table')) then
+    return;
+  end if;
   get diagnostics v_ctx = pg_context;
   select a.query, a.backend_type, a.application_name into v_query, v_btype, v_app
     from pg_stat_activity a where a.pid = pg_backend_pid();
@@ -278,6 +322,12 @@ create or replace function pgpm_formal._on_ddl()
 returns event_trigger language plpgsql security definer set search_path = pg_catalog, pg_temp as $$
 declare v_ctx text; v_btype text; v_app text; v_by_pgpm boolean; r record;
 begin
+  -- a command on temporary tables alone is left alone, as in _on_sql_drop and for the same reason
+  if pgpm_formal._temporary_only((select array_agg(c.relpersistence = 't') from pg_event_trigger_ddl_commands() d
+                                   join pg_class c on c.oid = d.objid
+                                  where d.classid = 'pg_class'::regclass and d.object_type = 'table')) then
+    return;
+  end if;
   get diagnostics v_ctx = pg_context;
   select a.backend_type, a.application_name into v_btype, v_app from pg_stat_activity a where a.pid = pg_backend_pid();
   v_by_pgpm := pgpm_formal._ctx_is_pgpm(v_ctx) or v_btype = 'pg_cron' or v_app = 'pg_cron';
@@ -325,7 +375,7 @@ $$;
 -- The SQL that renders a row's identity, over alias t.
 create or replace function pgpm_formal._ident_sql(p_keys name[])
 returns text language sql immutable as $$
-  select case when coalesce(array_length(p_keys, 1), 0) = 0 then 'to_jsonb(t)::text'
+  select case when coalesce(array_length(p_keys, 1), 0) = 0 then 'to_jsonb(t.*)::text'
               else format('jsonb_build_array(%s)::text', (select string_agg(format('t.%I', k), ', ') from unnest(p_keys) k))
          end;
 $$;
@@ -340,6 +390,12 @@ begin
   select true, c.relispartition into v_exists, v_part from pg_class c where c.oid = p_parent_oid;
   if v_exists and v_part then
     return pg_partition_root(p_parent_oid);
+  end if;
+  -- no longer a partition (the monolith dropped or released): the last parent the triggers saw it under, if it stands
+  select s.parent_oid::regclass into v_byname from pgpm_formal.parent_seen s join pg_class c on c.oid = s.parent_oid
+   where s.orig_oid = p_parent_oid and s.parent_oid <> p_parent_oid order by s.seen_at desc limit 1;
+  if v_byname is not null then
+    return v_byname;
   end if;
   v_byname := to_regclass(v_name);
   if v_exists and (v_byname is null or v_byname = p_parent_oid) then
@@ -360,8 +416,8 @@ begin
      where pgpm_formal._current_parent(parent_oid) = p_parent order by baselined_at desc limit 1;
   end if;
   if v is null then
-    raise exception 'pgpm_formal: % has no baseline; call pgpm_formal.baseline(%L) after loading its fixture',
-      p_parent, p_parent::text;
+    raise exception '%', format('pgpm_formal: %s has no baseline; call pgpm_formal.baseline(%L) after loading its fixture',
+      p_parent, p_parent::text);
   end if;
   return v;
 end;
@@ -385,7 +441,7 @@ begin
   execute format(
     'insert into pgpm_formal.ledger (parent_oid, identity, row_data, mult)
      select $1, i, d, case when $2 then 1 else n end
-       from (select %s as i, (array_agg(to_jsonb(t)))[1] as d, count(*)::int as n from %s t group by 1) s',
+       from (select %s as i, (array_agg(to_jsonb(t.*)))[1] as d, count(*)::int as n from %s t group by 1) s',
     pgpm_formal._ident_sql(v_keys), p_parent::text)
   using p_parent::oid, coalesce(array_length(v_keys, 1), 0) > 0;
   select coalesce(sum(mult), 0) into v_n from pgpm_formal.ledger where parent_oid = p_parent;
@@ -407,7 +463,7 @@ begin
   execute format(
     'insert into pgpm_formal.ledger as l (parent_oid, identity, row_data, mult, deleted)
      select $1, i, d, case when $2 then 1 else n end, false
-       from (select %s as i, (array_agg(to_jsonb(t)))[1] as d, count(*)::int as n from %s t where (%s) group by 1) s
+       from (select %s as i, (array_agg(to_jsonb(t.*)))[1] as d, count(*)::int as n from %s t where (%s) group by 1) s
      on conflict (parent_oid, identity) do update set row_data = excluded.row_data, mult = excluded.mult, deleted = false',
     pgpm_formal._ident_sql(v_keys), p_parent::text, coalesce(p_where, 'true'))
   using v_lp, coalesce(array_length(v_keys, 1), 0) > 0;
@@ -484,6 +540,21 @@ $$;
 -- comes as jsonb, never as a pgpm.config parameter: a parameter of pgpm's type is a pg_depend edge onto pgpm, and
 -- pgpm's uninstall refuses to drop a schema something else depends on (measured in W2: tests/239's uninstall failed).
 -- Nothing in pgpm_formal may depend on a pgpm object.
+-- A retired chunk's bound as the control's native type, or null when this session cannot parse it: an older
+-- install's render under another DateStyle, or another encoding (tests/347 G writes both on purpose). pgpm reads such
+-- a bound at its widest and never raises; check() used to cast it and raised for the whole file (W3). Null here is
+-- read as unbounded on that side, the widest reading.
+create or replace function pgpm_formal._bound(p_text text, p_type text)
+returns text language plpgsql stable as $$
+declare v text;
+begin
+  execute format('select (%L::%s)::text', p_text, p_type) into v;
+  return v;
+exception when others then
+  return null;
+end;
+$$;
+
 create or replace function pgpm_formal._native_of(p_cfg jsonb, p_row jsonb)
 returns text language plpgsql stable as $$
 declare cfg pgpm.config;
@@ -526,7 +597,7 @@ declare v_keys name[]; v_ident_q text; v_parts text[] := '{}'; r record;
 begin
   select key_cols into v_keys from pgpm_formal.ledger_parent where parent_oid = p_lp;
   -- pgpm_formal._ident_sql's expression, spelled out so the quoting is visible where the local is assigned
-  v_ident_q := case when coalesce(array_length(v_keys, 1), 0) = 0 then 'to_jsonb(t)::text'
+  v_ident_q := case when coalesce(array_length(v_keys, 1), 0) = 0 then 'to_jsonb(t.*)::text'
                     else format('jsonb_build_array(%s)::text',
                                 (select string_agg(format('t.%I', k), ', ') from unnest(v_keys) k)) end;
   p_skipped := '{}';
@@ -624,13 +695,15 @@ begin
     select count(*) into v_nrows from pgpm_formal.ledger l where l.parent_oid = lp.parent_oid and not l.deleted;
     n_lost_id := n_lost_id + v_nrows;
     -- One statement per parent: every ledger row that is over- or under-visible, and for an under-visible one its
-    -- native control value, whether it is at or past the horizon, whether retention ran over it (retain_drop or
-    -- regrain_aged logged over a range holding it), and the retired chunk that holds it (one pgpm dropped first).
+    -- native control value, whether it is at or past the horizon, whether retention ran over it (retain_drop,
+    -- regrain_aged, or retain_crossing: retire()'s DELETE of a retiring partition's referenced rows, so the declared
+    -- ON DELETE runs, before the dispatched detach lands; W3, tests/231 253 266), and the retired chunk that holds it
+    -- (one pgpm dropped first).
     v_sql := format(
       'with st as (%1$s),
             lg as materialized (select g.lo::%2$s as lo, g.hi::%2$s as hi from pgpm.log g
-                                 where $3 and g.parent_table = $1 and g.action in (''retain_drop'', ''regrain_aged'')),
-            ch as materialized (select l.lo::%2$s as lo_n, l.hi::%2$s as hi_n, l.lo, l.hi, l.s3_key, l.child_oid,
+                                 where $3 and g.parent_table = $1 and g.action in (''retain_drop'', ''regrain_aged'', ''retain_crossing'')),
+            ch as materialized (select pgpm_formal._bound(l.lo, %2$L)::%2$s as lo_n, pgpm_formal._bound(l.hi, %2$L)::%2$s as hi_n, l.lo, l.hi, l.s3_key, l.child_oid,
                                        exists (select 1 from pgpm_formal.drop_history h
                                                 where h.objid = l.child_oid and h.by_pgpm) as pgpm_dropped
                                   from pgpm.archive_ledger l where $3 and l.parent_table = $1 and l.retired_at is not null),
@@ -641,7 +714,8 @@ begin
               exists (select 1 from lg where b.nat::%2$s >= lg.lo and b.nat::%2$s < lg.hi) as ran,
               c.lo as c_lo, c.hi as c_hi, c.s3_key as c_key, c.child_oid as c_oid, c.pgpm_dropped as c_pgpm
          from bad b
-         left join lateral (select * from ch where b.nat::%2$s >= ch.lo_n and b.nat::%2$s < ch.hi_n
+         left join lateral (select * from ch where b.nat::%2$s >= coalesce(ch.lo_n, b.nat::%2$s)
+                                                and (ch.hi_n is null or b.nat::%2$s < ch.hi_n)
                              order by (ch.child_oid is not null and ch.pgpm_dropped) desc, ch.lo_n limit 1) c on true',
       v_sql, coalesce(v_t, 'numeric'));
     for r in execute v_sql using v_cur, cfg, v_have_cfg, v_bound loop

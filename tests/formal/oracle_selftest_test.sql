@@ -14,7 +14,7 @@
 -- to return exactly the one declaration left unmatched.
 create extension if not exists pgtap;
 
-select plan(54);
+select plan(77);
 
 create schema st;
 
@@ -108,6 +108,59 @@ select is(
   'LIVENESS: retention ran over every aged range but [20, 30), so 26 is below the horizon with no drop of retention''s over it');
 select is(st.found('NoLostRow', 'st.nb'), array['[26]'],
   'NoLostRow names the row below the horizon that no retention removed');
+
+-- ==================================================================== retention's crossing delete (W3)
+-- retire() on a partition a declared foreign key references DELETEs the referenced rows first, so the ON DELETE runs,
+-- and logs retain_crossing; the partition stays attached until the dispatched detach lands. Retention ran over those
+-- rows as surely as a retain_drop, but NoLostRow excused only retain_drop and regrain_aged, so they read as lost
+-- (tests/231, 253 and 266). A cron.job stand-in takes the dispatch, as those files do (no pg_cron here). Early in the
+-- file: pgpm dispatches one referenced detach at a time database-wide, and the custody section below plants a mark.
+create schema cron;
+create table cron.job (jobid bigint primary key, jobname text, database text, command text);
+create function cron.alter_job(job_id bigint, schedule text default null, command text default null,
+                               database text default null, username text default null, active boolean default null)
+returns void language sql as $$
+  update cron.job set command = coalesce(alter_job.command, job.command) where jobid = job_id
+$$;
+insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
+select st.mk('st.xc');
+call pgpm.transmute('st.xc', 'id', 10, p_retain => 30, p_obtain => 10);
+select st.fill('st.xc');
+select pgpm_formal.baseline('st.xc') as xc_n \gset
+create table st.xc_ref (id bigint primary key, xc_id bigint references st.xc (id) on delete cascade);
+insert into st.xc_ref values (1, 12), (2, 54);
+select child_name as xc_doomed from pgpm.part where parent_table = 'st.xc'::regclass and lo = '10' \gset
+select is(pgpm.retire('st.xc', :'xc_doomed'), false, 'LIVENESS: retire() takes the referenced path (dispatch, drop later)');
+select is((select array_agg(id order by id) from st.xc where id < 20) || (select array_agg(id order by id) from st.xc_ref),
+  array[1, 2, 3, 4, 5, 19, 2]::bigint[], 'LIVENESS: the crossing delete took exactly the referenced row 12, and the ON DELETE ref 1');
+select is((select count(*)::int from pgpm.log where parent_table = 'st.xc'::regclass and action = 'retain_crossing' and lo = '10'), 1,
+  'LIVENESS: retain_crossing logged over [10, 20)');
+select is((select count(*)::int from pgpm_formal.check() where parent_table = 'st.xc'::regclass), 0,
+  'the row retention''s crossing delete took is not reported lost');
+delete from st.xc where id = 54;
+select is((select array_agg(identity) from pgpm_formal.check() where parent_table = 'st.xc'::regclass and invariant = 'NoLostRow'),
+  array['[54]'], 'and a row deleted outside every range retention ran over still is (ref 2 went with it)');
+select pgpm_formal.deleted('st.xc', 'id = 54');
+-- land the dispatched detach as the pgpm_detach job would, and let retire() drop it: no mark stays in flight
+alter table st.xc detach partition st.xc_p0000000000000000010;
+select is(pgpm.retire('st.xc', :'xc_doomed'), true, 'fixture: with its detach landed, retire() drops [10, 20)');
+drop schema cron cascade;
+
+-- ==================================================================== a retired chunk's bound no session parses (W3)
+-- check() cast every retired chunk's bounds to the control's type, so one written under another DateStyle or in
+-- another encoding (tests/347 G, on purpose) raised out of check() for the whole file. pgpm reads it at its widest.
+select st.mk('st.ub');
+call pgpm.transmute('st.ub', 'id', 10, p_retain => 30, p_obtain => 10);
+select st.fill('st.ub');
+select pgpm_formal.baseline('st.ub') as ub_n \gset
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, rows_archived, retired_at)
+  values ('st.ub', 'ten', '20', 'ub_gone', 'k/ub', 0, now());
+delete from st.ub where id = 61;
+select is(pgpm_formal._bound('ten', 'bigint'), null, 'LIVENESS: the planted chunk''s lo parses as no bigint');
+select is((select array_agg(invariant || ' ' || identity) from pgpm_formal.check() where parent_table = 'st.ub'::regclass),
+  array['NoLostRow [61]'], 'check() reads past a chunk whose bound it cannot parse, and still names the row deleted by hand');
+select pgpm_formal.deleted('st.ub', 'id = 61');
+delete from pgpm.archive_ledger where parent_table = 'st.ub'::regclass;
 
 -- ==================================================================== NoDuplicateRow, keyless
 -- baselined in a session zone far from UTC: the identity is rendered under the oracle's pinned UTC either way
@@ -274,6 +327,115 @@ select is(pgpm.untransmute('st.ut')::text, 'st.ut', 'fixture: untransmute hands 
 select is(st.found_like('ResolveByRecord', 'st.ut%'), array['st.ut'],
   'ResolveByRecord names the operator''s relation pgpm detached from its parent');
 
+-- ==================================================================== the parent after its monolith is gone (W3)
+-- The ledger holds the oid baseline() was handed, which transmute makes the monolith of a NEW parent. Once a regrain
+-- swap drops the monolith, the name was all that was left: a parent moved to another schema, with a namesake made
+-- under its old name, had every row read as lost against the namesake (tests/349, 197, 204, 355). The triggers now
+-- note the parent each baselined table is a partition of (parent_seen).
+create schema mv3;
+create table mv3.t (id bigint primary key, payload text);
+insert into mv3.t select g, 'p' || g from generate_series(1, 25) g;
+select pgpm_formal.baseline('mv3.t') as mv3_n \gset
+select oid as mv3_orig from pg_class where oid = 'mv3.t'::regclass \gset
+call pgpm.transmute('mv3.t', 'id', 10, p_obtain => 2);
+insert into mv3.t values (35, 'frontier');
+select pgpm.regrain_history('mv3.t') as mv3_rg \gset
+alter schema mv3 rename to mv3_aside;
+create schema mv3;
+create table mv3.t (id bigint primary key, payload text);
+select is((select count(*)::int from pg_class where oid = :'mv3_orig'::oid) || ':' || pgpm_formal._current_parent(:'mv3_orig'::oid)::text,
+  '0:mv3_aside.t', 'LIVENESS: the monolith is gone, a namesake stands under the old name, and the ledger finds the moved parent');
+select is((select count(*)::int from mv3_aside.t where id <= 25), 25, 'LIVENESS: all 25 baselined rows are in the moved parent');
+select is((select count(*)::int from pgpm_formal.check() where parent_table::text in ('mv3.t', 'mv3_aside.t')), 0,
+  'no row of the moved parent reads as lost, and none is judged against the namesake');
+
+-- ==================================================================== a column named like the row alias (W3)
+-- baseline() read each row as to_jsonb(t) over `from <parent> t`, and a column named t won that name: the ledger kept
+-- the column, not the row, so no control value could be decoded and every aged row read as lost (tests/archive/db/33
+-- and 48). A text column t here; the regrain ages the rows below the horizon out.
+create table st.sh (id bigint primary key, t text);
+insert into st.sh select g, 'p' || g from generate_series(1, 50) g;
+select pgpm_formal.baseline('st.sh') as sh_n \gset
+call pgpm.transmute('st.sh', 'id', 10, p_retain => 20);
+insert into st.sh values (65, 'frontier');
+select pgpm.regrain_history('st.sh') as sh_rg \gset
+select is((select bool_and(row_data ? 'id' and row_data ? 't') from pgpm_formal.ledger
+            where parent_oid = (select parent_oid from pgpm_formal.ledger_parent where parent_name = 'st.sh')),
+  true, 'the ledger holds each row of a table with a column named t, not the column');
+select ok((select count(*) from st.sh where id <= 50) between 1 and 49,
+  'LIVENESS: the regrain aged some baselined rows out and kept others');
+select is((select count(*)::int from pgpm_formal.check() where parent_table = 'st.sh'::regclass), 0,
+  'no aged row of it reads as lost');
+
+-- ==================================================================== a hypertable pgpm converts (W3)
+-- pgpm_hypertable's cutover drops the hypertable it was handed, which pgpm neither created nor lists in pgpm.part or
+-- pgpm.config: pgpm.scratch keys the copy's working relations by the hypertable's oid (parent_oid), and that is its
+-- record. No TimescaleDB here, so the cutover's drop is stood in for by a function in schema pgpm (a pgpm frame).
+create table st.ht_src (id int);
+create table st.ht_dest (id int);
+create table st.ht_none (id int);
+create function pgpm.st_drop_w3(p_rel regclass) returns void language plpgsql as $$
+begin execute format('drop table %s', p_rel); end $$;
+insert into pgpm.scratch (parent_oid, kind, obj) values ('st.ht_src'::regclass, 'hypertable_dest', 'st.ht_dest'::regclass);
+select pgpm.st_drop_w3('st.ht_src');
+select pgpm.st_drop_w3('st.ht_none');
+delete from pgpm.scratch where kind = 'hypertable_dest' and obj = 'st.ht_dest'::regclass;
+drop function pgpm.st_drop_w3(regclass);
+select is((select array_agg(object_name || ':' || by_pgpm || ':' || coalesce(recorded_as, '-') order by object_name)
+             from pgpm_formal.drop_history where object_name in ('ht_src', 'ht_none')),
+  array['ht_none:true:-', 'ht_src:true:pgpm.scratch parent_oid'],
+  'LIVENESS: both drops ran under a pgpm frame, and pgpm.scratch named the one as the relation its work is keyed by');
+select is(st.found_like('ResolveByRecord', 'st.ht_src'), '{}'::text[],
+  'ResolveByRecord accepts the drop of a relation pgpm.scratch keys a conversion by');
+select is(st.found_like('ResolveByRecord', 'st.ht_none'), array['st.ht_none'],
+  'ResolveByRecord names the drop of a relation nothing of pgpm''s named');
+
+-- ==================================================================== no new locks for temporary tables (W3)
+-- pgpm_archive's archive._refuse_foreign_read fails a read whose transaction newly holds a lock on any relation that is
+-- not the read's own, and archive._pq_snapshot drops and creates its temporary snapshot table inside that window. The
+-- triggers once read pgpm's catalog and wrote the history there, so tests/archive/db/08 failed with the oracle
+-- installed and only then. The relations a DDL statement newly locks (oids from 16384 up, as that check reads them):
+create function st.new_locks(p_sql text) returns int language plpgsql as $$
+declare v_before oid[]; v_n int;
+begin
+  select coalesce(array_agg(relation), '{}') into v_before from pg_locks
+   where locktype = 'relation' and pid = pg_backend_pid() and relation >= 16384;
+  execute p_sql;
+  select count(distinct relation) into v_n from pg_locks
+   where locktype = 'relation' and pid = pg_backend_pid() and relation >= 16384 and relation <> all (v_before)
+     -- the statement's own table: temporary, or gone (the dropped one)
+     and relation in (select oid from pg_class where relpersistence <> 't');
+  return v_n;
+end $$;
+select cmp_ok(st.new_locks('create table st.lk_plain as select 1 as x'), '>', 0,
+  'LIVENESS: a CREATE TABLE AS of an ordinary table newly locks relations outside the catalog (the oracle''s history)');
+select is(st.new_locks('create temp table lk_temp as select 1 as x'), 0,
+  'a CREATE TEMP TABLE AS newly locks no relation outside the catalog');
+select is(st.new_locks('drop table pg_temp.lk_temp'), 0, 'a DROP of a temporary table newly locks no relation outside the catalog');
+select is((select count(*)::int from pgpm_formal.drop_history where object_name = 'lk_temp'), 0,
+  'the temporary table''s drop is not in the history (check() never reads one)');
+
+-- ==================================================================== no wait on another session's anchor (W3)
+-- Both triggers note pgpm's anchors at every DDL statement. With a unique key on anchor_seen, a session noting an oid
+-- another transaction had just noted waited for that transaction to end; tests/345 part C's swap (pgpm's, holding the
+-- copy's oid noted) and the test's own ALTER TABLE in a second session deadlocked, with the oracle installed and only
+-- then. Here a second session notes an oid and stays open while this one notes the same oid under a statement timeout
+-- (a timeout is not swallowed by _note_anchors' handler, so a wait fails the call).
+create extension if not exists dblink;
+create table st.an_rel (id int);
+insert into pgpm.scratch (parent_oid, kind, obj) values ('st.an_rel'::regclass, 'hypertable_delta', 'st.an_rel'::regclass);
+select dblink_connect('an', format('dbname=%s user=postgres', current_database())) as an_c \gset
+select dblink_exec('an', 'begin') as an_b \gset
+select dblink_exec('an', 'do $n$ begin perform pgpm_formal._note_anchors(); end $n$') as an_n \gset
+set statement_timeout = '3s';
+select lives_ok('select pgpm_formal._note_anchors()', 'noting an anchor another open transaction just noted does not wait for it');
+reset statement_timeout;
+select dblink_exec('an', 'commit') as an_e \gset
+select dblink_disconnect('an') as an_d \gset
+select is((select count(*)::int from pgpm_formal.anchor_seen where objid = 'st.an_rel'::regclass),
+  2, 'LIVENESS: both sessions noted the oid, the other one''s uncommitted when this one did');
+delete from pgpm.scratch where kind = 'hypertable_delta' and obj = 'st.an_rel'::regclass;
+
 -- ==================================================================== expectations
 select throws_like($$ select pgpm_formal.expect('NoLostRows', '[1]', 'typo') $$,
   '%NoLostRows is not an invariant the oracle judges%', 'expect() refuses a name that is not an invariant');
@@ -292,6 +454,7 @@ select pgpm_formal.expect('NoWedge', 'copy rg_p0000000000000000000', 'planted: t
 select pgpm_formal.expect('ResolveByRecord', 'st.rb_p0000000000000000010', 'planted: the operator''s partition aged out');
 select pgpm_formal.expect('ResolveByRecord', 'st.rb_p0000000000000000020', 'planted: an unanchored row');
 select pgpm_formal.expect('ResolveByRecord', 'st.ut', 'planted: untransmute of an operator''s monolith');
+select pgpm_formal.expect('ResolveByRecord', 'st.ht_none', 'planted: a pgpm-framed drop of a relation nothing named');
 select pgpm_formal.expect('NoLostRow', '[424242]', 'a declaration nothing matches');
 select pgpm_formal.expect('NoLostRow', '[19]', 'a right identity on the wrong parent', 'st.nl');
 select is(
@@ -300,7 +463,7 @@ select is(
   'with every planted violation declared, check() reports only the two declarations that matched nothing');
 select is(
   (select array_agg(invariant || '=' || expected order by invariant) from pgpm_formal.judged()),
-  array['ArchiveNoClobber=1', 'DropOnlyCovered=1', 'NoDuplicateRow=2', 'NoLostRow=5', 'NoWedge=3', 'ResolveByRecord=3'],
+  array['ArchiveNoClobber=1', 'DropOnlyCovered=1', 'NoDuplicateRow=2', 'NoLostRow=5', 'NoWedge=3', 'ResolveByRecord=4'],
   'judged() counts the declarations per invariant');
 select is(
   (select array_agg(invariant order by invariant) from pgpm_formal.judged() where judged and identities > 0),

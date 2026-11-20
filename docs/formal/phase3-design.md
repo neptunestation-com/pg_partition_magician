@@ -61,9 +61,12 @@ The ledger keeps the parent's oid and its name. `transmute` makes the original t
 parent of the same name, so the parent a check reads is resolved then: the root of the original oid while that
 is a partition, else the name.
 
-The custody files are the ones that set a retention horizon or an archive strategy: about 120 core files and
-the 53 archive files. Adding `baseline` to them is mechanical and is scripted, then read file by file. A file
-that never calls it reports `NoLostRow` and `NoDuplicateRow` as `not judged`, never as a pass.
+The custody files are the ones that set a retention horizon or an archive strategy, or call a retire, recall or
+forget path: 131 files in `tests/formal/custody_files.txt` (105 core, 22 archive, 4 timescale), chosen by grep and
+then read. `tests/formal/migrate_baseline.py` proposes each placement and checks the result; every placement was
+read and made by hand. 121 are baselined. The other ten say why on their line: seven drop every parent they build
+before `check()` can run, two uninstall pgpm, and one manages its only table in another database. A file that never
+calls it reports `NoLostRow` and `NoDuplicateRow` as `not judged`, never as a pass.
 
 ### Drop history
 
@@ -105,7 +108,7 @@ reports a declaration that matched nothing as `UnusedExpectation`, identity `<in
 
 | Invariant | SQL form | Reads | Not judged |
 |---|---|---|---|
-| `NoLostRow` | every baseline row not deleted by the test and not aged out (control value at or past the horizon, or no `retain_drop` or `regrain_aged` logged over a range holding it) is visible through its parent, in a relation `operator_owns` names for that parent, in a partition pgpm holds in custody (a `retiring_at` mark with `detach_dispatched_oid` naming it, out of the parent), or in one pgpm's recall released (`retain_disown` logged over its range) | ledger, catalog, `pgpm.part`, `pgpm.config`, `pgpm.log` | files without a baseline; rows written by sessions the test did not record; a parent that is gone (the promise lasts while the parent does) |
+| `NoLostRow` | every baseline row not deleted by the test and not aged out (control value at or past the horizon, or no `retain_drop`, `regrain_aged` or `retain_crossing` logged over a range holding it) is visible through its parent, in a relation `operator_owns` names for that parent, in a partition pgpm holds in custody (a `retiring_at` mark with `detach_dispatched_oid` naming it, out of the parent), or in one pgpm's recall released (`retain_disown` logged over its range) | ledger, catalog, `pgpm.part`, `pgpm.config`, `pgpm.log` | files without a baseline; rows written by sessions the test did not record; a parent that is gone (the promise lasts while the parent does) |
 | `NoDuplicateRow` | no baseline identity is visible twice through the parent or across parent and custody | ledger, catalog | files without a baseline; keyless tables whose duplicate rows are equal (counted by multiplicity there) |
 | `DropOnlyCovered` | with an archive strategy set, every baseline row that is gone and was below the horizon is named by a retired ledger chunk whose range holds it and whose `child_oid` is a relation the drop history shows pgpm dropped | ledger, `pgpm.archive_ledger`, drop history | object contents (that is `ArchiveNoClobber`'s); files without an archive strategy |
 | `ArchiveNoClobber` | every retired chunk's object still holds every row the chunk recorded | the store listing below | every track but the archive track |
@@ -230,7 +233,7 @@ held a few thousand rows, and compiling it cost about 400 ms against 33 ms to ru
 `jit = off`, and the run above is with it.
 
 The same run is the first time the oracle judged files it was not written against, and it found the oracle wrong
-four times before it found pgpm wrong once (each oracle defect is fixed and covered, see "What W2 changed"):
+four times before it found pgpm wrong once (each oracle defect is fixed and covered, see "What W2 and W3 changed"):
 tests/239 failed only with the oracle installed (a dependency onto pgpm), and tests/204, 309 and 361 reported
 states pgpm reaches by design. What it reports now is one violation in one file: tests/309 part J drops a pgpm
 partition, re-creates it under the same name and nulls its `child_oid` to stand in for an older install, and
@@ -260,7 +263,7 @@ clock, so the file moves pgpm's unqualified `now()` two months ahead with a `clk
 `pg_catalog` on the `search_path` (the pattern tests/311 uses), rather than writing rows into the future. The
 text kinds' and `uuid`'s frontier is data, and the shim does not disturb them.
 
-### What W2 changed in this note
+### What W2 and W3 changed in this note
 
 Each of these is folded into the sections above; the list is here so a reader of the earlier draft can find them.
 
@@ -284,6 +287,27 @@ Each of these is folded into the sections above; the list is here so a reader of
   declares them.
 - **The control value is decoded by pgpm's own `_col_to_native`.** That is pgpm's code grading pgpm, in one narrow
   place; measurement 3 checks it against values the test wrote, for every kind, which is what keeps it honest.
+- **W3: event triggers ignore temporary tables.** Creating or dropping a temporary table no longer reads pgpm's
+  catalog or writes a history row. Before, the triggers took locks inside `archive._pq_snapshot`'s audit window, and
+  tests/archive/db/08 failed with the oracle installed and only then.
+- **W3: a drop of a hypertable pgpm converts is recorded** through `pgpm.scratch.parent_oid`, so `from_hypertable`'s
+  cutover is not reported as an unrecorded drop (every timescale custody file did).
+- **W3: `anchor_seen` has no unique key.** Two sessions noting the same oid waited on each other's insert and
+  deadlocked (regrain_step against a test's own `ALTER TABLE` in another session, tests/345).
+- **W3: the ledger follows its parent past the monolith.** `parent_seen` records the parent each baselined table
+  is a partition of, whenever the triggers run. Once transmute's monolith is dropped or released, the name was all
+  that was left, and a schema move or a namesake turned every row into a lost one (tests/197, 204, 349, 355).
+- **W3: rows are read as `to_jsonb(t.*)`.** `to_jsonb(t)` over `from <parent> t` resolves to a column named `t`, so
+  the ledger recorded that column and no control value (tests/archive/db/33 and 48).
+- **W3: `retain_crossing` is retention.** `retire()` deletes a retiring partition's referenced rows so the declared
+  `ON DELETE` runs, before its dispatched detach lands. `NoLostRow` excused only `retain_drop` and
+  `regrain_aged` (tests/231, 253, 266).
+- **W3: a retired chunk's bound that does not parse is read at its widest**, as pgpm reads it, instead of raising out
+  of `check()` (tests/347 G writes two such bounds on purpose).
+- **W3: wiring.** Every runner of a custody file installs the oracle: `test.sh`'s core, cron, archive and
+  timescale databases, each `bench/` script that runs one, and `scripts/review/plant_seeds.py`. `check()` is not
+  called yet (W4). `.github/workflows/archive.yml`'s path filter does not yet name `tests/formal/oracle.sql`,
+  which `run_archive` now reads, so `scripts/check_track_filters.py` fails until W4 adds it.
 - **Not measured: a `DETACH CONCURRENTLY` that pg_cron runs** in its own session. Only files 31 and 78 reach it,
   on `postgres`, where W4 must install the oracle; whether the `ddl_command_end` trigger records it there is W4's
   to check before `ResolveByRecord` judges those files.
