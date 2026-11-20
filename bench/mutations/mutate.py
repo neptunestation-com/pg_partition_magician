@@ -18464,6 +18464,96 @@ MUTATIONS["autoregrain_picks_dropped"] = (
       "        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705\n", 1)],
 )
 
+# ---------------------------------------------------------------------------------------- the invariant oracle (W5)
+# Formal methods Phase 3 W5 (docs/formal/phase3-design.md, "Guards on the oracle"). The oracle is a guard, so each of its
+# checks gets a mutation of pgpm that puts back a custody defect it exists to catch, judged by bench/formal_discriminate.sh
+# through a per-invariant wrapper: the verdict is what pgpm_formal.check() reports over the named custody files, never
+# the files' own assertions (several fail under these mutants too; the formal guard must fail through the oracle). The
+# catalogue's own mutations are reused by their edits, so a pattern that drifts is refused once, for both guards.
+def _formal(name, guard, why, edits, src=None):
+    MUTATIONS[name] = (guard, why, edits)
+    if src:
+        MUTATION_SRC[name] = src
+
+
+_formal("formal_regrain_reconcile_discards_delta", "bench/formal_no_lost_row.sh",
+        "The oracle's NoLostRow over regrain_reconcile_discards_delta (#916): the reconcile resolves each fine child and "
+        "skips the delete+reinsert that applies the captured change, so a row written during the copy is never in the "
+        "swapped-in copies. tests/110, 120 and 136 report it through check() (rc110 [25], rfa [20050], ev and evn's "
+        "row 5).", MUTATIONS["regrain_reconcile_discards_delta"][2])
+_formal("formal_retire_drops_uncovered", "bench/formal_drop_only_covered.sh",
+        "A drop before coverage, novel in this catalogue (W5): retire() with an archive strategy no longer asks "
+        "_archive_fully_covered before it drops, the shape before #238 made archiving retire()'s drop precondition, so "
+        "an aged partition nothing archived is dropped. One site. tests/64 and 130 report every row it took through "
+        "check()'s DropOnlyCovered (rg64a, rs130a: no retired chunk holds it).",
+        [("  perform pgpm._install_write_block(p_parent, p_child);\n\n"
+          "  if not pgpm._archive_fully_covered(p_parent, p_child) then\n    return false;\n  end if;\n",
+          "  perform pgpm._install_write_block(p_parent, p_child);\n\n", 1)])
+_formal("formal_archive_retired_unmarked", "bench/formal_drop_only_covered.sh",
+        "The oracle's DropOnlyCovered over archive_retired_unmarked (#1141): retire() drops a partition without marking "
+        "its chunks retired, so no retired chunk records the rows the drop took. tests/64 and 130 report them through "
+        "check() (rg64a [1], rs130a [1]: no retired chunk holds it).", MUTATIONS["archive_retired_unmarked"][2])
+_formal("formal_retire_drop_child_oid_ignored", "bench/formal_resolve_by_record.sh",
+        "The oracle's ResolveByRecord over retire_drop_child_oid_ignored (#428, of #407 and #421): retire() consults "
+        "retiring_oid only, so on the one-step path it drops whatever answers to the partition's name. tests/103 "
+        "reports the operator's table it drops through check() (public.rb103_p0000000000000000000).",
+        MUTATIONS["retire_drop_child_oid_ignored"][2])
+_formal("formal_mark_retired_chunks_unplaced_live_marked", "bench/formal_no_wedge.sh",
+        "The oracle's NoWedge over mark_retired_chunks_unplaced_live_marked (PR #1351 P1-01): _mark_retired_chunks marks "
+        "a live, attached partition's chunk retired on a drop over a disjoint range, so a retired chunk's relation "
+        "survives. tests/346 reports it through check() (t346.e, 'chunk <lo>' of the live partition).",
+        MUTATIONS["mark_retired_chunks_unplaced_live_marked"][2])
+
+# The oracle's own mutations: tests/formal/oracle.sql with the one clause that makes an invariant judge taken out (or
+# what judged() reports zeroed), each required to fail the oracle's self-test (bench/formal_oracle_selftest.sh), whose
+# planted violations are the identities each check must report.
+_OR = "tests/formal/oracle.sql"
+_formal("oracle_nolostrow_ignores_custody", "bench/formal_oracle_selftest.sh",
+        "NoLostRow ignores custody: _side_rels no longer counts a partition pgpm's own dispatched retirement holds, so a "
+        "row in custody reads as lost (a false loss). One clause. The self-test's custody case (st.cu) catches it.",
+        [("   where p.parent_table = p_cur and p.retiring_at is not null\n"
+          "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_cur and not i.inhdetachpending)\n",
+          "   where p.parent_table = p_cur and p.retiring_at is not null and false\n"
+          "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_cur and not i.inhdetachpending)\n", 1)], _OR)
+_formal("oracle_noduplicaterow_unjudged", "bench/formal_oracle_selftest.sh",
+        "NoDuplicateRow never reports: its comparison of what is visible against what was written is switched off. One "
+        "clause. The self-test's keyless third copy (st.kl) and copy in custody (st.cu [54]) catch it.",
+        [("      if r.np + r.nc > r.mult then\n", "      if false then\n", 1)], _OR)
+_formal("oracle_droponlycovered_unjudged", "bench/formal_oracle_selftest.sh",
+        "DropOnlyCovered never judges: the archive-strategy branch every aged row goes through is switched off, so a "
+        "drop no retired chunk covers is never reported and judged() counts nothing. One clause. The self-test's shrunk "
+        "chunk (st.dc [19]) catches it.",
+        [("      if cfg ->> 'archive_fn' is not null then\n        n_doc_id := n_doc_id + 1;\n",
+          "      if false then\n        n_doc_id := n_doc_id + 1;\n", 1)], _OR)
+_formal("oracle_archivenoclobber_unjudged", "bench/formal_oracle_selftest.sh",
+        "ArchiveNoClobber never judges: a retired chunk's row is never looked for in the loaded store. One clause. The "
+        "self-test's object that lost a row (st.dc [40]) and its identity count catch it.",
+        [("      if v_listed and r.c_lo is not null then\n", "      if false then\n", 1)], _OR)
+_formal("oracle_resolvebyrecord_drops_unjudged", "bench/formal_oracle_selftest.sh",
+        "ResolveByRecord's second half never reports: a drop pgpm made of a relation it never recorded passes. One "
+        "clause. The self-test's unanchored row (st.rb_p0000000000000000020) and pgpm-framed drop (st.ht_none) catch it.",
+        [("    if r.recorded is false then\n", "    if false then\n", 1)], _OR)
+_formal("oracle_nowedge_chunks_unjudged", "bench/formal_oracle_selftest.sh",
+        "NoWedge's first conjunct never reports: a retired chunk whose relation still exists passes (#1160). One clause. "
+        "The self-test's retired chunk over a live partition ('chunk 70') catches it.",
+        [("    if r.child_oid is not null and r.present then\n", "    if false then\n", 1)], _OR)
+_formal("oracle_nowedge_judged_zero", "bench/formal_oracle_selftest.sh",
+        "judged() reports NoWedge as judging zero identities whatever check() looked at, the reading the tracks' "
+        "witness (tests/formal/summarize.py) fails on. One value. The self-test's judged() count against the "
+        "violations check() reported catches it.",
+        [("    ('NoWedge', true, 0, n_wedge_id, 0,\n", "    ('NoWedge', true, 0, 0, 0,\n", 1)], _OR)
+_formal("summarize_zero_judged_passes", "bench/formal_summarize_selftest.sh",
+        "tests/formal/summarize.py without its zero-judged rule: a track on which a required invariant judged no "
+        "identity passes its liveness witness, so an oracle that looked at nothing reads as an oracle that found "
+        "nothing. One block. summarize.py --selftest catches it.",
+        [("    for inv in REQUIRED[track]:\n        if stats[inv][\"ids\"] == 0:\n"
+          "            fail.append(\"%s judged zero identities on the %s track, which should reach it\" % (inv, track))\n",
+          "", 1)], "tests/formal/summarize.py")
+MUTATION_COST.update({"formal_regrain_reconcile_discards_delta": 10, "formal_retire_drops_uncovered": 8,
+                      "formal_archive_retired_unmarked": 8, "formal_retire_drop_child_oid_ignored": 5,
+                      "formal_mark_retired_chunks_unplaced_live_marked": 5})
+
+
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two
 # lines of an anchor. See main().
 _BY_NAME_MARKS = r"(?:[ \t]*-- by-name-ok:[^\n]*\n(?:[ \t]*--   [^\n]*\n)*)*"

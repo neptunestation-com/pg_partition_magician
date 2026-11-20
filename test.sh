@@ -1507,6 +1507,14 @@ run_perf() {
     "bench/regrain_history_coarse_child.sh pgpm_perf465"
     "bench/obtain_backoff_headroom_logs.sh pgpm_perf451"
     "bench/autoregrain_skips_dropped.sh pgpm_perf471"
+    # The invariant oracle as a guard (formal Phase 3 W5): the clean-code halves of the pairs discriminate.sh completes
+    # with the formal_* mutations of pgpm and the oracle_* and summarize_* mutations of the oracle itself.
+    "bench/formal_no_lost_row.sh pgpm_perf472"
+    "bench/formal_drop_only_covered.sh pgpm_perf473"
+    "bench/formal_resolve_by_record.sh pgpm_perf474"
+    "bench/formal_no_wedge.sh pgpm_perf475"
+    "bench/formal_oracle_selftest.sh pgpm_perf476"
+    "bench/formal_summarize_selftest.sh pgpm_perf477"
   )
   local selected=()
   local n=${#guards[@]} idx
