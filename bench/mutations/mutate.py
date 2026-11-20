@@ -8504,8 +8504,8 @@ select ok(
         "tests/264 parts A and B catch it.",
         [("          and not pgpm._part_built(p_parent, p.child_oid, p.retiring_at)) then\n",
           "          and false) then   -- MUTANT: the dead row is kept\n", 1),
-         ("       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo));\nend;\n",
-          "       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo) and pgpm._part_built(p_parent, p.child_oid, p.retiring_at));\nend;\n",
+         ("       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)) then\n    return true;\n",
+          "       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo) and pgpm._part_built(p_parent, p.child_oid, p.retiring_at)) then\n    return true;\n",
           1)],
     ),
     "status_counts_dropped_cell": (
@@ -17988,6 +17988,31 @@ MUTATIONS["skip_archive_method_truncated"] = (
     "tests/367 part C catches it.",
     [("        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 1000));",
       "        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));", 1)],
+)
+
+
+# Issue #1119: obtain, extend_to and maintain_obtain's back-off walk count a partition no pgpm.part row records
+# (attached by hand) as covering the cells it overlaps, and build the cells around it.
+# bench/obtain_builds_around_hand_attached.sh runs tests/368 against the mutant.
+MUTATIONS["obtain_hand_attached_unseen"] = (
+    "bench/obtain_builds_around_hand_attached.sh",
+    "Issue #1119's defect: _cell_attached judges a cell from pgpm.part alone, so obtain's CREATE over a partition "
+    "attached by hand raises 'would overlap' and unwinds the whole call, extend_to is refused the same way, and "
+    "maintain_obtain's back-off walk reads the cell as a hole. One line. tests/368 parts A to E catch it.",
+    [("  return pgpm._foreign_overlaps(p_parent, cfg, p_lo, p_hi);\n", "  return false;\n", 1)],
+)
+MUTATIONS["obtain_hand_attached_maxvalue_unseen"] = (
+    "bench/obtain_builds_around_hand_attached.sh",
+    "A partition attached by hand up to MAXVALUE reads as reaching no cell, so obtain builds over it and fails "
+    "'would overlap' on every tick. One clause, the unbounded upper end. tests/368 part C catches it.",
+    [("(s.hi is null or s.hi::%1$s %2$s > $3::%1$s %2$s)", "(s.hi::%1$s %2$s > $3::%1$s %2$s)", 1)],
+)
+MUTATIONS["obtain_hand_attached_closed_bound"] = (
+    "bench/obtain_builds_around_hand_attached.sh",
+    "A partition attached by hand is read as closed at its upper bound, so the cell that starts where it ends is "
+    "taken for covered and left a hole, and every write into it is refused. One operator. tests/368 part A catches "
+    "it.",
+    [("(s.hi is null or s.hi::%1$s %2$s > $3::%1$s %2$s)", "(s.hi is null or s.hi::%1$s %2$s >= $3::%1$s %2$s)", 1)],
 )
 
 # One or more `-- by-name-ok:` mark blocks (the mark line and its `--   ` continuations), as they may stand between two

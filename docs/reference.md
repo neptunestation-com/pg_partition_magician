@@ -1386,7 +1386,11 @@ Creates empty partitions ahead of the frontier so live writes always land in a r
 created empty, so nothing is scanned and nothing is moved. It skips any candidate range that overlaps an
 existing attached partition, for example the monolith, which covers the current interval, and leaves
 unbuilt a cell whose name something it does not own already holds, a relation or a type, or whose own
-label makes its name over 63 bytes (see [Partition naming](#partition-naming)), building the cells around it. An attached `pgpm.part` row counts
+label makes its name over 63 bytes (see [Partition naming](#partition-naming)), building the cells around it.
+A table you attached yourself with `ALTER TABLE ... ATTACH PARTITION`, which pgpm does not record, counts
+as such a partition, up to `MAXVALUE` when that is its bound: every cell it overlaps, even in part, is left
+to it and the cells around it are built, so the rest of a cell it covers only in part stays a hole until
+you cover it. An attached `pgpm.part` row counts
 as built only while its partition is a partition of the table. A forward cell dropped by hand with
 `DROP TABLE` does not count: the row is forgotten, logged `forget_dropped_partition`, and the cell is built
 again, empty. Nor does one detached by hand with `ALTER TABLE ... DETACH PARTITION`: the row is forgotten,
@@ -2687,7 +2691,8 @@ turn a lost lock race into refused writes, so below that threshold obtain runs a
 notes `obtain_backoff_bypassed`. Coverage is judged cell by cell, the frontier's own cell included, by
 the question `obtain` itself asks: would it build that cell? A cell in that span whose partition was
 dropped or detached by hand is a hole `obtain` would build, so it bypasses the back-off too and `obtain`
-rebuilds it (logging `forget_dropped_partition` or `forget_detached_partition`). A hole whose name is
+rebuilds it (logging `forget_dropped_partition` or `forget_detached_partition`). A cell covered by a table
+attached by hand counts as coverage, as it does for `obtain`. A hole whose name is
 held by something pgpm does not own is one `obtain` cannot build (it only logs `fail_obtain_name`), so it
 does not bypass the back-off. A hole further out waits for the back-off to expire. The judgement writes
 nothing: a tick that bypasses the back-off and then loses the lock race again logs only `skip_obtain`, and
