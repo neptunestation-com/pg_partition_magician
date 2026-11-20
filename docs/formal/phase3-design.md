@@ -31,9 +31,19 @@ Phase 4). The second gets one piece of test-only history, below.
 ## The schema
 
 `tests/formal/oracle.sql` creates schema `pgpm_formal` in the test template only, never from `install.sql`.
-Every check reads the catalog, `pgpm.*` and the oracle's own tables, and returns one row per violation:
-`(invariant, parent_table, identity, detail)`. A run also returns one row per invariant with its judged count,
-which is the oracle's liveness witness (below).
+Every check reads the catalog, `pgpm.*` and the oracle's own tables. `pgpm_formal.check([scope])` returns one
+row per violation, `(invariant, parent_table, identity, detail)`, and `pgpm_formal.judged()` returns one row per
+invariant for the last `check()`: whether it was judged, over how many parents and identities, and how many
+violations of it the file declared. That is the oracle's liveness witness (below). (Built in W2 as a separate
+function rather than extra rows of `check()`, so a caller that asserts "`check()` is empty" cannot be satisfied
+by a summary row, and a summary cannot be mistaken for a violation.) `scope` limits the run to named parents,
+for the files that share `postgres`.
+
+Identities, as `check()` reports them and `expect()` matches them: a row is
+`jsonb_build_array(<primary key at baseline>)::text`, such as `[42]`, or `to_jsonb(row)::text` for a keyless
+table, rendered under pinned settings (UTC, ISO dates, `extra_float_digits = 1`) so a baseline taken in one
+session matches a check in another; a relation is `schema.name`; a `NoWedge` state is `chunk <lo>`,
+`copy <child_name>` or `mark <child_name>`.
 
 ### Row ledger (opt-in)
 
@@ -42,8 +52,14 @@ with one call after it loads its fixture:
 
 - `pgpm_formal.baseline(parent regclass)` records the identity of every row then visible through the parent:
   its primary key, or the full row's text where there is none, with its control value.
-- `pgpm_formal.wrote(parent, ...)` and `pgpm_formal.deleted(parent, ...)` record a row the test writes or
-  deletes AFTER the baseline, where the file does that on purpose.
+- `pgpm_formal.wrote(parent, where)` and `pgpm_formal.deleted(parent, where)` record the rows the test writes or
+  deletes AFTER the baseline, where the file does that on purpose. The predicate is over the parent's columns:
+  `wrote` re-reads the matching rows through the parent, `deleted` evaluates it over the ledger's copy of each
+  row, so it can be called before or after the DELETE.
+
+The ledger keeps the parent's oid and its name. `transmute` makes the original table the monolith under a new
+parent of the same name, so the parent a check reads is resolved then: the root of the original oid while that
+is a partition, else the name.
 
 The custody files are the ones that set a retention horizon or an archive strategy: about 120 core files and
 the 53 archive files. Adding `baseline` to them is mechanical and is scripted, then read file by file. A file
@@ -57,24 +73,44 @@ trigger takes `GET DIAGNOSTICS ... = PG_CONTEXT`, and a drop pgpm makes has a `f
 whatever called pgpm. The backend's top-level statement in `pg_stat_activity` would not do: custody tests reach
 pgpm through `DO` blocks and pgTAP wrappers (`lives_ok`, `throws_like`), whose top-level statement is the
 wrapper, so pgpm's own drops would read as the test's. That is enough to say, after the fact, that pgpm dropped
-relation X. It cannot see the rows X held. Whether the trigger fires before or after pgpm deletes its own record
-of X, in the same transaction, is measured in W2 before `ResolveByRecord` relies on it.
+relation X. It cannot see the rows X held. The trigger also records whether pgpm's catalog named X when it fired
+(`pgpm.part`, `pgpm.config`, `pgpm.scratch`), which `ResolveByRecord` reads.
+
+W2 measured that the catalog is not always enough (below): `retire()` drops before it deletes the `pgpm.part`
+row, but regrain's swap deletes the source's row first, so at the trigger nothing in pgpm's catalog names a
+coarse child that is not the monolith. So a second test-only trigger, on `ddl_command_end`, records every table
+created under a pgpm frame (`CREATE TABLE`, `CREATE TABLE AS`, `SELECT INTO`), and a drop of a relation pgpm
+created counts as recorded. Both triggers also note every oid pgpm's catalog anchors at each statement they fire on
+(`anchor_seen`), and a drop of one counts as recorded too: an operator's table adopted with `adopt_partition` and
+then regrained is neither created by pgpm nor named at its drop, because regrain renames it and deletes its row
+first (tests/309 part B). The same trigger records each `ALTER TABLE` with the table's partitions after it,
+which is what attributes a `DETACH`. Both triggers are `SECURITY DEFINER`, so a test's drop under `SET ROLE` is
+recorded too, and neither ever raises.
 
 ### Registered operator relations
 
-`pgpm_formal.operator_owns(regclass)` marks a relation the test created as the operator's, such as a namesake
-or a table attached by hand. `ResolveByRecord` reads it.
+`pgpm_formal.operator_owns(rel regclass, parent regclass default null)` marks a relation the test created as
+the operator's, such as a namesake or a table attached by hand. `ResolveByRecord` reads it. Its rows count as
+kept for `NoLostRow` only for one parent: the one it is a partition of when registered, or `parent` for a table
+that is no partition. W2 found the unscoped form wrong: an operator's table with an `id` column hid the lost rows
+of every other baselined parent with the same key values.
+
+### Declared violations
+
+`pgpm_formal.expect(invariant, identity, reason, parent default null)` declares one violation the file builds on
+purpose (see "Files that build a broken state on purpose"). `check()` leaves a declared violation out and
+reports a declaration that matched nothing as `UnusedExpectation`, identity `<invariant>:<identity>`.
 
 ## The checks
 
 | Invariant | SQL form | Reads | Not judged |
 |---|---|---|---|
-| `NoLostRow` | every baseline row not deleted by the test and not aged out (control value at or past the horizon, or retention never ran on its range) is visible through its parent, in a relation `operator_owns` names, or in a partition pgpm holds in custody (`pgpm.part` with a live retirement) | ledger, catalog, `pgpm.part`, `pgpm.config` | files without a baseline; rows written by sessions the test did not record |
+| `NoLostRow` | every baseline row not deleted by the test and not aged out (control value at or past the horizon, or no `retain_drop` or `regrain_aged` logged over a range holding it) is visible through its parent, in a relation `operator_owns` names for that parent, in a partition pgpm holds in custody (a `retiring_at` mark with `detach_dispatched_oid` naming it, out of the parent), or in one pgpm's recall released (`retain_disown` logged over its range) | ledger, catalog, `pgpm.part`, `pgpm.config`, `pgpm.log` | files without a baseline; rows written by sessions the test did not record; a parent that is gone (the promise lasts while the parent does) |
 | `NoDuplicateRow` | no baseline identity is visible twice through the parent or across parent and custody | ledger, catalog | files without a baseline; keyless tables whose duplicate rows are equal (counted by multiplicity there) |
 | `DropOnlyCovered` | with an archive strategy set, every baseline row that is gone and was below the horizon is named by a retired ledger chunk whose range holds it and whose `child_oid` is a relation the drop history shows pgpm dropped | ledger, `pgpm.archive_ledger`, drop history | object contents (that is `ArchiveNoClobber`'s); files without an archive strategy |
 | `ArchiveNoClobber` | every retired chunk's object still holds every row the chunk recorded | the store listing below | every track but the archive track |
-| `ResolveByRecord` | no relation `operator_owns` names is gone or detached, unless the test did it; every drop the history attributes to pgpm is of a relation pgpm recorded | drop history, `operator_owns`, catalog | a wrong DETACH that a later step undid |
-| `NoWedge`, state conjuncts | a retired chunk's relation is gone; no regrain copy outlives its source; no retirement mark stands with neither a pending detach nor a job holding its command | `pgpm.archive_ledger`, `pgpm.part`, catalog, `cron.job` where readable | the event conjuncts (a collision, a spurious refusal, a raised step, a silent candidate, a wasted turn, an upgrade holding its own chunk): layer C's |
+| `ResolveByRecord` | no relation `operator_owns` names is gone or detached, unless the test did it; every drop the history attributes to pgpm is of a relation pgpm's catalog named (when it dropped it, or at any earlier DDL statement or drop) or pgpm created | drop, `ALTER TABLE` and creation history, `operator_owns`, catalog | a wrong DETACH that a later step undid; a drop of one pgpm partition meant for another (both recorded) |
+| `NoWedge`, state conjuncts | a retired chunk's relation is gone; no regrain copy (a not-attached `pgpm.part` row) lies outside every attached partition pgpm records; no retirement mark whose dispatch pgpm recorded stands on a partition still attached and not pending, its anchors agreeing with it (name, `child_oid`, `retiring_oid`), with no recall under way and no `pgpm_detach` job holding its command | `pgpm.archive_ledger`, `pgpm.part`, catalog, `cron.job` where readable (absent: no job can hold it) | the event conjuncts (a collision, a spurious refusal, a raised step, a silent candidate, a wasted turn, an upgrade holding its own chunk): layer C's; a mark with no recorded dispatch, which the next tick re-dispatches or reports (`fail_retain_detach`); a mark whose anchors disagree with the relation, which pgpm refuses on identity every tick (`fail_retain_identity`, tests/204 C, tests/361 D and E); marks where `cron.job` exists but cannot be read |
 
 `ArchiveNoClobber` needs object contents, which SQL cannot read: `pgpm_archive` has no read path, and judging
 the archive with its own code would be the code under test grading itself. The archive track's harness lists
@@ -126,6 +162,131 @@ Three things this note assumes, each checked in W2 with a test of its own:
 2. the oracle's cost per file is small next to the file (measured on the core track; the budget is a few
    percent of the suite's time);
 3. the baseline reads the same rows the file wrote, through the parent, for every control kind.
+
+W2 measured all three on PostgreSQL 17 and ran the three files on 15 and 18 as well. All pass on the three.
+
+### 1. Attribution (`tests/formal/oracle_attribution_test.sql`, 26 assertions)
+
+Every drop is recorded twice over: `by_pgpm`, the call-stack attribution the oracle uses, and `by_query`, the
+top-level statement the note first proposed, kept only to measure it against. Each case's row is selected by the
+dropped table's name, so a case whose drop never happened fails on a null.
+
+| Case | `by_pgpm` | `by_query` | `pgpm.part` row at the trigger | after a COMMIT |
+|---|---|---|---|---|
+| `select pgpm.retain(...)` | t | t | t | f |
+| `call pgpm.maintain(...)` | t | t | t | t |
+| `retain()` inside `is()` | t | **f** | t | f |
+| `retain()` in a `DO` block | t | **f** | t | f |
+| `maintain()` called from a `DO` block | t | **f** | t | t |
+| `retain()` inside `lives_ok()` | t | **f** | t | f |
+| the test's own `DROP TABLE` | f | f | f | f |
+| the test's `DROP` in its own procedure, after a COMMIT | f | f | f | t |
+| the test's `DROP` in a `DO` block just after a pgpm call | f | f | f | f |
+| the test's `DROP` inside `lives_ok()` | f | f | f | f |
+| `BEGIN; select pgpm.retain(...); DROP TABLE x; COMMIT` | t, then f | t, then **t** | t, then f | f |
+| a `DROP` under `SET ROLE` to a role with no grant on the history | f | f | f | f |
+
+So the call stack is right in every case and the statement text is wrong in five: four of pgpm's drops through a
+wrapper, and a test's drop in the transaction after a pgpm call, where `pg_stat_activity`'s per-transaction
+snapshot still shows the earlier statement. The coordinator's change was needed. A drop in a procedure after its
+COMMIT still has the procedure's frame on its stack, and the trigger, being `SECURITY DEFINER`, records a drop the
+dropping role could not have written itself. Over the file, no table the test made is attributed to pgpm and every
+one of pgpm's drops (at least 20) is recorded.
+
+The second question, whether pgpm's record of X still exists when the trigger fires, has two answers:
+
+- `retire()` and `retain()` drop first and delete the `pgpm.part` row after: the row is there (every case above).
+- regrain's swap deletes its source's `pgpm.part` row BEFORE the DROP. At the trigger, `pgpm.config.monolith_oid`
+  still names a monolith source, but nothing in pgpm's catalog names a coarse child pgpm made itself, nor an
+  operator's table adopted into `pgpm.part` (which regrain renames to its `_to_` name first). Hence the creation
+  history and the anchor history above. Without them, every regrain of a non-monolith child read as an
+  unrecorded drop. Untransmute's drop of the parent is recorded through `pgpm.config`.
+
+### 2. Cost (`tests/formal/measure_cost.sh`)
+
+The 97 core files that set a retention horizon (`p_retain` or `set_retain`), less the two pg_cron files and the
+four `test.sh` runs alone, each in its own clone of the template, serially, on PostgreSQL 17 on the Linux box.
+After each file, `check()` is timed server side twice: as the files are today, with no baseline (the structural
+checks only), and after `baseline()` of every parent pgpm manages at the end, which is the most a migrated file's
+`check()` can read, since a file baselines only what it wrote. Every file also runs in a template without the
+oracle, which prices the event triggers.
+
+| | median | p90 | max | share of the 97 files' 231.8 s |
+|---|---|---|---|---|
+| `check()`, no baseline | 4.7 ms | | 21.4 ms | 0.21% |
+| `check()`, whole end state baselined | 39.7 ms | | 122.6 ms | 1.91% |
+| the same, per file, as a share of that file | 4.10% | 7.4% | 19.8% | |
+| the event triggers, per file ((with - without) / without) | 3.0% | 8.4% | 66.6% (noise, below) | 5.4% (3.1% without 253) |
+
+The baselined rows run to a median of 16,011 and a maximum of 66,253 (the demo fixture's managed tables are in
+every clone). The four files above 10% are the shortest ones over the largest end state: tests/94, 61, 98 and 110,
+about 66,000 rows each, read in about 120 ms against files of 0.6 to 1.1 s. The trigger column is noisy at the
+top: tests/253 ran in 13.3 s with the oracle and 8.0 s without it, but in 9.1 s and 7.0 s with it in two earlier
+runs, once faster than without; the per-file minimum is -4.7%.
+
+One finding changed the oracle: the first full run measured a maximum of 462 ms (tests/317, 39% of the file) and
+428 ms (tests/391, 42%). The per-parent statement's estimate crossed `jit_above_cost` once `pgpm.archive_ledger`
+held a few thousand rows, and compiling it cost about 400 ms against 33 ms to run it. `_violations` now sets
+`jit = off`, and the run above is with it.
+
+The same run is the first time the oracle judged files it was not written against, and it found the oracle wrong
+four times before it found pgpm wrong once (each oracle defect is fixed and covered, see "What W2 changed"):
+tests/239 failed only with the oracle installed (a dependency onto pgpm), and tests/204, 309 and 361 reported
+states pgpm reaches by design. What it reports now is one violation in one file: tests/309 part J drops a pgpm
+partition, re-creates it under the same name and nulls its `child_oid` to stand in for an older install, and
+regrain's swap then drops the test's table by name. That is `ResolveByRecord` exactly as defined, built on
+purpose, so the file declares it in W3. No file fails with the oracle installed.
+
+So: within the budget for `check()` (2% of the suite at its most), and the event triggers are the larger cost, at
+about 3% median per file.
+
+### 3. Baseline for every control kind (`tests/formal/oracle_baseline_kinds_test.sql`, 52 assertions)
+
+Ten tables, one per control column type: `int`, `bigint`, `timestamptz`, `timestamp`, `date`, `uuid` (v7), and
+`text` holding cuid v1, ULID, KSUID and ObjectId. Each holds seven rows labelled by age (13, 11 and 8 months
+back, below the 8-month horizon; 4, 2, 1 and 0 within it; the id kinds the same shape on an id grid), written in a
+session at `America/Los_Angeles` with `DateStyle = 'SQL, DMY'`, so a rendering that followed the session would
+show. For each kind:
+
+- `baseline()` over the plain table records exactly the seven payloads;
+- after `transmute` and the retention-aware `regrain_history()`, exactly the four kept rows and the one written
+  after (`wrote()`) are visible (LIVENESS), and `regrain_aged` was logged (all ten);
+- `check()` names nothing: every aged row decoded below the horizon inside a `regrain_aged` range;
+- the partition holding the 2-month row dropped by hand: `check()` names exactly that row's identity, which it
+  can only do if the row's control value decoded at or past the horizon.
+
+All ten pass on 15, 17 and 18. One thing the note did not anticipate: for the time kinds pgpm's frontier is the
+clock, so the file moves pgpm's unqualified `now()` two months ahead with a `clk.now()` shim ahead of
+`pg_catalog` on the `search_path` (the pattern tests/311 uses), rather than writing rows into the future. The
+text kinds' and `uuid`'s frontier is data, and the shim does not disturb them.
+
+### What W2 changed in this note
+
+Each of these is folded into the sections above; the list is here so a reader of the earlier draft can find them.
+
+- **Attribution by the call stack** (Codex on #1485, before W2 began), confirmed by measurement 1.
+- **Recorded means named at the drop, named earlier, or created by pgpm.** The catalog at the trigger is not
+  enough for regrain's swap (measurement 1), so W2 added the creation and anchor histories.
+- **`ALTER TABLE` history.** `ResolveByRecord`'s "detached, unless the test did it" is attributed from a
+  `ddl_command_end` record of each `ALTER TABLE` with the table's partitions after it.
+- **The oracle must not depend on pgpm.** Its first form took a `pgpm.config` parameter, a `pg_depend` edge onto
+  pgpm, and pgpm's uninstall refused; tests/239 failed with the oracle installed and only then. The selftest now
+  asserts no such edge, and `check()` judges the drop history alone once pgpm is gone.
+- **`operator_owns` is scoped to one parent**, and **a released relation** (`retain_disown`) counts as the
+  operator's. Custody needs `detach_dispatched_oid` naming the relation, not only a `retiring_at` mark.
+- **`NoWedge`'s mark conjunct is narrower than drafted**: marks with a recorded dispatch, still attached and not
+  pending, no recall under way, anchors agreeing. Running the oracle over the retention files found three
+  documented refusals it would otherwise report as wedges (tests/204 C, tests/361 D and E).
+- **The judged summary is `judged()`**, not extra rows of `check()`, and its `expected` column counts the file's
+  declarations per invariant; `check([scope])` takes the parents to judge.
+- **A gone parent is not judged** for `NoLostRow`, and a file that loosens its horizon after a drop sees the rows
+  that drop took reported as lost: the oracle reads today's horizon, not the one the drop ran under. Such a file
+  declares them.
+- **The control value is decoded by pgpm's own `_col_to_native`.** That is pgpm's code grading pgpm, in one narrow
+  place; measurement 3 checks it against values the test wrote, for every kind, which is what keeps it honest.
+- **Not measured: a `DETACH CONCURRENTLY` that pg_cron runs** in its own session. Only files 31 and 78 reach it,
+  on `postgres`, where W4 must install the oracle; whether the `ddl_command_end` trigger records it there is W4's
+  to check before `ResolveByRecord` judges those files.
 
 ## Out of scope
 

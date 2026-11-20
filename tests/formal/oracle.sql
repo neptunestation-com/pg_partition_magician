@@ -556,11 +556,13 @@ end;
 $$;
 
 -- All violations, expected ones included, and the judged counts (into judged_last). check() filters.
+-- jit is off: the per-parent statement's estimate crosses jit_above_cost once pgpm.archive_ledger holds a few
+-- thousand rows, and compiling it cost ~400 ms against ~30 ms to run it (measured in W2 on 17, tests/317 and 391).
 create or replace function pgpm_formal._violations(p_scope regclass[] default null)
 returns table (invariant text, parent_table regclass, identity text, detail text)
 language plpgsql
 set timezone = 'UTC' set datestyle = 'ISO, MDY' set intervalstyle = 'postgres' set extra_float_digits = 1
-set bytea_output = 'hex' as $$
+set bytea_output = 'hex' set jit = off as $$
 declare
   lp record; r record; v_cur regclass; cfg jsonb; v_have_cfg boolean; v_t text; v_bound text;
   v_sql text; v_skipped text[]; v_listed boolean; v_nrows bigint;
