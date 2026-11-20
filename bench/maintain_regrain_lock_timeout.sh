@@ -36,6 +36,9 @@
 # prove this guard actually fails when the defect is present.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
+# the invariant oracle at this guard's observation point (formal methods Phase 3 W4, bench/formal_check.sh)
+# shellcheck source=bench/formal_check.sh
+source "$(dirname "$0")/formal_check.sh"
 HOLD=${HOLD:-5}     # seconds the writer keeps its row open; the tick has to come back well inside it
 fail=0
 
@@ -55,6 +58,7 @@ docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
 if ! docker exec "$C" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 -q -f "$INSTALL" >/dev/null 2>&1; then
   printf 'FAIL  %-64s %s\n' "the module under test installed" "$INSTALL"; exit 1
 fi
+formal_install "$C" "$DB"
 
 # --- fixture: 299 rows on ids 10..2990, so at step 1000 the monolith is [0, 3000); then one row at 20000
 # to put the frontier far past it, which freezes the monolith and gives auto-regrain a target. The target
@@ -157,5 +161,6 @@ check "the held row and a settled row each live in their own fine child" \
       "55->$FINE_LO 2990->$FINE_HI"
 check "the monolith is gone" "$(q "select (to_regclass('public.$MONO') is null)::text")" "true"
 
+formal_check "$C" "$DB" end   # after every observation, in its own session (report mode: prints ORACLE, never FAIL)
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 exit "$fail"
