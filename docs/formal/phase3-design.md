@@ -52,11 +52,13 @@ that never calls it reports `NoLostRow` and `NoDuplicateRow` as `not judged`, ne
 ### Drop history
 
 A test-only `sql_drop` event trigger in the template records every dropped table's oid, schema and name, the
-transaction id, and whether the top-level statement running it was a pgpm entry point (a `call pgpm.` or
-`select pgpm.` statement, read from `pg_stat_activity` for the backend). That is enough to say, after the
-fact, that pgpm dropped relation X. It cannot see the rows X held. Whether the trigger fires before or after
-pgpm deletes its own record of X, in the same transaction, is measured in W2 before `ResolveByRecord` relies on
-it.
+transaction id, and whether pgpm made the drop. Attribution reads the call stack, not the statement text: the
+trigger takes `GET DIAGNOSTICS ... = PG_CONTEXT`, and a drop pgpm makes has a `function pgpm.` frame on it,
+whatever called pgpm. The backend's top-level statement in `pg_stat_activity` would not do: custody tests reach
+pgpm through `DO` blocks and pgTAP wrappers (`lives_ok`, `throws_like`), whose top-level statement is the
+wrapper, so pgpm's own drops would read as the test's. That is enough to say, after the fact, that pgpm dropped
+relation X. It cannot see the rows X held. Whether the trigger fires before or after pgpm deletes its own record
+of X, in the same transaction, is measured in W2 before `ResolveByRecord` relies on it.
 
 ### Registered operator relations
 
@@ -118,8 +120,9 @@ The oracle is a guard, so `CLAUDE.md`'s rules apply to it:
 
 Three things this note assumes, each checked in W2 with a test of its own:
 
-1. the `sql_drop` trigger sees pgpm's drops with the attribution right, including drops inside procedures
-   that COMMIT;
+1. the `sql_drop` trigger attributes drops right: pgpm's drops reached directly, through a `DO` block, through a
+   pgTAP wrapper and inside procedures that COMMIT are pgpm's, and a test's own `DROP TABLE`, in any of those
+   wrappers, is not;
 2. the oracle's cost per file is small next to the file (measured on the core track; the budget is a few
    percent of the suite's time);
 3. the baseline reads the same rows the file wrote, through the parent, for every control kind.
