@@ -65,6 +65,7 @@ tests/194_retain_recall_armed_detach_test.sql
 tests/197_moved_parent_lifecycle_test.sql
 tests/204_retain_recall_moved_parent_test.sql
 tests/213_ts_text_archive_chunk_transmute_min_test.sql
+tests/223_untransmute_drop_dependants_test.sql   # not baselined: sets no horizon and moves no row; it calls pgpm_formal only to declare the operator DEFAULT its untransmute drops (ResolveByRecord, W6)
 tests/228_archive_step_child_isolation_test.sql
 tests/229_retire_one_step_disarm_test.sql
 tests/231_crossing_keys_datestyle_test.sql

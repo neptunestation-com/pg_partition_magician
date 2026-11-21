@@ -78,6 +78,7 @@ create table public.log223 (id bigint);   -- the rule's target
 call pgpm.transmute('public.fv223', 'id', 100::bigint, p_obtain => 2);
 select pgpm.obtain('public.fv223');
 create table public.fv223_def partition of public.fv223 default;
+select pgpm_formal.expect('ResolveByRecord', 'public.fv223_def', 'B stages an operator''s empty DEFAULT partition on purpose (header: the DROP cascades to it; docs/reference.md untransmute takes any DEFAULT), and the successful untransmute drops it with the parent; it is in no pgpm anchor, so its drop has no parent of record');
 create view public.fv223_fwd_v as select id from public.fv223_p0000000000000000100;
 create function public.fwdrow223(r public.fv223_p0000000000000000200) returns bigint language sql as 'select r.id';
 create view public.fv223_def_v as select id from public.fv223_def;

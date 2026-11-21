@@ -207,6 +207,12 @@ select is(t40.holder(:'p' || 't40.evt_0.ndjson'), 't40.evt/chunk',
 select is(t40.holder(:'p' || 't40.ev2_0.ndjson'), 't40.log/export',
   'E: and left a claim already made as it was');
 
+select pgpm_formal.expect('ArchiveNoClobber', '[1]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.evt');
+select pgpm_formal.expect('ArchiveNoClobber', '[2]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.evt');
+select pgpm_formal.expect('ArchiveNoClobber', '[1]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.ev2');
+select pgpm_formal.expect('ArchiveNoClobber', '[2]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.ev2');
+select pgpm_formal.expect('ArchiveNoClobber', '[1]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.gz');
+select pgpm_formal.expect('ArchiveNoClobber', '[2]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.gz');
 select count(t40.clear(k)) from unnest(array[
   :'p' || 't40.evt_0.ndjson', :'p' || 't40.evt_0.' || :'evt_oid' || '.ndjson',
   :'p' || 't40.ev2_0.ndjson', :'p' || 't40.ev2.' || :'ev2_oid' || '_0.ndjson',
