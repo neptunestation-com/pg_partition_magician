@@ -18523,8 +18523,8 @@ _formal("oracle_droponlycovered_unjudged", "bench/formal_oracle_selftest.sh",
         "DropOnlyCovered never judges: the archive-strategy branch every aged row goes through is switched off, so a "
         "drop no retired chunk covers is never reported and judged() counts nothing. One clause. The self-test's shrunk "
         "chunk (st.dc [19]) catches it.",
-        [("      if cfg ->> 'archive_fn' is not null then\n        n_doc_id := n_doc_id + 1;\n",
-          "      if false then\n        n_doc_id := n_doc_id + 1;\n", 1)], _OR)
+        [("      if coalesce(r.d_strat, cfg ->> 'archive_fn' is not null) then\n",
+          "      if false then\n", 1)], _OR)
 _formal("oracle_archivenoclobber_unjudged", "bench/formal_oracle_selftest.sh",
         "ArchiveNoClobber never judges: a retired chunk's row is never looked for in the loaded store. One clause. The "
         "self-test's object that lost a row (st.dc [40]) and its identity count catch it.",
@@ -18542,6 +18542,31 @@ _formal("oracle_nowedge_judged_zero", "bench/formal_oracle_selftest.sh",
         "witness (tests/formal/summarize.py) fails on. One value. The self-test's judged() count against the "
         "violations check() reported catches it.",
         [("    ('NoWedge', true, 0, n_wedge_id, 0,\n", "    ('NoWedge', true, 0, 0, 0,\n", 1)], _OR)
+# W6: the four false positives the custody files' verdicts found, each put back (docs/formal/phase3-design.md, "What W6
+# changed"); the self-test's clean case for each reports under it.
+_formal("oracle_nowedge_gone_parent_judged", "bench/formal_oracle_selftest.sh",
+        "NoWedge judges the regrain copy of a parent that is gone (W6, tests/276's closing drop owned by): the copy's "
+        "pgpm.part row under a dangling parent oid reads as a copy with no source. One clause. The self-test's dropped "
+        "parent mid-regrain (st.wg) catches it.",
+        [("    if not r.par_live then\n      n_copy_gone := n_copy_gone + 1;\n      continue;\n    end if;\n", "", 1)], _OR)
+_formal("oracle_comment_record_unread", "bench/formal_oracle_selftest.sh",
+        "ResolveByRecord ignores pgpm_hypertable's comment record (W6, tests/348 S4 S5): a delta or copy the module marked "
+        "with its table comment, which pgpm's uninstall drops by that marker, reads as an unrecorded drop. One clause. "
+        "The self-test's marked st.mk_pgpm_dest and st.mk_pgpm_delta catch it.",
+        [("                    and ((d.description ~ '^pgpm from_hypertable horizon [0-9]+$' and right(c.relname, 11) = '_pgpm_delta')\n",
+          "                    and false and ((d.description ~ '^pgpm from_hypertable horizon [0-9]+$' and right(c.relname, 11) = '_pgpm_delta')\n", 1)], _OR)
+_formal("oracle_unshaped_key_unplaced", "bench/formal_oracle_selftest.sh",
+        "NoLostRow reports a text_time key with no native value as lost before any retention range is read (W6, "
+        "tests/389): the text-order placement against the encoded bounds is skipped. One clause. The self-test's odd key "
+        "retained with its partition (st.tt) catches it.",
+        [("      if (r.nat is null and r.rk is null) or r.unaged or not r.ran then\n",
+          "      if r.nat is null or r.unaged or not r.ran then\n", 1)], _OR)
+_formal("oracle_droponlycovered_todays_strategy", "bench/formal_oracle_selftest.sh",
+        "DropOnlyCovered judges every past drop by today's archive strategy, not the one in force at the drop (W6, "
+        "tests/59). One clause. The self-test's drop under no strategy with one set after (st.ds) and its uncovered "
+        "drop with the strategy unset after (st.dc [19]) catch it.",
+        [("      if coalesce(r.d_strat, cfg ->> 'archive_fn' is not null) then\n",
+          "      if cfg ->> 'archive_fn' is not null then\n", 1)], _OR)
 _formal("summarize_zero_judged_passes", "bench/formal_summarize_selftest.sh",
         "tests/formal/summarize.py without its zero-judged rule: a track on which a required invariant judged no "
         "identity passes its liveness witness, so an oracle that looked at nothing reads as an oracle that found "

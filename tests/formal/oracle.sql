@@ -127,8 +127,15 @@ create table if not exists pgpm_formal.drop_history (
   recorded     boolean,
   recorded_as  text,
   part_row     boolean,                    -- a pgpm.part row anchored to this oid existed when the trigger fired
-  context      text
+  context      text,
+  -- the dropped partition's range as pgpm.part held it at the drop, and whether its parent had an archive strategy
+  -- then (W6, tests/59: a drop under no strategy is retention as documented, whatever strategy is set later)
+  part_lo      text,
+  part_hi      text,
+  strategy     boolean
 );
+alter table pgpm_formal.drop_history add column if not exists part_lo text,
+  add column if not exists part_hi text, add column if not exists strategy boolean;
 
 -- Every ALTER TABLE, with the table's partitions after it (for a partitioned table): what attributes a DETACH.
 create table if not exists pgpm_formal.alter_history (
@@ -238,7 +245,15 @@ begin
   insert into pgpm_formal.anchor_seen (objid)
   select o from (select child_oid from pgpm.part union select retiring_oid from pgpm.part
                  union select detach_dispatched_oid from pgpm.part union select parent_table::oid from pgpm.config
-                 union select monolith_oid from pgpm.config union select parent_oid from pgpm.scratch) a(o)
+                 union select monolith_oid from pgpm.config union select parent_oid from pgpm.scratch
+                 -- the module's comment record: pgpm_hypertable marks a copy's delta and a never-cut-over copy with a
+                 -- table comment in the transaction that creates it, and pgpm_core/uninstall.sql's two sweeps drop
+                 -- by that marker AND the suffix, nothing else (W6, tests/348 S4 S5). Noted when the comment is
+                 -- written: at the drop its pg_description row is already gone.
+                 union select c.oid from pg_description d join pg_class c on c.oid = d.objoid
+                  where d.classoid = 'pg_class'::regclass and d.objsubid = 0 and c.relkind = 'r'
+                    and ((d.description ~ '^pgpm from_hypertable horizon [0-9]+$' and right(c.relname, 11) = '_pgpm_delta')
+                      or (d.description ~ '^pgpm from_hypertable copy of [0-9]+$' and right(c.relname, 10) = '_pgpm_dest'))) a(o)
    where o is not null and not exists (select 1 from pgpm_formal.anchor_seen s where s.objid = a.o);
   -- and the parent each baselined table is a partition of now (see parent_seen)
   insert into pgpm_formal.parent_seen (orig_oid, parent_oid)
@@ -272,6 +287,22 @@ exception when others then
 end;
 $$;
 
+-- The range pgpm.part holds for a relation about to be dropped, and whether its parent's config names an archive
+-- strategy at that moment. Read inside the sql_drop trigger: retire() drops the partition before it deletes the
+-- pgpm.part row and logs retain_drop (pgpm_core/install.sql), so the row is still there. Never raises.
+create or replace function pgpm_formal._drop_part(p_oid oid, p_parent oid, out p_lo text, out p_hi text,
+                                                  out p_strategy boolean)
+language plpgsql stable set search_path = pg_catalog, pg_temp as $$
+begin
+  select p.lo, p.hi into p_lo, p_hi from pgpm.part p
+   where p.parent_table = p_parent and (p.child_oid = p_oid or p.retiring_oid = p_oid or p.detach_dispatched_oid = p_oid)
+   limit 1;
+  select c.archive_fn is not null into p_strategy from pgpm.config c where c.parent_table = p_parent;
+exception when others then
+  p_lo := null; p_hi := null; p_strategy := null;
+end;
+$$;
+
 -- Does an event touch temporary tables and nothing else? p_temp: one element per table the event names, true for a
 -- temporary one; null or empty (no table) is false, so such an event is recorded as before.
 create or replace function pgpm_formal._temporary_only(p_temp boolean[])
@@ -302,13 +333,14 @@ begin
     v_rec := pgpm_formal._recorded_as(r.objid);
     insert into pgpm_formal.drop_history
       (xid, xact_start, stmt_start, objid, schema_name, object_name, is_temporary, by_pgpm, by_query, top_query,
-       backend_type, parent_oid, recorded, recorded_as, part_row, context)
-    values (pg_current_xact_id(), now(), statement_timestamp(), r.objid, r.schema_name, r.object_name,
-            r.is_temporary, v_by_pgpm,
-            coalesce(v_query ~* '^\s*(call|select)\s+pgpm\.', false), left(v_query, 500), v_btype,
-            pgpm_formal._part_parent(r.objid, r.schema_name, r.object_name),
-            case when v_rec is null then null else v_rec <> '' end, nullif(v_rec, ''),
-            coalesce(v_rec like '%pgpm.part%', false), left(v_ctx, 2000));
+       backend_type, parent_oid, recorded, recorded_as, part_row, context, part_lo, part_hi, strategy)
+    select pg_current_xact_id(), now(), statement_timestamp(), r.objid, r.schema_name, r.object_name,
+           r.is_temporary, v_by_pgpm,
+           coalesce(v_query ~* '^\s*(call|select)\s+pgpm\.', false), left(v_query, 500), v_btype,
+           pp.o, case when v_rec is null then null else v_rec <> '' end, nullif(v_rec, ''),
+           coalesce(v_rec like '%pgpm.part%', false), left(v_ctx, 2000), dp.p_lo, dp.p_hi, dp.p_strategy
+      from (select pgpm_formal._part_parent(r.objid, r.schema_name, r.object_name) as o) pp
+      cross join lateral pgpm_formal._drop_part(r.objid, pp.o) dp;
   end loop;
   perform pgpm_formal._note_anchors();
 exception when others then
@@ -339,7 +371,7 @@ begin
       values (pg_current_xact_id(), r.objid, v_by_pgpm,
               (select coalesce(array_agg(i.inhrelid order by i.inhrelid), '{}') from pg_inherits i
                 where i.inhparent = r.objid and not i.inhdetachpending));
-    else
+    elsif r.command_tag <> 'COMMENT' then   -- a COMMENT fires the trigger only so _note_anchors reads the marker
       insert into pgpm_formal.create_history (objid, by_pgpm) values (r.objid, v_by_pgpm);
     end if;
   end loop;
@@ -353,11 +385,11 @@ begin
   if not exists (select 1 from pg_event_trigger where evtname = 'pgpm_formal_sql_drop') then
     create event trigger pgpm_formal_sql_drop on sql_drop execute function pgpm_formal._on_sql_drop();
   end if;
-  if not exists (select 1 from pg_event_trigger where evtname = 'pgpm_formal_ddl') then
-    create event trigger pgpm_formal_ddl on ddl_command_end
-      when tag in ('ALTER TABLE', 'CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
-      execute function pgpm_formal._on_ddl();
-  end if;
+  -- re-created whatever stands, so a database that holds an older oracle gets this tag list (COMMENT, W6)
+  drop event trigger if exists pgpm_formal_ddl;
+  create event trigger pgpm_formal_ddl on ddl_command_end
+    when tag in ('ALTER TABLE', 'CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO', 'COMMENT')
+    execute function pgpm_formal._on_ddl();
 end $$;
 
 -- ------------------------------------------------------------------------------------------- the ledger
@@ -566,6 +598,39 @@ exception when others then
 end;
 $$;
 
+-- A text_time row whose key lacks the declared shape has no native value (pgpm._decode raises on it), yet pgpm
+-- routes, archives and retires it by text order against the ENCODED bounds (#661, #709; tests/389 writes three on
+-- purpose). _unshaped_key returns such a key, or null (another kind, or a shaped key); _enc_of encodes a native
+-- grid value as pgpm's encoder does, or null when it cannot (read as unbounded on that side, as _bound is). W6.
+create or replace function pgpm_formal._unshaped_key(p_cfg jsonb, p_row jsonb)
+returns text language plpgsql stable as $$
+declare v text;
+begin
+  if p_cfg ->> 'control_kind' is distinct from 'text_time' then return null; end if;
+  v := p_row ->> (p_cfg ->> 'control_column');
+  if v is null or pgpm._text_time_shaped(v, coalesce(p_cfg ->> 'text_time_prefix', ''), (p_cfg ->> 'text_time_width')::int,
+                                         (p_cfg ->> 'text_time_radix')::int, p_cfg ->> 'text_time_alphabet') then
+    return null;
+  end if;
+  return v;
+exception when others then
+  return null;
+end;
+$$;
+
+create or replace function pgpm_formal._enc_of(p_cfg jsonb, p_native text)
+returns text language plpgsql stable as $$
+declare cfg pgpm.config;
+begin
+  if p_native is null then return null; end if;
+  cfg := jsonb_populate_record(null::pgpm.config, p_cfg);
+  return pgpm._encode(cfg.control_kind::text, p_native, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                      cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch);
+exception when others then
+  return null;
+end;
+$$;
+
 -- The relations whose rows count for a ledger parent besides the parent itself: 2 = custody (a partition pgpm's
 -- own dispatched retirement holds: a mark with detach_dispatched_oid, the relation out of the parent), 3 = the
 -- operator's (registered by the test for this parent, or released to the operator by pgpm's recall:
@@ -636,11 +701,12 @@ set timezone = 'UTC' set datestyle = 'ISO, MDY' set intervalstyle = 'postgres' s
 set bytea_output = 'hex' set jit = off as $$
 declare
   lp record; r record; v_cur regclass; cfg jsonb; v_have_cfg boolean; v_t text; v_bound text;
+  v_tt boolean; v_bound_e text; v_doc boolean;
   v_sql text; v_skipped text[]; v_listed boolean; v_nrows bigint;
   -- judged counters
   n_lost_par int := 0; n_lost_id bigint := 0;
   n_doc_par int := 0; n_doc_id bigint := 0; n_anc_par int := 0; n_anc_id bigint := 0; v_held bigint;
-  n_rbr_id bigint := 0; n_wedge_id bigint := 0; n_mark_unjudged int := 0;
+  n_rbr_id bigint := 0; n_wedge_id bigint := 0; n_mark_unjudged int := 0; n_copy_gone int := 0;
   v_unjudged_par text[] := '{}'; v_cron text;
 begin
   -- pgpm uninstalled (tests/239 runs uninstall.sql): nothing of pgpm's is left to judge but the drop history
@@ -674,7 +740,7 @@ begin
       v_unjudged_par := v_unjudged_par || (lp.parent_name || ' (gone)');
       continue;
     end if;
-    v_t := null; v_bound := null;
+    v_t := null; v_bound := null; v_tt := false; v_bound_e := null;
     -- the config is held as jsonb, never in a local of pgpm's row type: a declared pgpm type stops the function from
     -- compiling once a file has uninstalled pgpm (tests/239), and the check must still judge the drop history then
     cfg := (select to_jsonb(pgpm._control_followed(c)) from pgpm.config c where c.parent_table = v_cur);
@@ -686,11 +752,13 @@ begin
       exception when others then
         v_bound := null;
       end;
+      v_tt := cfg ->> 'control_kind' = 'text_time';
+      if v_tt then v_bound_e := pgpm_formal._enc_of(cfg, v_bound); end if;
     end if;
     select s.p_sql, s.p_skipped into v_sql, v_skipped from pgpm_formal._row_states(lp.parent_oid, v_cur) s;
     v_listed := exists (select 1 from pgpm_formal.store_listing sl where sl.parent_table = v_cur);
     n_lost_par := n_lost_par + 1;
-    if v_have_cfg and cfg ->> 'archive_fn' is not null then n_doc_par := n_doc_par + 1; end if;
+    v_doc := v_have_cfg and cfg ->> 'archive_fn' is not null;
     if v_listed then n_anc_par := n_anc_par + 1; end if;
     select count(*) into v_nrows from pgpm_formal.ledger l where l.parent_oid = lp.parent_oid and not l.deleted;
     n_lost_id := n_lost_id + v_nrows;
@@ -701,24 +769,41 @@ begin
     -- (one pgpm dropped first).
     v_sql := format(
       'with st as (%1$s),
-            lg as materialized (select g.lo::%2$s as lo, g.hi::%2$s as hi from pgpm.log g
+            lg as materialized (select g.lo::%2$s as lo, g.hi::%2$s as hi,
+                                       case when $6 then pgpm_formal._enc_of($2, g.lo) end as lo_e,
+                                       case when $6 then pgpm_formal._enc_of($2, g.hi) end as hi_e
+                                  from pgpm.log g
                                  where $3 and g.parent_table = $1 and g.action in (''retain_drop'', ''regrain_aged'', ''retain_crossing'')),
             ch as materialized (select pgpm_formal._bound(l.lo, %2$L)::%2$s as lo_n, pgpm_formal._bound(l.hi, %2$L)::%2$s as hi_n, l.lo, l.hi, l.s3_key, l.child_oid,
+                                       case when $6 then pgpm_formal._enc_of($2, l.lo) end as lo_e,
+                                       case when $6 then pgpm_formal._enc_of($2, l.hi) end as hi_e,
                                        exists (select 1 from pgpm_formal.drop_history h
                                                 where h.objid = l.child_oid and h.by_pgpm) as pgpm_dropped
                                   from pgpm.archive_ledger l where $3 and l.parent_table = $1 and l.retired_at is not null),
-            bad as (select st.*, case when np + nc + no < mult and $3 then pgpm_formal._native_of($2, row_data) end as nat
-                      from st where np + nc > mult or np + nc + no < mult)
-       select b.identity, b.mult, b.np, b.nc, b.no, b.nat,
-              coalesce(b.nat::%2$s >= $4::%2$s, false) as unaged,
-              exists (select 1 from lg where b.nat::%2$s >= lg.lo and b.nat::%2$s < lg.hi) as ran,
+            -- the drops pgpm made of this parent''s partitions, with the strategy its config named at each (W6)
+            dh as materialized (select pgpm_formal._bound(h.part_lo, %2$L)::%2$s as lo, pgpm_formal._bound(h.part_hi, %2$L)::%2$s as hi,
+                                       h.strategy, h.id
+                                  from pgpm_formal.drop_history h
+                                 where $3 and h.by_pgpm and h.parent_oid = $1::oid and h.strategy is not null),
+            bad0 as (select st.*, case when np + nc + no < mult and $3 then pgpm_formal._native_of($2, row_data) end as nat
+                       from st where np + nc > mult or np + nc + no < mult),
+            bad as (select bad0.*, case when nat is null and $6 and np + nc + no < mult
+                                        then pgpm_formal._unshaped_key($2, row_data) end as rk
+                      from bad0)
+       select b.identity, b.mult, b.np, b.nc, b.no, b.nat, b.rk,
+              coalesce(b.nat::%2$s >= $4::%2$s, b.rk collate "C" >= $5::text collate "C", false) as unaged,
+              exists (select 1 from lg where (b.nat::%2$s >= lg.lo and b.nat::%2$s < lg.hi)
+                                          or (b.rk collate "C" >= lg.lo_e collate "C" and b.rk collate "C" < lg.hi_e collate "C")) as ran,
+              (select dh.strategy from dh where b.nat::%2$s >= dh.lo and b.nat::%2$s < dh.hi order by dh.id desc limit 1) as d_strat,
               c.lo as c_lo, c.hi as c_hi, c.s3_key as c_key, c.child_oid as c_oid, c.pgpm_dropped as c_pgpm
          from bad b
-         left join lateral (select * from ch where b.nat::%2$s >= coalesce(ch.lo_n, b.nat::%2$s)
-                                                and (ch.hi_n is null or b.nat::%2$s < ch.hi_n)
+         left join lateral (select * from ch
+                             where (b.nat::%2$s >= coalesce(ch.lo_n, b.nat::%2$s) and (ch.hi_n is null or b.nat::%2$s < ch.hi_n))
+                                or (b.rk is not null and (ch.lo_e is null or b.rk collate "C" >= ch.lo_e collate "C")
+                                                     and (ch.hi_e is null or b.rk collate "C" < ch.hi_e collate "C"))
                              order by (ch.child_oid is not null and ch.pgpm_dropped) desc, ch.lo_n limit 1) c on true',
       v_sql, coalesce(v_t, 'numeric'));
-    for r in execute v_sql using v_cur, cfg, v_have_cfg, v_bound loop
+    for r in execute v_sql using v_cur, cfg, v_have_cfg, v_bound, v_bound_e, v_tt loop
       -- NoDuplicateRow: through the parent, and across the parent and custody
       if r.np + r.nc > r.mult then
         invariant := 'NoDuplicateRow'; parent_table := v_cur; identity := r.identity;
@@ -727,25 +812,28 @@ begin
       end if;
       continue when r.np + r.nc + r.no >= r.mult;
       -- not visible anywhere it may be: lost, unless retention removed it
-      if r.nat is null or r.unaged or not r.ran then
+      if (r.nat is null and r.rk is null) or r.unaged or not r.ran then
         invariant := 'NoLostRow'; parent_table := v_cur; identity := r.identity;
         detail := format('visible %s of %s (parent %s, custody %s, operator %s); %s%s', r.np + r.nc + r.no, r.mult,
                          r.np, r.nc, r.no,
                          case when not v_have_cfg then 'the parent is not managed, so no retention applies'
-                              when r.nat is null then 'its control value could not be read as a native grid value'
-                              when r.unaged then format('its control value %s is at or past the horizon %s', r.nat, v_bound)
+                              when r.nat is null and r.rk is null then 'its control value could not be read as a native grid value'
+                              when r.unaged then format('its control value %s is at or past the horizon %s', coalesce(r.nat, r.rk), v_bound)
                               else format('its control value %s is below the horizon %s, but no retain_drop or regrain_aged covers it',
-                                          r.nat, coalesce(v_bound, '(none)')) end,
+                                          coalesce(r.nat, r.rk), coalesce(v_bound, '(none)')) end,
                          case when cardinality(v_skipped) > 0 then format('; side relations not read: %s', v_skipped) else '' end);
         return next;
         continue;
       end if;
-      -- aged out by retention: DropOnlyCovered and ArchiveNoClobber judge how
-      if cfg ->> 'archive_fn' is not null then
+      -- aged out by retention: DropOnlyCovered and ArchiveNoClobber judge how. DropOnlyCovered by the strategy in
+      -- force at the drop that took the row (drop_history.strategy, W6: tests/59 retains under none and sets one
+      -- after); a row no recorded drop of pgpm's ranges over is judged by today's strategy, as before
+      if coalesce(r.d_strat, cfg ->> 'archive_fn' is not null) then
+        if not v_doc then v_doc := true; end if;
         n_doc_id := n_doc_id + 1;
         if r.c_lo is null then
           invariant := 'DropOnlyCovered'; parent_table := v_cur; identity := r.identity;
-          detail := format('gone with control value %s below the horizon, and no retired chunk of %s holds it', r.nat, v_cur);
+          detail := format('gone with control value %s below the horizon, and no retired chunk of %s holds it', coalesce(r.nat, r.rk), v_cur);
           return next;
         elsif r.c_oid is null or not r.c_pgpm then
           invariant := 'DropOnlyCovered'; parent_table := v_cur; identity := r.identity;
@@ -772,6 +860,7 @@ begin
         end if;
       end if;
     end loop;
+    if v_doc then n_doc_par := n_doc_par + 1; end if;
   end loop;
 
   -- -------------------------------------------------- ResolveByRecord
@@ -842,11 +931,19 @@ begin
     end if;
   end loop;
   -- (2) no regrain copy outlives its source (#519): a not-attached row lies inside an attached row's range
+  -- A copy whose parent is gone is not judged, as NoLostRow does not judge a dropped parent: the promise lasts while
+  -- the parent does, and pgpm.part keeps a dropped parent's rows under its dangling oid (W6, tests/276's closing
+  -- `drop owned by` takes the parent mid-regrain). A live parent with no attached source is still reported.
   for r in
-    select p.parent_table as par, p.child_name, p.lo, p.hi, c.control_kind
+    select p.parent_table as par, p.child_name, p.lo, p.hi, c.control_kind,
+           exists (select 1 from pg_class pc where pc.oid = p.parent_table::oid) as par_live
       from pgpm.part p join pgpm.config c on c.parent_table = p.parent_table
      where not p.attached and (p_scope is null or p.parent_table = any (p_scope))
   loop
+    if not r.par_live then
+      n_copy_gone := n_copy_gone + 1;
+      continue;
+    end if;
     n_wedge_id := n_wedge_id + 1;
     declare v_src boolean;
     begin
@@ -919,7 +1016,9 @@ begin
      case when n_anc_par = 0 then 'not judged: no baselined parent whose store was listed' end),
     ('ResolveByRecord', true, 0, n_rbr_id, 0, null),
     ('NoWedge', true, 0, n_wedge_id, 0,
-     case when n_mark_unjudged > 0 then format('%s retirement mark(s) not judged: cron.job unreadable', n_mark_unjudged) end);
+     nullif(concat_ws('; ',
+       case when n_mark_unjudged > 0 then format('%s retirement mark(s) not judged: cron.job unreadable', n_mark_unjudged) end,
+       case when n_copy_gone > 0 then format('%s regrain copy row(s) of a gone parent not judged', n_copy_gone) end), ''));
   update pgpm_formal.judged_last j set expected = (select count(*) from pgpm_formal.expectation e where e.invariant = j.invariant);
 end;
 $$;

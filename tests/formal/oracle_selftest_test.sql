@@ -14,7 +14,7 @@
 -- to return exactly the one declaration left unmatched.
 create extension if not exists pgtap;
 
-select plan(82);
+select plan(100);
 
 create schema st;
 
@@ -297,6 +297,30 @@ select 'st.dk'::regclass, 'st.dk/0', identity from pgpm_formal.ledger
 update pgpm.archive_ledger set hi = '15' where parent_table = 'st.dc'::regclass and lo = '10';   -- [10, 15): 19 uncovered
 select is(st.found('DropOnlyCovered', 'st.dc'), array['[19]'],
   'DropOnlyCovered names the row removed with no retired chunk holding it');
+-- judged by the strategy in force at the drop, not today's (W6): unset now, the uncovered drop is still named
+select is((select array_agg(distinct strategy) from pgpm_formal.drop_history
+            where by_pgpm and parent_oid = 'st.dc'::regclass::oid and part_lo is not null), array[true],
+  'LIVENESS: every partition of st.dc pgpm dropped was dropped while its archive strategy was set');
+update pgpm.config set archive_fn = null where parent_table = 'st.dc'::regclass;
+select is(st.found('DropOnlyCovered', 'st.dc'), array['[19]'],
+  'DropOnlyCovered still names it once the strategy is unset: the drop ran under one');
+update pgpm.config set archive_fn = 'st.arch(regclass,name,text,text)'::regprocedure where parent_table = 'st.dc'::regclass;
+
+-- ==================================================================== DropOnlyCovered, a strategy set after the drop (W6)
+-- tests/59: retention under no strategy drops what it ages out, as documented; a strategy set later covers only
+-- the drops made under it.
+select st.mk('st.ds');
+call pgpm.transmute('st.ds', 'id', 10, p_retain => 30, p_obtain => 10);
+select st.fill('st.ds');
+select pgpm_formal.baseline('st.ds');
+select is(pgpm.retain('st.ds'), 6, 'fixture: retention under no strategy drops the six partitions of [0, 60)');
+select pgpm.set_archive_fn('st.ds', 'st.arch(regclass,name,text,text)'::regprocedure);
+select is((select array_agg(distinct strategy) from pgpm_formal.drop_history
+            where by_pgpm and parent_oid = 'st.ds'::regclass::oid and part_lo is not null), array[false],
+  'LIVENESS: the drops ran with no strategy, and one is set now, so today''s config would judge them');
+select is(st.found('DropOnlyCovered', 'st.ds'), '{}'::text[],
+  'DropOnlyCovered judges a drop by the strategy in force when it ran, not by one set after it');
+select is(st.found('NoLostRow', 'st.ds'), '{}'::text[], 'and retention accounts for every row it dropped');
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, rows_archived, retired_at, child_oid)
 select 'st.dc'::regclass, '70', '80', child_name, 'st.dc/70', 1, now(), child_oid
   from pgpm.part where parent_table = 'st.dc'::regclass and child_name = 'dc_p0000000000000000070';
@@ -320,6 +344,77 @@ select is(st.found_like('NoWedge', 'copy rg_%'), '{}'::text[], 'NoWedge is clean
 drop table st.rg_p0000000000000000000_to_0000000000000000600;
 select is(st.found_like('NoWedge', 'copy rg_%'), array['copy rg_p0000000000000000000'],
   'NoWedge names the regrain copy that outlived its source');
+-- a copy whose whole parent is gone is not judged (W6, tests/276's closing `drop owned by`): pgpm.part keeps the
+-- dropped parent's rows under its dangling oid, and the promise lasts while the parent does
+create table st.wg (id bigint primary key, body text);
+insert into st.wg select g, 'b' || g from generate_series(1, 500) g;
+call pgpm.transmute('st.wg', 'id', 100, p_obtain => 2, p_paused => true);
+insert into st.wg values (750, 'past the monolith');
+select is(pgpm.regrain_step('st.wg', 'wg_p0000000000000000000_to_0000000000000000600', '10', 30), 'prepared',
+  'fixture: the regrain of st.wg''s monolith is prepared');
+select is(pgpm.regrain_step('st.wg', 'wg_p0000000000000000000_to_0000000000000000600', '10', 30), 'copied:9',
+  'fixture: and its first fine copy is made');
+select 'st.wg'::regclass::oid as wg_oid \gset
+drop table st.wg cascade;
+select is(
+  (select array_agg(p.child_name) from pgpm.part p where p.parent_table::oid = :wg_oid and not p.attached
+      and not exists (select 1 from pg_class c where c.oid = :wg_oid)),
+  array['wg_p0000000000000000000'::name],
+  'LIVENESS: the copy''s row stands in pgpm.part, not attached, under a parent oid pg_class no longer has');
+select is(st.found_like('NoWedge', 'copy wg_%'), '{}'::text[], 'NoWedge does not judge the copy of a parent that is gone');
+
+-- ==================================================================== a text_time key with no native value (W6)
+-- tests/389: a key without the declared shape has no native value, and pgpm routes and retires it by text order
+-- against the encoded bounds. The 8 hex digits of the epoch second, then a suffix; the odd key puts a 'z' in the
+-- eighth digit.
+create function st.hx(p_ts timestamptz) returns text language sql immutable as
+  $$ select lpad(to_hex(extract(epoch from p_ts)::bigint), 8, '0') $$;
+create table st.tt (id text collate "C" primary key, v int);
+insert into st.tt values (st.hx('2020-01-10 00:00:00+00') || 'a', 1), (st.hx('2020-06-01 00:00:00+00') || 'a', 2);
+select (now() - timestamptz '2021-06-15 00:00:00+00') as tt_ret \gset
+call pgpm.transmute('st.tt', 'id', interval '1 year', p_obtain => 1,
+  p_tt_prefix => '', p_tt_width => 8, p_tt_radix => 16, p_tt_unit => 's');
+-- the monolith runs to the present, so it is regrained into years first (as tests/389 does), past a frontier row,
+-- with no retention yet (the regrain would age 2020 out itself)
+select (date_trunc('year', now()) + interval '2 years 5 months 14 days') as tt_pin \gset
+select pgpm.extend_to('st.tt', st.hx(:'tt_pin'::timestamptz) || 'a') as tt_ext \gset
+insert into st.tt values (st.hx(:'tt_pin'::timestamptz) || 'a', 9);
+do $$
+declare v_child name; v_status text; i int := 0;
+begin
+  select child_name into v_child from pgpm.part where parent_table = 'st.tt'::regclass
+     and lo::timestamptz = '2020-01-01 00:00:00+00';
+  loop
+    v_status := pgpm.regrain_step('st.tt', v_child, '1 year', 500);
+    i := i + 1;
+    exit when v_status like 'swapped:%' or v_status in ('active', 'nokey', 'nosubdiv') or i > 100;
+  end loop;
+  if v_status not like 'swapped:%' then raise exception 'st.tt: the regrain ended %', v_status; end if;
+end $$;
+insert into st.tt values (left(st.hx('2020-01-11 00:00:00+00'), 7) || 'z', 3);
+select pgpm_formal.baseline('st.tt');
+-- by hand: set_retain refuses a value whose next tick drops a partition, the very thing wanted here
+update pgpm.config set retain = :'tt_ret' where parent_table = 'st.tt'::regclass;
+select is(pgpm_formal._native_of((select to_jsonb(c) from pgpm.config c where parent_table = 'st.tt'::regclass),
+                                 jsonb_build_object('id', left(st.hx('2020-01-11 00:00:00+00'), 7) || 'z')),
+  null, 'LIVENESS: the odd key has no native value');
+select cmp_ok(pgpm.retain('st.tt'), '>', 0, 'fixture: retention drops the 2020 partition, the odd key with it');
+select is((select count(*)::int from pgpm.log where parent_table = 'st.tt'::regclass and action = 'retain_drop'
+              and lo::timestamptz = '2020-01-01 00:00:00+00'), 1,
+  'LIVENESS: retain_drop is logged for [2020, 2021), and the odd key is gone');
+select is(st.found('NoLostRow', 'st.tt'), '{}'::text[],
+  'NoLostRow places a key with no native value by text order in the retained range that took it');
+-- the same key gone with no retention at all is lost
+create table st.tu (id text collate "C" primary key, v int);
+insert into st.tu values (st.hx('2020-01-10 00:00:00+00') || 'a', 1), (st.hx('2020-06-01 00:00:00+00') || 'a', 2);
+call pgpm.transmute('st.tu', 'id', interval '1 year', p_obtain => 1,
+  p_tt_prefix => '', p_tt_width => 8, p_tt_radix => 16, p_tt_unit => 's');
+insert into st.tu values (left(st.hx('2020-01-11 00:00:00+00'), 7) || 'z', 3);
+select pgpm_formal.baseline('st.tu');
+delete from st.tu where v = 3;
+select is(st.found('NoLostRow', 'st.tu'),
+  array[(select identity from pgpm_formal.ledger where parent_oid = 'st.tu'::regclass and row_data ->> 'v' = '3')],
+  'NoLostRow names a key with no native value that is gone with no retention over it');
 
 -- ==================================================================== ResolveByRecord
 select st.mk('st.rb');
@@ -422,6 +517,27 @@ select is(st.found_like('ResolveByRecord', 'st.ht_src'), '{}'::text[],
   'ResolveByRecord accepts the drop of a relation pgpm.scratch keys a conversion by');
 select is(st.found_like('ResolveByRecord', 'st.ht_none'), array['st.ht_none'],
   'ResolveByRecord names the drop of a relation nothing of pgpm''s named');
+-- pgpm_hypertable's comment record (W6, tests/348): uninstall's sweeps drop a relation by marker AND suffix, so a
+-- marked one is recorded, and a lookalike that only ends in the suffix is not (#737, #773)
+create table st.mk_pgpm_dest (id int);
+comment on table st.mk_pgpm_dest is 'pgpm from_hypertable copy of 4242';
+create table st.mk_pgpm_delta (id int);
+comment on table st.mk_pgpm_delta is 'pgpm from_hypertable horizon 777';
+create table st.um_pgpm_dest (id int);
+create function pgpm.st_drop_w6(p_rel regclass) returns void language plpgsql as $$
+begin execute format('drop table %s', p_rel); end $$;
+select pgpm.st_drop_w6('st.mk_pgpm_dest');
+select pgpm.st_drop_w6('st.mk_pgpm_delta');
+select pgpm.st_drop_w6('st.um_pgpm_dest');
+drop function pgpm.st_drop_w6(regclass);
+select is((select array_agg(object_name || ':' || by_pgpm order by object_name)
+             from pgpm_formal.drop_history where object_name in ('mk_pgpm_dest', 'mk_pgpm_delta', 'um_pgpm_dest')),
+  array['mk_pgpm_delta:true', 'mk_pgpm_dest:true', 'um_pgpm_dest:true'],
+  'LIVENESS: the three drops ran under a pgpm frame');
+select is(st.found_like('ResolveByRecord', 'st.mk_pgpm_%'), '{}'::text[],
+  'ResolveByRecord accepts the drop of a relation the module''s comment marks as its copy or delta');
+select is(st.found_like('ResolveByRecord', 'st.um_pgpm_%'), array['st.um_pgpm_dest'],
+  'ResolveByRecord names the drop of an unmarked lookalike that only ends in _pgpm_dest');
 
 -- ==================================================================== no new locks for temporary tables (W3)
 -- pgpm_archive's archive._refuse_foreign_read fails a read whose transaction newly holds a lock on any relation that is
@@ -488,6 +604,9 @@ select pgpm_formal.expect('ResolveByRecord', 'st.rb_p0000000000000000010', 'plan
 select pgpm_formal.expect('ResolveByRecord', 'st.rb_p0000000000000000020', 'planted: an unanchored row');
 select pgpm_formal.expect('ResolveByRecord', 'st.ut', 'planted: untransmute of an operator''s monolith');
 select pgpm_formal.expect('ResolveByRecord', 'st.ht_none', 'planted: a pgpm-framed drop of a relation nothing named');
+select pgpm_formal.expect('ResolveByRecord', 'st.um_pgpm_dest', 'planted: a pgpm-framed drop of an unmarked lookalike');
+select pgpm_formal.expect('NoLostRow', (select identity from pgpm_formal.ledger where parent_oid = 'st.tu'::regclass
+                                         and row_data ->> 'v' = '3'), 'planted: an odd key deleted by hand', 'st.tu');
 select pgpm_formal.expect('NoLostRow', '[424242]', 'a declaration nothing matches');
 select pgpm_formal.expect('NoLostRow', '[19]', 'a right identity on the wrong parent', 'st.nl');
 select is(
@@ -496,7 +615,7 @@ select is(
   'with every planted violation declared, check() reports only the two declarations that matched nothing');
 select is(
   (select array_agg(invariant || '=' || expected order by invariant) from pgpm_formal.judged()),
-  array['ArchiveNoClobber=1', 'DropOnlyCovered=1', 'NoDuplicateRow=2', 'NoLostRow=5', 'NoWedge=3', 'ResolveByRecord=4'],
+  array['ArchiveNoClobber=1', 'DropOnlyCovered=1', 'NoDuplicateRow=2', 'NoLostRow=6', 'NoWedge=3', 'ResolveByRecord=5'],
   'judged() counts the declarations per invariant');
 -- Every declaration above but the two unused matched a violation, and a violation is of an identity check() judged, so
 -- each invariant judged() names with a declaration must count at least one identity. Not a premise: judged() is the
