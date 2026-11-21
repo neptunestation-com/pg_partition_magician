@@ -869,6 +869,8 @@ run_archive() {
     [ -d .venv-verify ] || python3 -m venv .venv-verify
     .venv-verify/bin/pip install -q -r scripts/requirements-verify.txt
   fi
+  # the loader's own check: it decodes a JSON-annotated leaf to its value and leaves plain text alone (#1486)
+  if ! .venv-verify/bin/python tests/formal/load_store.py --selftest; then fail=1; fi
   ORACLE_DIR="$ORACLE_LOG/archive"   # each file's oracle report (formal Phase 3 W4); kept after the run
   rm -rf "$ORACLE_DIR"; mkdir -p "$ORACLE_DIR"
   local an=0 aout keys

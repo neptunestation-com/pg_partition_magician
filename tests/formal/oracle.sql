@@ -639,7 +639,7 @@ declare
   v_sql text; v_skipped text[]; v_listed boolean; v_nrows bigint;
   -- judged counters
   n_lost_par int := 0; n_lost_id bigint := 0;
-  n_doc_par int := 0; n_doc_id bigint := 0; n_anc_par int := 0; n_anc_id bigint := 0;
+  n_doc_par int := 0; n_doc_id bigint := 0; n_anc_par int := 0; n_anc_id bigint := 0; v_held bigint;
   n_rbr_id bigint := 0; n_wedge_id bigint := 0; n_mark_unjudged int := 0;
   v_unjudged_par text[] := '{}'; v_cron text;
 begin
@@ -756,11 +756,18 @@ begin
       end if;
       if v_listed and r.c_lo is not null then
         n_anc_id := n_anc_id + 1;
-        if r.c_key is null or not exists (select 1 from pgpm_formal.store s where s.parent_table = v_cur
-                                            and s.s3_key = r.c_key and s.identity = r.identity) then
+        -- by multiplicity, not existence: a keyless row written twice and aged out twice needs both copies in the
+        -- object, or a writer that folds equal rows loses one unseen (Codex, #1486). A keyed row's mult is 1.
+        v_held := case when r.c_key is null then 0
+                       else (select count(*) from pgpm_formal.store s where s.parent_table = v_cur
+                                and s.s3_key = r.c_key and s.identity = r.identity) end;
+        if v_held < r.mult - (r.np + r.nc + r.no) then
           invariant := 'ArchiveNoClobber'; parent_table := v_cur; identity := r.identity;
-          detail := format('the retired chunk [%s, %s) records it, and its object %s does not hold it',
-                           r.c_lo, r.c_hi, coalesce(r.c_key, '(no key recorded)'));
+          detail := case when v_held = 0
+                         then format('the retired chunk [%s, %s) records it, and its object %s does not hold it',
+                                     r.c_lo, r.c_hi, coalesce(r.c_key, '(no key recorded)'))
+                         else format('the retired chunk [%s, %s) records it, and its object %s holds %s of the %s copies aged out',
+                                     r.c_lo, r.c_hi, r.c_key, v_held, r.mult - (r.np + r.nc + r.no)) end;
           return next;
         end if;
       end if;

@@ -87,15 +87,29 @@ def timestamp_column(col):
     return out
 
 
+def json_columns(raw):
+    """The leaves annotated JSON. pgpm_archive writes json, jsonb and array columns as JSON text under that
+    annotation (scripts/verify_parquet.py: "array as JSON text", test_jsonb), and pyarrow hands them back as str."""
+    import pyarrow.parquet as pq
+    schema = pq.ParquetFile(io.BytesIO(raw)).schema
+    return {schema.column(i).name for i in range(len(schema))
+            if schema.column(i).converted_type == "JSON" or "JSON" in str(schema.column(i).logical_type)}
+
+
 def parquet_rows(raw):
     import pyarrow as pa
     import pyarrow.parquet as pq
     t = pq.read_table(io.BytesIO(raw), use_threads=False)  # threads: the interpreter hung at exit after a 0-row file
+    as_json = json_columns(raw)
     cols = {}
     for name in t.column_names:
         col = t.column(name)
         if pa.types.is_timestamp(col.type):
             cols[name] = timestamp_column(col)
+        elif name in as_json:
+            # the JSON text decoded to its value: staged as a string it would reach jsonb_populate_record as a JSON
+            # string, which an array column refuses and a jsonb column reads as a string scalar (Codex, #1486)
+            cols[name] = [None if v is None else json.loads(v) for v in col.to_pylist()]
         else:
             cols[name] = [jsonable(v) for v in col.to_pylist()]
     for i in range(t.num_rows):
@@ -153,5 +167,32 @@ def main():
         out.writerow([parent, "", "t", ""] if reason is None else [parent, "", "f", json.dumps(reason)])
 
 
+def selftest():
+    """A Parquet file with a JSON-annotated column and a plain text one holding the same JSON-looking text: only the
+    annotated one is decoded."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    buf = io.BytesIO()
+    pq.write_table(pa.table({"id": pa.array([1, 2], pa.int64()),
+                             "ids": pa.array(['[1,2]', '[]'], pa.json_()),
+                             "doc": pa.array(['{"a": 1}', None], pa.json_()),
+                             "note": pa.array(['[1,2]', '{"a": 1}'], pa.string())}), buf)
+    raw = buf.getvalue()
+    got = list(parquet_rows(raw))
+    want = [{"id": 1, "ids": [1, 2], "doc": {"a": 1}, "note": "[1,2]"},
+            {"id": 2, "ids": [], "doc": None, "note": '{"a": 1}'}]
+    ok = True
+    if json_columns(raw) != {"ids", "doc"}:
+        print("selftest FAIL: the JSON-annotated leaves read as %r, want ids and doc" % sorted(json_columns(raw)))
+        ok = False
+    if got != want:
+        print("selftest FAIL: rows decoded as %r, want %r" % (got, want))
+        ok = False
+    print("load_store.py selftest:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--selftest"]:
+        sys.exit(selftest())
     main()

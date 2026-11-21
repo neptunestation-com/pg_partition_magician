@@ -14,7 +14,7 @@
 -- to return exactly the one declaration left unmatched.
 create extension if not exists pgtap;
 
-select plan(78);
+select plan(82);
 
 create schema st;
 
@@ -261,6 +261,39 @@ select is((select identities from pgpm_formal.judged() where invariant = 'Archiv
 delete from pgpm_formal.store where parent_table = 'st.dc'::regclass and identity = '[40]';
 select is(st.found('ArchiveNoClobber', 'st.dc'), array['[40]'],
   'ArchiveNoClobber names the row its chunk''s object no longer holds');
+-- a keyless parent: a row written twice and aged out twice needs both copies in its object (Codex, #1486)
+create table st.dk (id bigint not null, payload text);
+insert into st.dk values (3, 'twin'), (3, 'twin'), (7, 'solo');
+call pgpm.transmute('st.dk', 'id', 10, p_retain => 30, p_obtain => 10);
+select st.fill('st.dk');
+select pgpm_formal.baseline('st.dk');
+select pgpm.set_archive_fn('st.dk', 'st.arch(regclass,name,text,text)'::regprocedure);
+select pgpm.resume('st.dk');
+call pgpm.maintain('st.dk');
+call pgpm.maintain('st.dk');
+call pgpm.maintain('st.dk');
+call pgpm.maintain('st.dk');
+call pgpm.maintain('st.dk');
+call pgpm.maintain('st.dk');
+select is((select mult from pgpm_formal.ledger where parent_oid = 'st.dk'::regclass and row_data ->> 'payload' = 'twin'), 2,
+  'fixture: the ledger records the keyless twin with multiplicity 2');
+select is((select count(*) from st.dk where payload = 'twin'), 0::bigint,
+  'LIVENESS: both copies of the twin are gone, its chunk retired');
+insert into pgpm_formal.store (parent_table, s3_key, identity)
+select 'st.dk'::regclass, format('st.dk/%s', ((l.row_data ->> 'id')::bigint / 10) * 10), l.identity
+  from pgpm_formal.ledger l cross join lateral generate_series(1, l.mult)
+ where l.parent_oid = 'st.dk'::regclass and (l.row_data ->> 'id')::bigint < 60;
+insert into pgpm_formal.store_listing (parent_table) values ('st.dk'::regclass);
+select is(st.found('ArchiveNoClobber', 'st.dk'), '{}'::text[],
+  'ArchiveNoClobber is clean when the object holds both copies of the keyless twin');
+delete from pgpm_formal.store where ctid = (select ctid from pgpm_formal.store
+  where parent_table = 'st.dk'::regclass and identity like '%twin%' limit 1);
+select is(st.found('ArchiveNoClobber', 'st.dk'),
+  array[(select identity from pgpm_formal.ledger where parent_oid = 'st.dk'::regclass and row_data ->> 'payload' = 'twin')],
+  'ArchiveNoClobber names the keyless twin whose object holds one of its two copies');
+insert into pgpm_formal.store (parent_table, s3_key, identity)
+select 'st.dk'::regclass, 'st.dk/0', identity from pgpm_formal.ledger
+ where parent_oid = 'st.dk'::regclass and row_data ->> 'payload' = 'twin';
 update pgpm.archive_ledger set hi = '15' where parent_table = 'st.dc'::regclass and lo = '10';   -- [10, 15): 19 uncovered
 select is(st.found('DropOnlyCovered', 'st.dc'), array['[19]'],
   'DropOnlyCovered names the row removed with no retired chunk holding it');
