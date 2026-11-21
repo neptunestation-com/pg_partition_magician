@@ -41,7 +41,7 @@ call pgpm.maintain('public.wb110');
 select ok(
   exists (select 1 from pg_trigger t where t.tgname = 'pgpm_write_block'
             and t.tgrelid = ('public.' || (select child_name from pgpm_test110.names where lo = '0'))::regclass),
-  'setup: the maintain tick installed the write block on the monolith');
+  'fixture: the maintain tick installed the write block on the monolith');
 
 select is(
   (select t.tgenabled::text from pg_trigger t where t.tgname = 'pgpm_write_block'
@@ -50,7 +50,7 @@ select is(
 
 set session_replication_role = replica;
 select is(current_setting('session_replication_role'), 'replica',
-  'witness: this session is in replica mode, the mode an origin-only trigger is skipped in');
+  'LIVENESS: this session is in replica mode, the mode an origin-only trigger is skipped in');
 
 select throws_like(
   $$ insert into public.wb110 (id, payload) values (65000, 'replica-backdated') $$,
@@ -76,9 +76,9 @@ select throws_like(
 -- control: the role is not what refused those. The same session writes an UNBLOCKED sibling fine.
 select lives_ok(
   $$ insert into public.wb110 (id, payload) values (85000, 'replica-control') $$,
-  'witness: the same replica-role session can write into a sibling that is not write-blocked');
+  'LIVENESS: the same replica-role session can write into a sibling that is not write-blocked');
 select is((select payload from public.wb110 where id = 85000), 'replica-control',
-  'witness: and that control row landed, so replica mode itself refuses nothing here');
+  'LIVENESS: and that control row landed, so replica mode itself refuses nothing here');
 select pgpm_formal.wrote('public.wb110', 'id = 85000');
 
 select is(
@@ -93,7 +93,7 @@ select is((select payload from public.wb110 where id = 42), 'x',
 -- tick and _install_write_block returns early when the trigger exists, so that early return is where an
 -- existing block is repaired: for the triggers, the first maintain tick after the upgrade IS the upgrade.
 reset session_replication_role;
-select is(current_setting('session_replication_role'), 'origin', 'witness: back in origin mode');
+select is(current_setting('session_replication_role'), 'origin', 'LIVENESS: back in origin mode');
 
 do $$ begin
   execute format('alter table public.%I enable trigger pgpm_write_block',
@@ -102,7 +102,7 @@ end $$;
 select is(
   (select t.tgenabled::text from pg_trigger t where t.tgname = 'pgpm_write_block'
      and t.tgrelid = ('public.' || (select child_name from pgpm_test110.names where lo = '0'))::regclass),
-  'O', 'witness: the monolith''s block is back in the origin-only state an older pgpm left it in');
+  'O', 'LIVENESS: the monolith''s block is back in the origin-only state an older pgpm left it in');
 
 call pgpm.maintain('public.wb110');
 select is(
@@ -128,12 +128,12 @@ create table pgpm_test110.rc as
 
 select is(
   pgpm.regrain_step('public.rc110', (select child_name from pgpm_test110.rc), '100', 50),
-  'prepared', 'setup: the first regrain tick installs change capture on the frozen monolith');
+  'prepared', 'fixture: the first regrain tick installs change capture on the frozen monolith');
 
 select ok(
   exists (select 1 from pg_trigger t where t.tgname = 'pgpm_regrain_capture'
             and t.tgrelid = ('public.' || (select child_name from pgpm_test110.rc))::regclass),
-  'setup: the source child carries the capture trigger');
+  'fixture: the source child carries the capture trigger');
 
 select is(
   (select t.tgenabled::text from pg_trigger t where t.tgname = 'pgpm_regrain_capture'
@@ -145,16 +145,16 @@ select is(
 -- through capture and reconcile.
 select ok(
   pgpm.regrain_step('public.rc110', (select child_name from pgpm_test110.rc), '100', 50) like 'copied:%',
-  'setup: the second tick copies');
+  'fixture: the second tick copies');
 select cmp_ok(
   (select regrain_cursor::numeric from pgpm.config where parent_table = 'public.rc110'::regclass),
   '>=', 100::numeric,
-  'witness: the cursor is past 100, so sub-range [0,100), holding keys 20, 25 and 30, is already copied');
+  'LIVENESS: the cursor is past 100, so sub-range [0,100), holding keys 20, 25 and 30, is already copied');
 select is((select count(*)::int from public.rc110_pgpm_regrain_delta), 0,
-  'witness: the delta is empty before the replica-role writes');
+  'LIVENESS: the delta is empty before the replica-role writes');
 
 set session_replication_role = replica;
-select is(current_setting('session_replication_role'), 'replica', 'witness: replica mode again');
+select is(current_setting('session_replication_role'), 'replica', 'LIVENESS: replica mode again');
 
 -- asymmetric: one UPDATE (key 20), one INSERT (key 25), one DELETE (key 30). Three keys and three
 -- operations, so a capture that missed one cannot be masked by another.
@@ -165,11 +165,11 @@ select pgpm_formal.wrote('public.rc110', 'id in (20, 25)');
 select pgpm_formal.deleted('public.rc110', 'id = 30');
 
 select is((select payload from public.rc110 where id = 20), 'replica-edit',
-  'witness: the replica-role UPDATE landed in the source');
+  'LIVENESS: the replica-role UPDATE landed in the source');
 select ok(exists (select 1 from public.rc110 where id = 25),
-  'witness: the replica-role INSERT landed in the source');
+  'LIVENESS: the replica-role INSERT landed in the source');
 select ok(not exists (select 1 from public.rc110 where id = 30),
-  'witness: the replica-role DELETE landed in the source');
+  'LIVENESS: the replica-role DELETE landed in the source');
 
 select is(
   (select string_agg(id::text, ',' order by id, pgpm_seq) from public.rc110_pgpm_regrain_delta),
@@ -177,7 +177,7 @@ select is(
   'the capture trigger recorded every replica-role change by key: UPDATE old+new (20,20), INSERT 25, DELETE 30');
 
 reset session_replication_role;
-select is(current_setting('session_replication_role'), 'origin', 'witness: origin mode again');
+select is(current_setting('session_replication_role'), 'origin', 'LIVENESS: origin mode again');
 
 -- drive to the swap: the captured keys are reconciled from the source, then the fine children go live
 do $$ declare s text; n int := 0; begin

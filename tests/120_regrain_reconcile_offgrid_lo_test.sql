@@ -90,7 +90,7 @@ select is(
   0, 'nothing was treated as aged: no regrain_reconcile_aged row (no retention policy, so no aged range exists)');
 select is(
   (select rows from pgpm.log where parent_table = 'public.rfa'::regclass and action = 'regrain_reconcile'),
-  4::bigint, 'WITNESS: the regrain_reconcile row says all 4 captured keys were consumed');
+  4::bigint, 'LIVENESS: the regrain_reconcile row says all 4 captured keys were consumed');
 -- and they landed in the fine child the swap will attach, by identity, before the swap
 select is((select payload from public.rfa_p0000000000000020000 where id = 20050), 'inserted',
   'before the swap: 20050 (the INSERT) is in the fine child with its payload');
@@ -114,7 +114,7 @@ select is(
   (select c.relname from pg_inherits i join pg_class c on c.oid = i.inhrelid
     where i.inhparent = 'public.rfa'::regclass and c.relname = 'rfa_p0000000000000020000'),
   'rfa_p0000000000000020000'::name,
-  'WITNESS: the attached fine child is the one pgpm.part recorded, by name');
+  'LIVENESS: the attached fine child is the one pgpm.part recorded, by name');
 select is(
   (select child_oid from pgpm.part where parent_table = 'public.rfa'::regclass and child_name = 'rfa_p0000000000000020000'),
   'public.rfa_p0000000000000020000'::regclass::oid,
