@@ -110,10 +110,10 @@ reports a declaration that matched nothing as `UnusedExpectation`, identity `<in
 |---|---|---|---|
 | `NoLostRow` | every baseline row not deleted by the test and not aged out (control value at or past the horizon, or no `retain_drop`, `regrain_aged` or `retain_crossing` logged over a range holding it) is visible through its parent, in a relation `operator_owns` names for that parent, in a partition pgpm holds in custody (a `retiring_at` mark with `detach_dispatched_oid` naming it, out of the parent), or in one pgpm's recall released (`retain_disown` logged over its range) | ledger, catalog, `pgpm.part`, `pgpm.config`, `pgpm.log` | files without a baseline; rows written by sessions the test did not record; a parent that is gone (the promise lasts while the parent does) |
 | `NoDuplicateRow` | no baseline identity is visible twice through the parent or across parent and custody | ledger, catalog | files without a baseline; keyless tables whose duplicate rows are equal (counted by multiplicity there) |
-| `DropOnlyCovered` | with an archive strategy set, every baseline row that is gone and was below the horizon is named by a retired ledger chunk whose range holds it and whose `child_oid` is a relation the drop history shows pgpm dropped | ledger, `pgpm.archive_ledger`, drop history | object contents (that is `ArchiveNoClobber`'s); files without an archive strategy |
+| `DropOnlyCovered` | with an archive strategy in force at the drop that took it (the one the parent's config named when the drop ran, today's where no recorded drop ranges over the row), every baseline row that is gone and was below the horizon is named by a retired ledger chunk whose range holds it and whose `child_oid` is a relation the drop history shows pgpm dropped | ledger, `pgpm.archive_ledger`, drop history | object contents (that is `ArchiveNoClobber`'s); files without an archive strategy |
 | `ArchiveNoClobber` | every retired chunk's object still holds every row the chunk recorded, as many copies of a keyless row as aged out | the store listing below | every track but the archive track |
-| `ResolveByRecord` | no relation `operator_owns` names is gone or detached, unless the test did it; every drop the history attributes to pgpm is of a relation pgpm's catalog named (when it dropped it, or at any earlier DDL statement or drop) or pgpm created | drop, `ALTER TABLE` and creation history, `operator_owns`, catalog | a wrong DETACH that a later step undid; a drop of one pgpm partition meant for another (both recorded) |
-| `NoWedge`, state conjuncts | a retired chunk's relation is gone; no regrain copy (a not-attached `pgpm.part` row) lies outside every attached partition pgpm records; no retirement mark whose dispatch pgpm recorded stands on a partition still attached and not pending, its anchors agreeing with it (name, `child_oid`, `retiring_oid`), with no recall under way and no `pgpm_detach` job holding its command | `pgpm.archive_ledger`, `pgpm.part`, catalog, `cron.job` where readable (absent: no job can hold it) | the event conjuncts (a collision, a spurious refusal, a raised step, a silent candidate, a wasted turn, an upgrade holding its own chunk): layer C's; a mark with no recorded dispatch, which the next tick re-dispatches or reports (`fail_retain_detach`); a mark whose anchors disagree with the relation, which pgpm refuses on identity every tick (`fail_retain_identity`, tests/204 C, tests/361 D and E); marks where `cron.job` exists but cannot be read |
+| `ResolveByRecord` | no relation `operator_owns` names is gone or detached, unless the test did it; every drop the history attributes to pgpm is of a relation pgpm's catalog named (when it dropped it, or at any earlier DDL statement or drop), pgpm created, or `pgpm_hypertable`'s table comment marks as a copy or delta (marker and suffix, as uninstall's sweeps read it) | drop, `ALTER TABLE` and creation history, `operator_owns`, catalog | a wrong DETACH that a later step undid; a drop of one pgpm partition meant for another (both recorded) |
+| `NoWedge`, state conjuncts | a retired chunk's relation is gone; no regrain copy (a not-attached `pgpm.part` row) lies outside every attached partition pgpm records; no retirement mark whose dispatch pgpm recorded stands on a partition still attached and not pending, its anchors agreeing with it (name, `child_oid`, `retiring_oid`), with no recall under way and no `pgpm_detach` job holding its command | `pgpm.archive_ledger`, `pgpm.part`, catalog, `cron.job` where readable (absent: no job can hold it) | a regrain copy of a parent that is gone (its `pgpm.part` row outlives it under a dangling oid); the event conjuncts (a collision, a spurious refusal, a raised step, a silent candidate, a wasted turn, an upgrade holding its own chunk): layer C's; a mark with no recorded dispatch, which the next tick re-dispatches or reports (`fail_retain_detach`); a mark whose anchors disagree with the relation, which pgpm refuses on identity every tick (`fail_retain_identity`, tests/204 C, tests/361 D and E); marks where `cron.job` exists but cannot be read |
 
 `ArchiveNoClobber` needs object contents, which SQL cannot read: `pgpm_archive` has no read path, and judging
 the archive with its own code would be the code under test grading itself. The archive track's harness lists
@@ -385,9 +385,9 @@ Each of these is folded into the sections above; the list is here so a reader of
   documented refusals it would otherwise report as wedges (tests/204 C, tests/361 D and E).
 - **The judged summary is `judged()`**, not extra rows of `check()`, and its `expected` column counts the file's
   declarations per invariant; `check([scope])` takes the parents to judge.
-- **A gone parent is not judged** for `NoLostRow`, and a file that loosens its horizon after a drop sees the rows
-  that drop took reported as lost: the oracle reads today's horizon, not the one the drop ran under. Such a file
-  declares them.
+- **A gone parent is not judged** for `NoLostRow` (and, since W6, for `NoWedge`'s copy conjunct), and a file that
+  loosens its horizon after a drop sees the rows that drop took reported as lost: the oracle reads today's horizon,
+  not the one the drop ran under. Such a file declares them. (The archive strategy's counterpart is retired in W6.)
 - **The control value is decoded by pgpm's own `_col_to_native`.** That is pgpm's code grading pgpm, in one narrow
   place; measurement 3 checks it against values the test wrote, for every kind, which is what keeps it honest.
 - **W3: event triggers ignore temporary tables.** Creating or dropping a temporary table no longer reads pgpm's
@@ -464,6 +464,29 @@ The wiring is above ("Wiring"); what running it found:
 - **Not done in W4: the seven files that drop their own parents** (tests/60, 77, 78, 79, 105, 106, 116). Calling
   `check()` inside them before their cleanup means a new pgTAP assertion, and report mode adds none, so they stay
   unjudged for the row invariants and W6 decides. Their structural checks run after the file like every other's.
+
+### What W6 changed
+
+W6 ran every custody file under the oracle and had each reported violation judged by an independent verifier. Three
+were states the file builds on purpose, declared in the file; four were the oracle's own false positives, fixed here,
+each with a self-test case clean only with the fix and an `oracle_*` mutation that puts the defect back.
+
+- **Declared:** tests/223 B's operator DEFAULT the untransmute drops (`ResolveByRecord`, no parent of record),
+  tests/327's four operator detaches `_detach_reap` finishes (`ResolveByRecord`), and tests/archive/db/40's six rows
+  its closing cleanup deletes from the bucket (`ArchiveNoClobber`). tests/223 joins `custody_files.txt` as not
+  baselined, and `bench/untransmute_drop_dependants.sh` installs the oracle.
+- **`NoWedge` does not judge a regrain copy whose parent is gone** (tests/276's closing `drop owned by`); a live
+  parent with no attached source is still reported (`oracle_nowedge_gone_parent_judged`).
+- **`pgpm_hypertable`'s comment record anchors a relation** (tests/348 S4 S5): a `_pgpm_delta` or `_pgpm_dest` table
+  whose comment carries the module's marker is noted when the `COMMENT` runs (the DDL trigger now fires on it), so
+  uninstall's sweep is a recorded drop; an unmarked lookalike is still reported (`oracle_comment_record_unread`).
+- **A text_time key with no native value is placed by text order** (tests/389): against the retired chunks', the
+  retention ranges' and the horizon's bounds encoded by pgpm's `_encode`, compared in `"C"`; one gone with no range
+  over it is still lost (`oracle_unshaped_key_unplaced`).
+- **`DropOnlyCovered` judges a drop by the strategy in force when it ran** (tests/59 retains under none and sets one
+  after). The `sql_drop` trigger records the dropped partition's `pgpm.part` range and whether its parent's config
+  named an `archive_fn` then; `retire()` drops before it deletes that row. No trigger on `pgpm.config`, which would be
+  a `pg_depend` edge pgpm's uninstall refuses (`oracle_droponlycovered_todays_strategy`).
 
 ## Out of scope
 
