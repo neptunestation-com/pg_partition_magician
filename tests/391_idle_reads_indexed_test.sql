@@ -48,8 +48,10 @@ $$;
 -- relation that exists, over [0, 100)'s range (the orphan query discards it).
 create table t391.a (id bigint primary key, payload text not null);
 insert into t391.a select g, 'old' || g from generate_series(1, 90) g;
+select pgpm_formal.baseline('t391.a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('t391.a', 'id', 100, p_retain => 100::bigint, p_paused => true);
 insert into t391.a values (450, 'frontier');
+select pgpm_formal.wrote('t391.a', 'id = 450');
 select pgpm.set_archive_fn('t391.a', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 create table t391.elsewhere (id bigint);
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, retired_at, child_oid)
@@ -94,9 +96,11 @@ select ok(exists (select 1 from pg_index i join pg_class c on c.oid = i.indexrel
 -- row of this parent's, for another relation, so the lookup has a row of its own kind to read past.
 create table t391.ob (id bigint primary key, v text);
 insert into t391.ob values (5, 'a'), (50, 'b');
+select pgpm_formal.baseline('t391.ob');
 call pgpm.transmute('t391.ob', 'id', 100, p_obtain => 3);
 create view t391.ob_p0000000000000000500 as select 1 as squatter;
 insert into t391.ob values (350, 'c');
+select pgpm_formal.wrote('t391.ob', 'id = 350');
 create table t391.other (id bigint);
 insert into pgpm.log (parent_table, action, lo, hi, method)
   select 't391.other'::regclass, 'skip_obtain', g::text, g::text, repeat('x', 60) from generate_series(1, 100000) g;

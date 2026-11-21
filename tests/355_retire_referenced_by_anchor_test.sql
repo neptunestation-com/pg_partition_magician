@@ -102,8 +102,10 @@ create table public.ra355_d2 partition of public.ra355_dummy for values from (10
 
 create table public.ra355 (id bigint primary key, payload text);
 insert into public.ra355 values (101, 'a'), (102, 'b');
+select pgpm_formal.baseline('public.ra355');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ra355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.ra355 values (600, 'frontier');
+select pgpm_formal.wrote('public.ra355', 'id = 600');
 create table public.ra355_ref (id bigint primary key, f_id bigint references public.ra355 (id));
 insert into public.ra355_ref values (1, 600);
 select child_name as a_cell, child_oid as a_cell_oid from pgpm.part
@@ -116,6 +118,8 @@ create table ra355_ops.:"a_cell" (id bigint primary key, payload text);
 insert into ra355_ops.:"a_cell" values (5005, 'operator');
 alter table public.ra355 attach partition ra355_ops.:"a_cell" for values from (5000) to (5100);
 select to_regclass(format('ra355_ops.%I', :'a_cell'))::oid as a_ops_oid \gset
+select pgpm_formal.operator_owns(format('ra355_ops.%I', :'a_cell')::regclass);
+select pgpm_formal.wrote('public.ra355', 'id = 5005');
 
 select ok((select i.inhrelid from pg_inherits i join pg_class c on c.oid = i.inhrelid
             where i.inhparent = 'public.ra355'::regclass and c.relname = :'a_cell' limit 1) = :a_ops_oid
@@ -160,8 +164,10 @@ update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
 -- hand, and a namesake of the operator's in another schema attached to B1
 create table public.rb355 (id bigint primary key, payload text);
 insert into public.rb355 values (111, 'a'), (112, 'b');
+select pgpm_formal.baseline('public.rb355');
 call pgpm.transmute('public.rb355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rb355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rb355', 'id = 600');
 create table public.rb355_ref (id bigint primary key, f_id bigint references public.rb355 (id));
 insert into public.rb355_ref values (1, 600);
 select child_name as b_cell, child_oid as b_cell_oid from pgpm.part
@@ -173,10 +179,13 @@ select is((select command from cron.job where jobname = 'pgpm_detach'),
 select command from cron.job
  where jobname = 'pgpm_detach' and command = format('alter table public.rb355 detach partition public.%I concurrently', :'b_cell') \gexec
 drop table public.:"b_cell";
+select pgpm_formal.deleted('public.rb355', 'id in (111, 112)');   -- the test's own drop of the detached cell
 create schema rb355_ops;
 create table rb355_ops.:"b_cell" (id bigint primary key, payload text);
 insert into rb355_ops.:"b_cell" values (7007, 'operator');
 alter table public.rb355 attach partition rb355_ops.:"b_cell" for values from (7000) to (7100);
+select pgpm_formal.operator_owns(format('rb355_ops.%I', :'b_cell')::regclass);
+select pgpm_formal.wrote('public.rb355', 'id = 7007');
 select is(pgpm.retire('public.rb355', :'b_cell'), false, 'LIVENESS: retire() of B1''s cell refuses');
 select ok((select retiring_at is not null from pgpm.part where parent_table = 'public.rb355'::regclass and child_name = :'b_cell')
           and exists (select 1 from pgpm.log where parent_table = 'public.rb355'::regclass and lo = '100'
@@ -189,8 +198,10 @@ select ok(exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhre
 -- parent B2: an aged referenced cell of 3 rows, whose retirement sorts after B1's mark
 create table public.rc355 (id bigint primary key, payload text);
 insert into public.rc355 values (301, 'a'), (302, 'b'), (303, 'c');
+select pgpm_formal.baseline('public.rc355');
 call pgpm.transmute('public.rc355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rc355 values (900, 'frontier');
+select pgpm_formal.wrote('public.rc355', 'id = 900');
 create table public.rc355_ref (id bigint primary key, f_id bigint references public.rc355 (id));
 insert into public.rc355_ref values (1, 900);
 select child_name as c_cell, child_oid as c_cell_oid from pgpm.part
@@ -216,8 +227,10 @@ update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
 -- ============================ PART C: an older retire()'s mark on the namesake, at the upgrade ============================
 create table public.rcc355 (id bigint primary key, payload text);
 insert into public.rcc355 values (121, 'a'), (122, 'b');
+select pgpm_formal.baseline('public.rcc355');
 call pgpm.transmute('public.rcc355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rcc355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rcc355', 'id = 600');
 create table public.rcc355_ref (id bigint primary key, f_id bigint references public.rcc355 (id));
 insert into public.rcc355_ref values (1, 600);
 select child_name as cc_cell, child_oid as cc_cell_oid from pgpm.part
@@ -227,6 +240,8 @@ create table rcc355_ops.:"cc_cell" (id bigint primary key, payload text);
 insert into rcc355_ops.:"cc_cell" values (8008, 'operator');
 alter table public.rcc355 attach partition rcc355_ops.:"cc_cell" for values from (8000) to (8100);
 select to_regclass(format('rcc355_ops.%I', :'cc_cell'))::oid as cc_ops_oid \gset
+select pgpm_formal.operator_owns(:cc_ops_oid::oid::regclass);
+select pgpm_formal.wrote('public.rcc355', 'id = 8008');
 select is(pgpm.retire('public.rcc355', :'cc_cell'), false, 'LIVENESS: C''s retirement is under way');
 -- fixture: the mark as a retire() older than this fix wrote it, the namesake recorded and its detach armed
 update pgpm.part set retiring_oid = :cc_ops_oid, detach_dispatched_oid = :cc_ops_oid
@@ -244,8 +259,10 @@ create table public.rd355_d1 partition of public.rd355_dummy for values from (0)
 create table public.rd355_d2 partition of public.rd355_dummy for values from (10) to (20);
 create table public.rd355 (id bigint primary key, payload text);
 insert into public.rd355 values (131, 'a'), (132, 'b');
+select pgpm_formal.baseline('public.rd355');
 call pgpm.transmute('public.rd355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rd355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rd355', 'id = 600');
 select child_name as d_cell, child_oid as d_cell_oid from pgpm.part
  where parent_table = 'public.rd355'::regclass and lo = '100' \gset
 drop table public.rd355_dummy;
@@ -255,6 +272,8 @@ create table rd355_ops.:"d_cell" (id bigint primary key, payload text);
 insert into rd355_ops.:"d_cell" values (9009, 'operator');
 alter table public.rd355 attach partition rd355_ops.:"d_cell" for values from (9000) to (9100);
 select to_regclass(format('rd355_ops.%I', :'d_cell'))::oid as d_ops_oid \gset
+select pgpm_formal.operator_owns(:d_ops_oid::oid::regclass);
+select pgpm_formal.wrote('public.rd355', 'id = 9009');
 -- fixture: the row as an install older than child_oid left it
 update pgpm.part set child_oid = null where parent_table = 'public.rd355'::regclass and child_name = :'d_cell';
 select ok(exists (select 1 from pg_inherits where inhparent = 'public.rd355'::regclass and inhrelid = :d_ops_oid)
@@ -265,17 +284,22 @@ select ok(exists (select 1 from pg_inherits where inhparent = 'public.rd355'::re
 create schema rf355_ops;
 create table public.rf355 (id bigint primary key, payload text);
 insert into public.rf355 values (151, 'a'), (152, 'b');
+select pgpm_formal.baseline('public.rf355');
 call pgpm.transmute('public.rf355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rf355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rf355', 'id = 600');
 select child_name as f_cell from pgpm.part where parent_table = 'public.rf355'::regclass and lo = '100' \gset
 -- fixture: the row as an install older than child_oid left it, its partition dropped by hand, and the operator's own
 -- table attached under the name in another schema over another range
 update pgpm.part set child_oid = null where parent_table = 'public.rf355'::regclass and child_name = :'f_cell';
 drop table public.:"f_cell";
+select pgpm_formal.deleted('public.rf355', 'id in (151, 152)');   -- the test's own drop
 create table rf355_ops.:"f_cell" (id bigint primary key, payload text);
 insert into rf355_ops.:"f_cell" values (9701, 'operator'), (9702, 'operator');
 alter table public.rf355 attach partition rf355_ops.:"f_cell" for values from (9700) to (9800);
 select to_regclass(format('rf355_ops.%I', :'f_cell'))::oid as f_ops_oid \gset
+select pgpm_formal.operator_owns(:f_ops_oid::oid::regclass);
+select pgpm_formal.wrote('public.rf355', 'id in (9701, 9702)');
 select ok((select count(*) = 1 and bool_and(i.inhrelid = :f_ops_oid) from pg_inherits i join pg_class c on c.oid = i.inhrelid
             where i.inhparent = 'public.rf355'::regclass and c.relname = :'f_cell')
           and (select child_oid is null and attached and lo = '100' and hi = '200' from pgpm.part
@@ -285,8 +309,10 @@ select ok((select count(*) = 1 and bool_and(i.inhrelid = :f_ops_oid) from pg_inh
 -- ============================ PART H: an int4 grid's bare bounds, at the upgrade ============================
 create table public.rh355 (id integer primary key, payload text);
 insert into public.rh355 values (161, 'a'), (162, 'b');
+select pgpm_formal.baseline('public.rh355');
 call pgpm.transmute('public.rh355', 'id', 100, p_obtain => 4, p_paused => true);
 insert into public.rh355 values (361, 'c');
+select pgpm_formal.wrote('public.rh355', 'id = 361');
 select monolith_oid as h_mono_oid from pgpm.config where parent_table = 'public.rh355'::regclass \gset
 select string_agg(child_name || '=' || child_oid, ',' order by lo::numeric) as h_anchors from pgpm.part
  where parent_table = 'public.rh355'::regclass and attached \gset
@@ -302,14 +328,19 @@ select ok((select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.oid
 -- K: the operator's table in the parent's schema, attached
 create table public.rk355 (id bigint primary key, payload text);
 insert into public.rk355 values (191, 'a'), (192, 'b');
+select pgpm_formal.baseline('public.rk355');
 call pgpm.transmute('public.rk355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rk355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rk355', 'id = 600');
 select child_name as k_cell from pgpm.part where parent_table = 'public.rk355'::regclass and lo = '100' \gset
 update pgpm.part set child_oid = null where parent_table = 'public.rk355'::regclass and child_name = :'k_cell';
 drop table public.:"k_cell";
+select pgpm_formal.deleted('public.rk355', 'id in (191, 192)');   -- the test's own drop
 create table public.:"k_cell" (id bigint primary key, payload text);
 insert into public.:"k_cell" values (9811, 'operator'), (9812, 'operator');
 alter table public.rk355 attach partition public.:"k_cell" for values from (9810) to (9820);
+select pgpm_formal.operator_owns(format('public.%I', :'k_cell')::regclass);
+select pgpm_formal.wrote('public.rk355', 'id in (9811, 9812)');
 -- the parent is referenced, so retirement takes the detach path
 create table public.rk355_ref (id bigint primary key, f_id bigint references public.rk355 (id));
 insert into public.rk355_ref values (1, 600);
@@ -326,14 +357,19 @@ select ok((select child_oid is null and retiring_oid = :k_ops_oid from pgpm.part
 create schema rl355_ops;
 create table public.rl355 (id bigint primary key, payload text);
 insert into public.rl355 values (191, 'a'), (192, 'b');
+select pgpm_formal.baseline('public.rl355');
 call pgpm.transmute('public.rl355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rl355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rl355', 'id = 600');
 select child_name as l_cell from pgpm.part where parent_table = 'public.rl355'::regclass and lo = '100' \gset
 update pgpm.part set child_oid = null where parent_table = 'public.rl355'::regclass and child_name = :'l_cell';
 drop table public.:"l_cell";
+select pgpm_formal.deleted('public.rl355', 'id in (191, 192)');   -- the test's own drop
 create table rl355_ops.:"l_cell" (id bigint primary key, payload text);
 insert into rl355_ops.:"l_cell" values (9821, 'operator'), (9822, 'operator');
 alter table public.rl355 attach partition rl355_ops.:"l_cell" for values from (9820) to (9830);
+select pgpm_formal.operator_owns(format('rl355_ops.%I', :'l_cell')::regclass);
+select pgpm_formal.wrote('public.rl355', 'id in (9821, 9822)');
 -- the parent is referenced, so retirement takes the detach path
 create table public.rl355_ref (id bigint primary key, f_id bigint references public.rl355 (id));
 insert into public.rl355_ref values (1, 600);
@@ -347,14 +383,19 @@ select ok(to_regclass(format('public.%I', :'l_cell')) is null
 -- M: as K, after pg_cron ran the armed detach of the operator's table
 create table public.rm355 (id bigint primary key, payload text);
 insert into public.rm355 values (191, 'a'), (192, 'b');
+select pgpm_formal.baseline('public.rm355');
 call pgpm.transmute('public.rm355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rm355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rm355', 'id = 600');
 select child_name as m_cell from pgpm.part where parent_table = 'public.rm355'::regclass and lo = '100' \gset
 update pgpm.part set child_oid = null where parent_table = 'public.rm355'::regclass and child_name = :'m_cell';
 drop table public.:"m_cell";
+select pgpm_formal.deleted('public.rm355', 'id in (191, 192)');   -- the test's own drop
 create table public.:"m_cell" (id bigint primary key, payload text);
 insert into public.:"m_cell" values (9831, 'operator'), (9832, 'operator');
 alter table public.rm355 attach partition public.:"m_cell" for values from (9830) to (9840);
+select pgpm_formal.operator_owns(format('public.%I', :'m_cell')::regclass);
+select pgpm_formal.wrote('public.rm355', 'id in (9831, 9832)');
 -- the parent is referenced, so retirement takes the detach path
 create table public.rm355_ref (id bigint primary key, f_id bigint references public.rm355 (id));
 insert into public.rm355_ref values (1, 600);
@@ -466,8 +507,10 @@ create table re355_own.re355_d1 partition of re355_own.re355_dummy for values fr
 create table re355_own.re355_d2 partition of re355_own.re355_dummy for values from (10) to (20);
 create table re355_own.re355 (id bigint primary key, payload text);
 insert into re355_own.re355 values (141, 'a'), (142, 'b');
+select pgpm_formal.baseline('re355_own.re355');
 call pgpm.transmute('re355_own.re355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into re355_own.re355 values (600, 'frontier');
+select pgpm_formal.wrote('re355_own.re355', 'id = 600');
 select child_name as e_cell, child_oid as e_cell_oid from pgpm.part
  where parent_table = 're355_own.re355'::regclass and lo = '100' \gset
 drop table re355_own.re355_dummy;
@@ -476,6 +519,8 @@ create table re355_ops.:"e_cell" (id bigint primary key, payload text);
 insert into re355_ops.:"e_cell" values (9505, 'operator');
 alter table re355_own.re355 attach partition re355_ops.:"e_cell" for values from (9500) to (9600);
 select to_regclass(format('re355_ops.%I', :'e_cell'))::oid as e_ops_oid \gset
+select pgpm_formal.operator_owns(:e_ops_oid::oid::regclass);
+select pgpm_formal.wrote('re355_own.re355', 'id = 9505');
 -- fixture: an unanchored row, as the backfill leaves one it could not resolve
 update pgpm.part set child_oid = null where parent_table = 're355_own.re355'::regclass and child_name = :'e_cell';
 select ok((select n.nspname from pg_inherits i join pg_class c on c.oid = i.inhrelid
@@ -494,17 +539,22 @@ select ok(not exists (select 1 from pg_class where oid = :e_cell_oid)
 -- ============================ PART G: the namesake in the parent's own schema ============================
 create table public.rg355 (id bigint primary key, payload text);
 insert into public.rg355 values (181, 'a'), (182, 'b');
+select pgpm_formal.baseline('public.rg355');
 call pgpm.transmute('public.rg355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rg355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rg355', 'id = 600');
 select child_name as g_cell from pgpm.part where parent_table = 'public.rg355'::regclass and lo = '100' \gset
 -- fixture: an unanchored row, its partition dropped by hand, the operator's own table created under the name in the
 -- parent's schema and attached over another range
 update pgpm.part set child_oid = null where parent_table = 'public.rg355'::regclass and child_name = :'g_cell';
 drop table public.:"g_cell";
+select pgpm_formal.deleted('public.rg355', 'id in (181, 182)');   -- the test's own drop
 create table public.:"g_cell" (id bigint primary key, payload text);
 insert into public.:"g_cell" values (9801, 'operator'), (9802, 'operator');
 alter table public.rg355 attach partition public.:"g_cell" for values from (9800) to (9900);
 select to_regclass(format('public.%I', :'g_cell'))::oid as g_ops_oid \gset
+select pgpm_formal.operator_owns(:g_ops_oid::oid::regclass);
+select pgpm_formal.wrote('public.rg355', 'id in (9801, 9802)');
 select ok(pgpm._child_nsp('public.rg355', :'g_cell') = 'public'
           and exists (select 1 from pg_inherits where inhparent = 'public.rg355'::regclass and inhrelid = :g_ops_oid),
   'LIVENESS: G''s unanchored row resolves to the parent''s schema, where the name is the operator''s partition');
@@ -521,14 +571,17 @@ select ok(exists (select 1 from pg_inherits where inhparent = 'public.rg355'::re
           and (select string_agg(id::text, ',' order by id) from public.rg355 where id >= 9800) = '9801,9802',
   'G: the operator''s table stands, a partition with both its rows');
 select lives_ok($$insert into public.rg355 values (9803, 'written')$$, 'G: and takes writes');
+select pgpm_formal.wrote('public.rg355', 'id = 9803');
 
 -- ============================ PART I: a moved int4 parent's unanchored row ============================
 create schema ri355_old;
 create schema ri355_new;
 create table ri355_old.ri355 (id integer primary key, payload text);
 insert into ri355_old.ri355 values (171, 'a'), (172, 'b');
+select pgpm_formal.baseline('ri355_old.ri355');
 call pgpm.transmute('ri355_old.ri355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into ri355_old.ri355 values (600, 'frontier');
+select pgpm_formal.wrote('ri355_old.ri355', 'id = 600');
 select child_name as i_cell, child_oid as i_cell_oid from pgpm.part
  where parent_table = 'ri355_old.ri355'::regclass and lo = '100' \gset
 update pgpm.part set child_oid = null where parent_table = 'ri355_old.ri355'::regclass and child_name = :'i_cell';
@@ -546,8 +599,10 @@ select ok(not exists (select 1 from pg_class where oid = :i_cell_oid)
 -- ============================ PART J: adopt_partition over a bare bound ============================
 create table public.rj355 (id integer primary key, payload text);
 insert into public.rj355 values (101, 'a');
+select pgpm_formal.baseline('public.rj355');
 call pgpm.transmute('public.rj355', 'id', 100, p_obtain => 4, p_paused => true);
 insert into public.rj355 values (381, 'c');
+select pgpm_formal.wrote('public.rj355', 'id = 381');
 select child_name as j_cell, child_oid as j_cell_oid from pgpm.part
  where parent_table = 'public.rj355'::regclass and lo = '300' \gset
 delete from pgpm.part where parent_table = 'public.rj355'::regclass and lo = '300';
@@ -562,14 +617,19 @@ select is((select format('%s|%s|%s', lo, hi, child_oid = :j_cell_oid) from pgpm.
 -- ============================ PART N: the mark judged by retire() itself ============================
 create table public.rn355 (id bigint primary key, payload text);
 insert into public.rn355 values (191, 'a'), (192, 'b');
+select pgpm_formal.baseline('public.rn355');
 call pgpm.transmute('public.rn355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rn355 values (600, 'frontier');
+select pgpm_formal.wrote('public.rn355', 'id = 600');
 select child_name as n_cell from pgpm.part where parent_table = 'public.rn355'::regclass and lo = '100' \gset
 update pgpm.part set child_oid = null where parent_table = 'public.rn355'::regclass and child_name = :'n_cell';
 drop table public.:"n_cell";
+select pgpm_formal.deleted('public.rn355', 'id in (191, 192)');   -- the test's own drop
 create table public.:"n_cell" (id bigint primary key, payload text);
 insert into public.:"n_cell" values (9841, 'operator'), (9842, 'operator');
 alter table public.rn355 attach partition public.:"n_cell" for values from (9840) to (9850);
+select pgpm_formal.operator_owns(format('public.%I', :'n_cell')::regclass);
+select pgpm_formal.wrote('public.rn355', 'id in (9841, 9842)');
 -- the parent is referenced, so retirement takes the detach path
 create table public.rn355_ref (id bigint primary key, f_id bigint references public.rn355 (id));
 insert into public.rn355_ref values (1, 600);
@@ -596,8 +656,10 @@ update cron.job set command = 'select 1' where jobname = 'pgpm_detach';
 -- ============================ PART O: an unanchored row's own retirement completes ============================
 create table public.ro355 (id bigint primary key, payload text);
 insert into public.ro355 values (195, 'a'), (196, 'b');
+select pgpm_formal.baseline('public.ro355');
 call pgpm.transmute('public.ro355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.ro355 values (600, 'frontier');
+select pgpm_formal.wrote('public.ro355', 'id = 600');
 create table public.ro355_ref (id bigint primary key, f_id bigint references public.ro355 (id));
 insert into public.ro355_ref values (1, 600);
 select child_name as o_cell, child_oid as o_cell_oid from pgpm.part
@@ -632,15 +694,20 @@ select is((select string_agg(id::text, ',' order by id) from public.ro355), '600
 -- ============================ PART P: regrain's source for an unanchored row ============================
 create table public.rp355 (id bigint primary key, payload text);
 insert into public.rp355 values (321, 'a'), (322, 'b');
+select pgpm_formal.baseline('public.rp355');
 call pgpm.transmute('public.rp355', 'id', 100, p_obtain => 6, p_paused => true);
 insert into public.rp355 values (650, 'frontier');
+select pgpm_formal.wrote('public.rp355', 'id = 650');
 select child_name as p_cell from pgpm.part where parent_table = 'public.rp355'::regclass and lo = '300' and attached \gset
 update pgpm.part set child_oid = null where parent_table = 'public.rp355'::regclass and child_name = :'p_cell';
 drop table public.:"p_cell";
+select pgpm_formal.deleted('public.rp355', 'id in (321, 322)');   -- the test's own drop
 create table public.:"p_cell" (id bigint primary key, payload text);
 insert into public.:"p_cell" values (9851, 'operator'), (9852, 'operator');
 alter table public.rp355 attach partition public.:"p_cell" for values from (9850) to (9860);
 select to_regclass(format('public.%I', :'p_cell'))::oid as p_ops_oid \gset
+select pgpm_formal.operator_owns(:p_ops_oid::oid::regclass);
+select pgpm_formal.wrote('public.rp355', 'id in (9851, 9852)');
 select ok((select child_oid is null from pgpm.part where parent_table = 'public.rp355'::regclass and child_name = :'p_cell')
           and exists (select 1 from pg_inherits where inhparent = 'public.rp355'::regclass and inhrelid = :p_ops_oid),
   'LIVENESS: P''s unanchored row''s name denotes the operator''s partition over [9850, 9860)');
@@ -659,17 +726,22 @@ select ok(exists (select 1 from pg_class where oid = :p_ops_oid)
 -- ============================ PART Q: _is_write_blocked for an unanchored row ============================
 create table public.rq355 (id bigint primary key, payload text);
 insert into public.rq355 values (331, 'a');
+select pgpm_formal.baseline('public.rq355');
 call pgpm.transmute('public.rq355', 'id', 100, p_obtain => 6, p_paused => true);
 insert into public.rq355 values (650, 'frontier');
+select pgpm_formal.wrote('public.rq355', 'id = 650');
 select child_name as q_cell from pgpm.part where parent_table = 'public.rq355'::regclass and lo = '300' and attached \gset
 update pgpm.part set child_oid = null where parent_table = 'public.rq355'::regclass and child_name = :'q_cell';
 drop table public.:"q_cell";
+select pgpm_formal.deleted('public.rq355', 'id = 331');   -- the test's own drop
 create table public.:"q_cell" (id bigint primary key, payload text);
 insert into public.:"q_cell" values (9861, 'operator');
 alter table public.rq355 attach partition public.:"q_cell" for values from (9860) to (9870);
 create trigger pgpm_write_block before insert or update or delete on public.:"q_cell"
   for each row execute function pgpm._write_block_raise();
 alter table public.:"q_cell" enable always trigger pgpm_write_block;
+select pgpm_formal.operator_owns(format('public.%I', :'q_cell')::regclass);
+select pgpm_formal.wrote('public.rq355', 'id = 9861');
 select ok(exists (select 1 from pg_trigger where tgrelid = to_regclass(format('public.%I', :'q_cell'))
                    and tgname = 'pgpm_write_block' and tgenabled = 'A'),
   'LIVENESS: Q''s operator table under the row''s name carries a pgpm_write_block enabled ALWAYS');
@@ -679,16 +751,22 @@ select is(pgpm._is_write_blocked('public.rq355', :'q_cell'), false,
 -- ============================ PART R: the stranger one level down ============================
 create table public.rr355 (id bigint primary key, payload text);
 insert into public.rr355 values (113, 'a'), (114, 'b');
+select pgpm_formal.baseline('public.rr355');
 call pgpm.transmute('public.rr355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => true);
 insert into public.rr355 values (650, 'frontier');
+select pgpm_formal.wrote('public.rr355', 'id = 650');
 select child_name as r_cell from pgpm.part where parent_table = 'public.rr355'::regclass and lo = '100' and attached \gset
 update pgpm.part set child_oid = null where parent_table = 'public.rr355'::regclass and child_name = :'r_cell';
 drop table public.:"r_cell";
+select pgpm_formal.deleted('public.rr355', 'id in (113, 114)');   -- the test's own drop
 create table public.rr355_ops (id bigint primary key, payload text) partition by range (id);
 alter table public.rr355 attach partition public.rr355_ops for values from (9000) to (10000);
+select pgpm_formal.operator_owns('public.rr355_ops');
 create table public.:"r_cell" partition of public.rr355_ops for values from (9870) to (9880);
 insert into public.rr355 values (9871, 'operator'), (9872, 'operator');
+select pgpm_formal.wrote('public.rr355', 'id in (9871, 9872)');
 select to_regclass(format('public.%I', :'r_cell'))::oid as r_ops_oid \gset
+select pgpm_formal.operator_owns(:r_ops_oid::oid::regclass, 'public.rr355');
 select ok((select child_oid is null from pgpm.part where parent_table = 'public.rr355'::regclass and child_name = :'r_cell')
           and not exists (select 1 from pg_inherits where inhparent = 'public.rr355'::regclass and inhrelid = :r_ops_oid)
           and exists (select 1 from pg_partition_ancestors(:'r_ops_oid'::oid::regclass) a where a.relid = 'public.rr355'::regclass),
@@ -703,6 +781,7 @@ select ok(exists (select 1 from pg_class where oid = :r_ops_oid)
 create schema rs355_ops;
 create table public.rs355 (id bigint primary key, payload text);
 insert into public.rs355 values (101, 'a'), (102, 'b');
+select pgpm_formal.baseline('public.rs355');
 call pgpm.transmute('public.rs355', 'id', 100, p_obtain => 3, p_paused => false);
 -- fixture: the copy row an older install left (not attached, no recorded oid, over a range outside the grid), and
 -- the operator's own partition of the parent, in another schema, under that name and over that range
@@ -710,7 +789,9 @@ insert into pgpm.part (parent_table, child_name, lo, hi, attached, child_oid)
   values ('public.rs355'::regclass, 'rs355_p5000', '5000', '5100', false, null);
 create table rs355_ops.rs355_p5000 (id bigint primary key, payload text);
 alter table public.rs355 attach partition rs355_ops.rs355_p5000 for values from (5000) to (5100);
+select pgpm_formal.operator_owns('rs355_ops.rs355_p5000');
 insert into public.rs355 values (5005, 'operator'), (5006, 'operator');
+select pgpm_formal.wrote('public.rs355', 'id in (5005, 5006)');
 select 'rs355_ops.rs355_p5000'::regclass::oid as s_ops_oid \gset
 select ok(exists (select 1 from pg_inherits where inhparent = 'public.rs355'::regclass and inhrelid = :s_ops_oid)
           and pgpm._child_nsp('public.rs355', 'rs355_p5000') = 'rs355_ops',

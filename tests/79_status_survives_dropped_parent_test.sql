@@ -178,6 +178,7 @@ select child_name as orph_child from pgpm.part
 -- both sides cast: is() is polymorphic, so two bare literals resolve to `unknown` and it cannot pick a type
 select is(:'orph_child'::text, 'orph79_p0000000000000000000_to_0000000000000006000'::text,
   'GUARD: the monolith child is named as this file assumes, so the literals below address it');
+select pgpm_formal.operator_owns('public.orph79_p0000000000000000000_to_0000000000000006000');
 select format('alter table public.orph79 detach partition public.%I', :'orph_child') \gexec
 drop table public.orph79 cascade;
 

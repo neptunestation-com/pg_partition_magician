@@ -411,6 +411,8 @@ select is((select array_agg(fn || ' ' || call || ': ' || verdict order by fn) fr
 -- ======================= PART A: archive.to_s3, plain NDJSON =======================
 
 select t39.mk('ev', array['old', 'old']);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t39.ev');
 call pgpm.transmute('t39.ev', 'id', 10000::bigint);
 select archive.configure('t39.ev', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select 't39.ev'::regclass::oid as a1_oid \gset
@@ -423,8 +425,10 @@ select is(t39.rows(:'p' || 't39.' || :'a_child' || '.ndjson'), '1:old,2:old',
 select is((select parent_oid from archive.object_key_owner where key_base = :'p' || 't39.' || :'a_child'), :a1_oid::oid,
   'archive.to_s3: the export claimed <prefix>t39.<child> for the first table');
 
+select pgpm_formal.deleted('t39.ev', 'true');
 select ok(t39.retire_table('ev') > 0, 'LIVENESS: forget_missing() cleared the dropped first table');
 select t39.mk('ev', array['new']);
+select pgpm_formal.baseline('t39.ev');
 call pgpm.transmute('t39.ev', 'id', 10000::bigint);
 select archive.configure('t39.ev', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select 't39.ev'::regclass::oid as a2_oid \gset
@@ -442,6 +446,7 @@ select is(t39.rows(:'p' || 't39.' || :'a_child' || '.ndjson'), '1:old,2:old',
 -- ======================= PART B: archive.to_s3, compressed =======================
 
 select t39.mk('gz', array['old', 'old']);
+select pgpm_formal.baseline('t39.gz');
 call pgpm.transmute('t39.gz', 'id', 10000::bigint);
 select archive.configure('t39.gz', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p', p_compress => true);
 select 't39.gz'::regclass::oid as b1_oid \gset
@@ -456,8 +461,10 @@ select archive.to_s3('t39.gz', :'b_child', '0', '10000');
 select is(encode(t39.bytes(:'p' || 't39.' || :'b_child' || '.ndjson.gz'), 'hex'), :'b_old_hex',
   'archive.to_s3 compressed: the first relation''s object is the gzip of rows 1:old and 2:old at <prefix>t39.<child>.ndjson.gz');
 
+select pgpm_formal.deleted('t39.gz', 'true');
 select ok(t39.retire_table('gz') > 0, 'LIVENESS: forget_missing() cleared the dropped first compressed table');
 select t39.mk('gz', array['new']);
+select pgpm_formal.baseline('t39.gz');
 call pgpm.transmute('t39.gz', 'id', 10000::bigint);
 select archive.configure('t39.gz', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p', p_compress => true);
 select 't39.gz'::regclass::oid as b2_oid \gset
@@ -474,6 +481,7 @@ select is(encode(t39.bytes(:'p' || 't39.' || :'b_child' || '.ndjson.gz'), 'hex')
 -- ======================= PART C: archive.to_s3_parquet =======================
 
 select t39.mk('pq', array['old', 'old']);
+select pgpm_formal.baseline('t39.pq');
 call pgpm.transmute('t39.pq', 'id', 10000::bigint);
 select archive.configure('t39.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select 't39.pq'::regclass::oid as c1_oid \gset
@@ -485,8 +493,10 @@ select archive.to_s3_parquet('t39.pq', :'c_child', '0', '10000');
 select is(encode(t39.bytes(:'p' || 't39.' || :'c_child' || '.parquet'), 'hex'), :'c_old_hex',
   'archive.to_s3_parquet: the first relation''s file is at <prefix>t39.<child>.parquet, byte for byte');
 
+select pgpm_formal.deleted('t39.pq', 'true');
 select ok(t39.retire_table('pq') > 0, 'LIVENESS: forget_missing() cleared the dropped first Parquet table');
 select t39.mk('pq', array['new']);
+select pgpm_formal.baseline('t39.pq');
 call pgpm.transmute('t39.pq', 'id', 10000::bigint);
 select archive.configure('t39.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select 't39.pq'::regclass::oid as c2_oid \gset
@@ -505,8 +515,10 @@ select is(encode(t39.bytes(:'p' || 't39.' || :'c_child' || '.parquet'), 'hex'), 
 -- ======================= PART D: the archive_fn NDJSON transport =======================
 
 select t39.mk('an', array['old', 'old']);
+select pgpm_formal.baseline('t39.an');
 call pgpm.transmute('t39.an', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t39.an values (45000, 'frontier');   -- horizon 40000: [0, 10000) is aged
+select pgpm_formal.wrote('t39.an', 'id = 45000');
 select archive.configure('t39.an', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t39.an', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't39.an'::regclass::oid as d1_oid \gset
@@ -517,10 +529,13 @@ select is((select s3_key from pgpm.archive_ledger where parent_table = :d1_oid::
 select is(t39.rows(:'p' || 't39.an_0.ndjson'), '1:old,2:old',
   'archive_to_s3_ndjson: that object holds the first table''s rows 1:old and 2:old');
 
+select pgpm_formal.deleted('t39.an', 'true');
 select ok(t39.retire_table('an') > 0, 'LIVENESS: forget_missing() cleared the dropped first NDJSON-archived table');
 select t39.mk('an', array['new']);
+select pgpm_formal.baseline('t39.an');
 call pgpm.transmute('t39.an', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t39.an values (45000, 'frontier');
+select pgpm_formal.wrote('t39.an', 'id = 45000');
 select archive.configure('t39.an', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t39.an', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't39.an'::regclass::oid as d2_oid \gset
@@ -540,8 +555,10 @@ select is(t39.rows(:'p' || 't39.an_0.ndjson'), '1:old,2:old',
 -- ======================= PART E: the archive_fn Parquet transport =======================
 
 select t39.mk('ap', array['old', 'old']);
+select pgpm_formal.baseline('t39.ap');
 call pgpm.transmute('t39.ap', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t39.ap values (45000, 'frontier');
+select pgpm_formal.wrote('t39.ap', 'id = 45000');
 select archive.configure('t39.ap', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t39.ap', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 select 't39.ap'::regclass::oid as e1_oid \gset
@@ -554,10 +571,13 @@ select is((select s3_key from pgpm.archive_ledger where parent_table = :e1_oid::
 select encode(t39.bytes(:'p' || 't39.ap_0.parquet'), 'hex') as e_old_hex \gset
 select ok(:'e_old_hex' like '50415231%', 'LIVENESS: the first table''s Parquet file (PAR1) is in the bucket');
 
+select pgpm_formal.deleted('t39.ap', 'true');
 select ok(t39.retire_table('ap') > 0, 'LIVENESS: forget_missing() cleared the dropped first Parquet-archived table');
 select t39.mk('ap', array['new']);
+select pgpm_formal.baseline('t39.ap');
 call pgpm.transmute('t39.ap', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t39.ap values (45000, 'frontier');
+select pgpm_formal.wrote('t39.ap', 'id = 45000');
 select archive.configure('t39.ap', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t39.ap', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 select 't39.ap'::regclass::oid as e2_oid \gset

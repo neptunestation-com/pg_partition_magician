@@ -118,15 +118,25 @@ alter table public.ut241 enable row level security;
 alter table public.ut241 force row level security;
 create policy ut241_vis on public.ut241 using (tenant = 'vis');
 reset role;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md), by the harness's role, which reads every row
+select pgpm_formal.baseline('public.ida241');
+select pgpm_formal.baseline('public.tc241');
+select pgpm_formal.baseline('public.tp241');
+select pgpm_formal.baseline('public.cr241');
+select pgpm_formal.baseline('public.oa241');
+select pgpm_formal.baseline('public.ob241');
+select pgpm_formal.baseline('public.ut241');
 
 -- The conversions, by the harness's role, which bypasses row-level security (tests/218 part C).
 call pgpm.transmute('public.ida241', 'id', 10::bigint, p_retain => 10::bigint, p_paused => false);
 call pgpm.transmute('public.tc241', 'id', 10::bigint, p_retain => 100::bigint, p_paused => false);
 insert into public.tc241 values (300, 'vis');     -- the frontier, far past the monolith: retention-eligible
+select pgpm_formal.wrote('public.tc241', 'id = 300');
 select pgpm.set_archive_fn('public.tc241', 'pgpm._archive_noop(regclass, name, text, text)'::regprocedure);
 call pgpm.transmute('public.tp241', 'ts', interval '1 day', p_paused => true);
 call pgpm.transmute('public.cr241', 'id', 10::bigint, p_retain => 100::bigint, p_paused => true);
 insert into public.cr241 values (300, 'frontier');
+select pgpm_formal.wrote('public.cr241', 'id = 300');
 call pgpm.transmute('public.oa241', 'id', 10::bigint, p_incoming_fks => 'preserve', p_paused => true);
 call pgpm.transmute('public.ob241', 'id', 10::bigint, p_incoming_fks => 'preserve', p_paused => true);
 call pgpm.transmute('public.ut241', 'id', 10::bigint, p_paused => true);

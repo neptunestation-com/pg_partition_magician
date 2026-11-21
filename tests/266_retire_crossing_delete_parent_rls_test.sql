@@ -87,6 +87,7 @@ select (select string_agg(id::text, ',' order by id) from public.rp266) as rp_se
        row_security_active('public.rpr266')::text as rpr_rls
 \gset owner_
 reset role;
+select pgpm_formal.baseline('public.rp266');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md); here, not before transmute: t266_owner cannot reach pgpm_formal, and transmute moves no row
 
 select child_name as rp_mono, hi as rp_hi from pgpm.part
  where parent_table = 'public.rp266'::regclass

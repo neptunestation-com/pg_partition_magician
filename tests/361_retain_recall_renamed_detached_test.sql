@@ -94,6 +94,7 @@ $$;
 
 -- ========== PART A: the detached retirement, renamed by the operator, is released (the issue's reproduction) ==========
 call pgpm_t361.landed('ra', array[1, 2]);
+select pgpm_formal.baseline('pgpm_t361.ra');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md); landed() fills and transmutes
 select child_name as a_doomed, hi as a_hi, child_oid as a_oid from pgpm.part
  where parent_table = 'pgpm_t361.ra'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.ra', :'a_doomed'), 'fixture: (A) retire() dispatches the detach');
@@ -148,6 +149,7 @@ select is(pgpm._part_rel('pgpm_t361.ra', :'a_doomed')::oid, :'a_oid'::oid,
 
 -- ========== PART B: a squatter took the old name; the renamed table is released all the same ==========
 call pgpm_t361.landed('rb', array[5, 6, 7]);
+select pgpm_formal.baseline('pgpm_t361.rb');
 select child_name as b_doomed, hi as b_hi, child_oid as b_oid from pgpm.part
  where parent_table = 'pgpm_t361.rb'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.rb', :'b_doomed'), 'fixture: (B) retire() dispatches the detach');
@@ -156,6 +158,7 @@ select format('alter table pgpm_t361.%I rename to rb_kept', :'b_doomed') \gexec
 select format('create table pgpm_t361.%I (id bigint, payload text)', :'b_doomed') \gexec
 select format('insert into pgpm_t361.%I values (99, ''squat'')', :'b_doomed') \gexec
 select format('pgpm_t361.%I', :'b_doomed') as b_squat \gset
+select pgpm_formal.operator_owns(:'b_squat'::regclass);
 select isnt(to_regclass(:'b_squat')::oid, :'b_oid'::oid, 'LIVENESS: (B) the old name denotes a different relation now');
 
 select pgpm.set_retain('pgpm_t361.rb', '45000');
@@ -170,11 +173,13 @@ select is(pgpm_t361.ids(:'b_squat'), array[99]::bigint[], 'B: the squatter is le
 
 -- ========== PART C: the recorded relation is gone; the identity failure stands ==========
 call pgpm_t361.landed('rc', array[11]);
+select pgpm_formal.baseline('pgpm_t361.rc');
 select child_name as c_doomed, hi as c_hi, child_oid as c_oid from pgpm.part
  where parent_table = 'pgpm_t361.rc'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.rc', :'c_doomed'), 'fixture: (C) retire() dispatches the detach');
 select pgpm_t361.armed() \gexec
 select format('drop table pgpm_t361.%I', :'c_doomed') \gexec
+select pgpm_formal.deleted('pgpm_t361.rc', 'id = 11');   -- the test's own drop of the detached table
 select ok(not exists (select 1 from pg_class where oid = :'c_oid'::oid), 'LIVENESS: (C) the detached table was dropped by hand');
 
 select pgpm.set_retain('pgpm_t361.rc', '45000');
@@ -186,6 +191,7 @@ select isnt((select retiring_at from pgpm.part where parent_table = 'pgpm_t361.r
 
 -- ========== PART D: renamed while still attached; no detached retirement to hand over ==========
 call pgpm_t361.landed('rd', array[21, 22]);
+select pgpm_formal.baseline('pgpm_t361.rd');
 select child_name as d_doomed, hi as d_hi, child_oid as d_oid from pgpm.part
  where parent_table = 'pgpm_t361.rd'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.rd', :'d_doomed'), 'fixture: (D) retire() dispatches the detach');
@@ -201,11 +207,13 @@ select is(pgpm_t361.ids('pgpm_t361.rd', 20000), array[21, 22]::bigint[], 'D: ids
 
 -- ========== PART E: the anchors disagree; the relation the mark names is not handed over on its say alone ==========
 call pgpm_t361.landed('re', array[31]);
+select pgpm_formal.baseline('pgpm_t361.re');
 select child_name as e_doomed, hi as e_hi, child_oid as e_oid from pgpm.part
  where parent_table = 'pgpm_t361.re'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.re', :'e_doomed'), 'fixture: (E) retire() dispatches the detach');
 create table pgpm_t361.re_foreign (id bigint, payload text);
 insert into pgpm_t361.re_foreign values (77, 'foreign');
+select pgpm_formal.operator_owns('pgpm_t361.re_foreign');
 update pgpm.part set retiring_oid = 'pgpm_t361.re_foreign'::regclass
  where parent_table = 'pgpm_t361.re'::regclass and lo = '0';
 select isnt((select retiring_oid from pgpm.part where parent_table = 'pgpm_t361.re'::regclass and lo = '0'), :'e_oid'::oid,
@@ -217,6 +225,7 @@ select is(pgpm_t361.ids('pgpm_t361.re_foreign'), array[77]::bigint[], 'E: the fo
 
 -- ========== PART F: an older install's row, no child_oid; the remedy names the renamed table, not the squatter ==========
 call pgpm_t361.landed('rf', array[41, 42, 43]);
+select pgpm_formal.baseline('pgpm_t361.rf');
 select child_name as f_doomed, hi as f_hi, child_oid as f_oid from pgpm.part
  where parent_table = 'pgpm_t361.rf'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.rf', :'f_doomed'), 'fixture: (F) retire() dispatches the detach');
@@ -227,6 +236,7 @@ update pgpm.part set child_oid = null, detach_dispatched_oid = null
 select format('alter table pgpm_t361.%I rename to rf_kept', :'f_doomed') \gexec
 select format('create table pgpm_t361.%I (id bigint, payload text)', :'f_doomed') \gexec
 select format('insert into pgpm_t361.%I values (98, ''squat'')', :'f_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t361.%I', :'f_doomed')::regclass);
 select ok((select child_oid is null and retiring_oid = :'f_oid'::oid from pgpm.part
             where parent_table = 'pgpm_t361.rf'::regclass and lo = '0'),
   'LIVENESS: (F) the row records the retirement by its mark alone, child_oid null');
@@ -242,6 +252,7 @@ select ok((select method from pgpm.log where parent_table = 'pgpm_t361.rf'::regc
 
 -- ========== PART G: renamed and attached to the operator's own partitioned table; released, left there ==========
 call pgpm_t361.landed('rg', array[51, 52]);
+select pgpm_formal.baseline('pgpm_t361.rg');
 select child_name as g_doomed, hi as g_hi, child_oid as g_oid from pgpm.part
  where parent_table = 'pgpm_t361.rg'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.rg', :'g_doomed'), 'fixture: (G) retire() dispatches the detach');
@@ -262,12 +273,14 @@ select is(pgpm_t361.ids('pgpm_t361.mine'), array[51, 52]::bigint[], 'G: its rows
 
 -- ========== PART H: an older install's row, the table only moved to another schema; refused, not released ==========
 call pgpm_t361.landed('rh', array[61]);
+select pgpm_formal.baseline('pgpm_t361.rh');
 select child_name as h_doomed, hi as h_hi, child_oid as h_oid from pgpm.part
  where parent_table = 'pgpm_t361.rh'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t361.rh', :'h_doomed'), 'fixture: (H) retire() dispatches the detach');
 select pgpm_t361.armed() \gexec
 update pgpm.part set child_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t361.rh'::regclass and lo = '0';
+select pgpm_formal.expect('NoLostRow', '[61]', 'part H builds an older install''s row (child_oid and detach_dispatched_oid nulled above) and moves the detached table to another schema: id 61 stays whole there under the kept mark, a custody the oracle reads only through detach_dispatched_oid', 'pgpm_t361.rh');
 create schema pgpm_t361_else;
 select format('alter table pgpm_t361.%I set schema pgpm_t361_else', :'h_doomed') \gexec
 select is((select relname::text from pg_class where oid = :'h_oid'::oid), :'h_doomed',

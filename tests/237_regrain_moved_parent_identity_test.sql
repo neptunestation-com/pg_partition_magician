@@ -70,13 +70,16 @@ create function pg_temp.triggers_on(p_rel regclass) returns text[] language sql 
 -- (A) moved after the prepare tick; auto-regrain to the swap
 -- ======================================================================================================
 select pg_temp.mk('ra');
+select pgpm_formal.baseline('public.ra');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ra', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => false);
 select pgpm.obtain('public.ra');
 insert into public.ra values (450, 'frontier');
+select pgpm_formal.wrote('public.ra', 'id = 450');
 select pgpm.set_regrain('public.ra', '50');
 call pgpm.maintain('public.ra');   -- prepare: capture on the source, public.ra_pgpm_regrain_delta minted
 alter table public.ra set schema mvh;
 select pg_temp.stranger('ra');
+select pgpm_formal.operator_owns('mvh.ra_pgpm_regrain_delta');
 select ok((select regrain_delta_oid from pgpm.config where parent_table = 'mvh.ra'::regclass)
             = to_regclass('public.ra_pgpm_regrain_delta')::oid
           and pg_temp.triggers_on('public.ra_p0000000000000000000_to_0000000000000000300')
@@ -89,8 +92,12 @@ select ok(exists (select 1 from pgpm.log where parent_table = 'mvh.ra'::regclass
           'A: the first tick after the move copies [0, 50) out of the source in public');
 update mvh.ra set payload = 'upd-10' where id = 10;
 delete from mvh.ra where id in (20, 30);
+select pgpm_formal.deleted('mvh.ra', 'id in (20, 30)');
 insert into mvh.ra values (250, 'ins-250');
+select pgpm_formal.wrote('mvh.ra', 'id = 250');
 update mvh.ra set id = 350, payload = 'moved-199' where id = 199;   -- leaves [0, 300): captured as a DELETE
+select pgpm_formal.wrote('mvh.ra', 'id = 350');
+select pgpm_formal.deleted('mvh.ra', 'id = 199');
 select is(pg_temp.keys_in('public.ra_pgpm_regrain_delta'),
           array[10, 10, 20, 30, 250, 199]::bigint[],
           'LIVENESS: (A) the writes through the moved parent were captured in the real delta');
@@ -119,9 +126,11 @@ select is(pg_temp.stranger_rows('ra'), array['1000:keep-1', '2000:keep-2'],
 -- (B) moved before set_regrain: the issue's shape
 -- ======================================================================================================
 select pg_temp.mk('rb');
+select pgpm_formal.baseline('public.rb');
 call pgpm.transmute('public.rb', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => false);
 select pgpm.obtain('public.rb');
 insert into public.rb values (450, 'frontier');
+select pgpm_formal.wrote('public.rb', 'id = 450');
 alter table public.rb set schema mvh;
 select ok(exists (select 1 from pgpm.part where parent_table = 'mvh.rb'::regclass and attached
                    and child_name = 'rb_p0000000000000000000_to_0000000000000000300'
@@ -155,12 +164,15 @@ select is((select array_agg(id || ':' || payload order by id) from mvh.rb where 
 -- (C) regrain_cancel after the move
 -- ======================================================================================================
 select pg_temp.mk('rc');
+select pgpm_formal.baseline('public.rc');
 call pgpm.transmute('public.rc', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => true);
 select pgpm.obtain('public.rc');
 insert into public.rc values (450, 'frontier');
+select pgpm_formal.wrote('public.rc', 'id = 450');
 select pgpm.regrain_step('public.rc', 'rc_p0000000000000000000_to_0000000000000000300', '50', 1000);   -- prepare
 alter table public.rc set schema mvh;
 select pg_temp.stranger('rc');
+select pgpm_formal.operator_owns('mvh.rc_pgpm_regrain_delta');
 update mvh.rc set payload = 'x' where id = 10;
 select ok((select regrain_delta_oid from pgpm.config where parent_table = 'mvh.rc'::regclass)
             = to_regclass('public.rc_pgpm_regrain_delta')::oid
@@ -177,9 +189,11 @@ select is(pg_temp.triggers_on('public.rc_p0000000000000000000_to_000000000000000
 -- (D) the janitor after the move
 -- ======================================================================================================
 select pg_temp.mk('rd');
+select pgpm_formal.baseline('public.rd');
 call pgpm.transmute('public.rd', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => true);
 select pgpm.obtain('public.rd');
 insert into public.rd values (450, 'frontier');
+select pgpm_formal.wrote('public.rd', 'id = 450');
 select pgpm.regrain_step('public.rd', 'rd_p0000000000000000000_to_0000000000000000300', '50', 1000);   -- prepare
 alter table public.rd set schema mvh;
 update pgpm.config set regrain_cursor = null where parent_table = 'mvh.rd'::regclass;   -- the hand edit
@@ -199,12 +213,15 @@ select is((select array_agg(action order by id) from pgpm.log where parent_table
 -- (E) retire() of an in-flight source after the move: _regrain_reclaim
 -- ======================================================================================================
 select pg_temp.mk('re');
+select pgpm_formal.baseline('public.re');
 call pgpm.transmute('public.re', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => true, p_retain => 100);
 select pgpm.obtain('public.re');
 insert into public.re values (450, 'frontier');
+select pgpm_formal.wrote('public.re', 'id = 450');
 select pgpm.regrain_step('public.re', 're_p0000000000000000000_to_0000000000000000300', '50', 1000);   -- prepare
 alter table public.re set schema mvh;
 select pg_temp.stranger('re');
+select pgpm_formal.operator_owns('mvh.re_pgpm_regrain_delta');
 update mvh.re set payload = 'x' where id = 10;
 select ok(pg_temp.keys_in('public.re_pgpm_regrain_delta') = array[10, 10]::bigint[]
           and pg_temp.triggers_on('public.re_p0000000000000000000_to_0000000000000000300')

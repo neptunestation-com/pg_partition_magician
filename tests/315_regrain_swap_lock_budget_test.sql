@@ -57,8 +57,10 @@ $$;
 \o /dev/null
 select pg_temp.rs_monolith('rs315_over', (:cap + 1) * 100);
 \o
+select pgpm_formal.baseline('public.rs315_over');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rs315_over', 'id', ((:cap + 1) * 50)::bigint, p_obtain => 2);
 insert into public.rs315_over (id, a) values ((:cap + 1) * 100 + 1, 'frontier');
+select pgpm_formal.wrote('public.rs315_over', 'a = ''frontier''');
 create temporary table rs_over_src as
   select child_name, child_oid from pgpm.part where parent_table = 'public.rs315_over'::regclass and attached and lo = '0';
 select is((select hi from pgpm.part where parent_table = 'public.rs315_over'::regclass and attached and lo = '0'),
@@ -97,8 +99,10 @@ select is((select regrain_to from pgpm.config where parent_table = 'public.rs315
 \o /dev/null
 select pg_temp.rs_monolith('rs315_at', :cap * 100);
 \o
+select pgpm_formal.baseline('public.rs315_at');
 call pgpm.transmute('public.rs315_at', 'id', (:cap * 50)::bigint, p_obtain => 2);
 insert into public.rs315_at (id, a) values (:cap * 100 + 1, 'frontier');
+select pgpm_formal.wrote('public.rs315_at', 'a = ''frontier''');
 
 select lives_ok($$ select pgpm.set_regrain('public.rs315_at', '100') $$,
   'LIVENESS: (B) set_regrain accepts a target whose cap fine children fit in half the table at two slots each');
@@ -115,8 +119,10 @@ select (:cap / 2 + 1) * 100 as p_step \gset
 \o /dev/null
 select pg_temp.rs_monolith('rs315_aged', 4 * :p_step);
 \o
+select pgpm_formal.baseline('public.rs315_aged');
 call pgpm.transmute('public.rs315_aged', 'id', (:p_step)::bigint, p_obtain => 2, p_retain => (:p_step)::bigint);
 insert into public.rs315_aged (id, a) values (4 * :p_step + 1, 'frontier');
+select pgpm_formal.wrote('public.rs315_aged', 'a = ''frontier''');
 
 select is((select hi from pgpm.part where parent_table = 'public.rs315_aged'::regclass and attached and lo = '0'),
           (4 * :p_step)::text,
@@ -134,12 +140,14 @@ insert into public.rs315_ref values (1);
 \o /dev/null
 select pg_temp.rs_monolith('rs315_ofk', (:slots / 100) * 100);
 \o
+select pgpm_formal.baseline('public.rs315_ofk');
 \o /dev/null
 select format('alter table public.rs315_ofk add constraint rs315_ofk_fk%s foreign key (b) references public.rs315_ref', g)
   from generate_series(1, 30) g \gexec
 \o
 call pgpm.transmute('public.rs315_ofk', 'id', ((:slots / 100) * 100)::bigint, p_obtain => 2);
 insert into public.rs315_ofk (id, a) values ((:slots / 100) * 100 + 1, 'frontier');
+select pgpm_formal.wrote('public.rs315_ofk', 'a = ''frontier''');
 \o /dev/null
 select format('select pgpm.regrain_step(%L, pg_temp.rs_source(%L), %L)', 'public.rs315_ofk', 'rs315_ofk', '100')
   from generate_series(1, :slots / 100 + 1) \gexec
@@ -176,12 +184,14 @@ select is(
 \o /dev/null
 select pg_temp.rs_monolith('rs315_ifk', (:slots * 3 / 128) * 100);
 \o
+select pgpm_formal.baseline('public.rs315_ifk');
 \o /dev/null
 select format('create table public.rs315_ifk_r%s (x bigint references public.rs315_ifk (id))', g)
   from generate_series(1, 20) g \gexec
 \o
 call pgpm.transmute('public.rs315_ifk', 'id', ((:slots * 3 / 128) * 100)::bigint, p_obtain => 2, p_incoming_fks => 'preserve');
 insert into public.rs315_ifk (id, a) values ((:slots * 3 / 128) * 100 + 1, 'frontier');
+select pgpm_formal.wrote('public.rs315_ifk', 'a = ''frontier''');
 \o /dev/null
 select pgpm.restore_incoming_fks('public.rs315_ifk');
 \o
@@ -210,8 +220,10 @@ select is(
 \o /dev/null
 select pg_temp.rs_monolith('rs315_small', 500);
 \o
+select pgpm_formal.baseline('public.rs315_small');
 call pgpm.transmute('public.rs315_small', 'id', 500::bigint, p_obtain => 2);
 insert into public.rs315_small (id, a) values (501, 'frontier');
+select pgpm_formal.wrote('public.rs315_small', 'a = ''frontier''');
 \o /dev/null
 select format('select pgpm.regrain_step(%L, pg_temp.rs_source(%L), %L)', 'public.rs315_small', 'rs315_small', '100')
   from generate_series(1, 6) \gexec

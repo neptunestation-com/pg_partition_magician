@@ -40,8 +40,11 @@ on:
       - 'pgpm_core/install.sql'
       - 'pgpm_core/uninstall.sql'
       - 'tests/archive/**'
+      - 'tests/formal/**'
       - 'bench/archive_*.sh'
       - 'bench/reads_under_caller_rls.sh'
+      - 'bench/formal_archive_no_clobber.sh'
+      - 'bench/formal_discriminate.sh'
       - 'scripts/verify_parquet*.py'
       - 'scripts/requirements-verify.txt'
       - 'test.sh'
@@ -56,8 +59,11 @@ on:
       - 'pgpm_core/install.sql'
       - 'pgpm_core/uninstall.sql'
       - 'tests/archive/**'
+      - 'tests/formal/**'
       - 'bench/archive_*.sh'
       - 'bench/reads_under_caller_rls.sh'
+      - 'bench/formal_archive_no_clobber.sh'
+      - 'bench/formal_discriminate.sh'
       - 'scripts/verify_parquet*.py'
       - 'scripts/requirements-verify.txt'
       - 'test.sh'
@@ -121,6 +127,16 @@ jobs:
           echo "PGPM_MINIO_IMAGE=$ALIAS" >> "$GITHUB_ENV"
       - name: Run the archive track
         run: ./test.sh archive
+      # The invariant oracle's per-file reports and the track's summary (formal methods Phase 3 W4): kept whatever
+      # the result, so a report-mode violation can be read without rerunning. The summary is in the log above,
+      # and its liveness witness failing fails the step before this one.
+      - name: Keep the invariant oracle's reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-log-archive
+          path: oracle-log/
+          if-no-files-found: ignore
       # On a miss, after the track whatever its result, and only if the digest-pinned image was pulled.
       - name: Save the MinIO image for the cache
         id: minio-save

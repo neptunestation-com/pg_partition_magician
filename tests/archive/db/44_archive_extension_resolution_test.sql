@@ -144,13 +144,18 @@ $$;
 -- [0, 2000); 2001..2005 in [2000, 3000) and 3001..3003 in [3000, 4000); the frontier 4000 with p_retain
 -- 1000 puts the boundary at 3000, so the monolith and [2000, 3000) are due and [3000, 4000) is not.
 call mk_archive_table('n44', 1200, 1000, 1000, p_paused => false);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.n44');
 call mk_archive_table('p44', 1200, 1000, 1000, p_paused => false);
+select pgpm_formal.baseline('public.p44');
 insert into public.n44 (id, payload) select g, 'y' from generate_series(2001, 2005) g;
 insert into public.n44 (id, payload) select g, 'z' from generate_series(3001, 3003) g;
 insert into public.n44 (id, payload) values (4000, 'frontier');
 insert into public.p44 (id, payload) select g, 'y' from generate_series(2001, 2005) g;
 insert into public.p44 (id, payload) select g, 'z' from generate_series(3001, 3003) g;
 insert into public.p44 (id, payload) values (4000, 'frontier');
+select pgpm_formal.wrote('public.n44', 'id > 2000');
+select pgpm_formal.wrote('public.p44', 'id > 2000');
 select archive.configure('public.n44', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'run' || '/n44/');
 select archive.configure('public.p44', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'run' || '/p44/');
 update pgpm.config set retain_batch = 0, archive_batch = null

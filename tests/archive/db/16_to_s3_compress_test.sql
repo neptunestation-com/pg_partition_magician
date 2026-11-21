@@ -115,6 +115,8 @@ create table t16.obj (label text primary key, bytes bytea not null, expected_md5
 -- =====================================================================================================
 
 call mk_archive_table('gz', 40, 10, 20, p_paused => false);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.gz');
 update public.gz set payload = 'row-' || id;
 select mk_archive_config('gz', true);
 
@@ -192,6 +194,7 @@ select is((select t16.le32(bytes, octet_length(bytes) - 8) || ' ' || t16.le32(by
 -- =====================================================================================================
 
 call mk_archive_table('gzm', 16000, 20000);
+select pgpm_formal.baseline('public.gzm');
 update public.gzm set payload = replace(encode(gen_random_bytes(768), 'base64'), e'\n', '');
 select mk_archive_config('gzm', true);
 update archive.config set part_bytes = 5 * 1024 * 1024, fetch_rows = 1000 where parent_table = 'public.gzm'::regclass;
@@ -238,6 +241,7 @@ insert into t16.obj (label, bytes, expected_md5, expected_ids)
 -- =====================================================================================================
 
 insert into public.gz (id, payload) values (55, 'fifty-five'), (56, 'fifty-six');
+select pgpm_formal.wrote('public.gz', 'id in (55, 56)');
 select mk_archive_config('gz', false);
 
 select ok(not (select compress from archive.config where parent_table = 'public.gz'::regclass),

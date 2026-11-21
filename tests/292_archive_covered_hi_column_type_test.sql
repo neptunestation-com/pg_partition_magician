@@ -91,8 +91,10 @@ end $$;
 -- [0, 30) is the monolith; the frontier row at 45 puts the retention horizon past it (retain 10).
 create table public.t292_big (id bigint primary key, payload text);
 insert into public.t292_big select g, 'big' from generate_series(1, 25) g;
+select pgpm_formal.baseline('public.t292_big');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.t292_big', 'id', 10, p_retain => 10, p_paused => false);
 insert into public.t292_big values (45, 'frontier');
+select pgpm_formal.wrote('public.t292_big', 'id = 45');
 select pgpm.set_archive_fn('public.t292_big', 't292.half(regclass,name,text,text)'::regprocedure);
 select child_name as ch_big from pgpm.part where parent_table = 'public.t292_big'::regclass and lo = '0' \gset
 
@@ -143,8 +145,10 @@ select results_eq(
 -- ---------------------------------------------------------------- PART B: the whole-partition script, bigint key
 create table public.t292_whole (id bigint primary key, payload text);
 insert into public.t292_whole select g, 'whole' from generate_series(1, 7) g;
+select pgpm_formal.baseline('public.t292_whole');
 call pgpm.transmute('public.t292_whole', 'id', 1000, p_retain => 19000, p_paused => false);
 insert into public.t292_whole values (20000, 'frontier');
+select pgpm_formal.wrote('public.t292_whole', 'id = 20000');
 select pgpm._enforce_write_blocks('public.t292_whole');
 select child_name as ch_whole from pgpm.part where parent_table = 'public.t292_whole'::regclass and lo = '0' \gset
 select ok(pgpm._is_write_blocked('public.t292_whole', :'ch_whole'),
@@ -187,8 +191,10 @@ select ok(:'msg_half1' like '%PARTIAL only (requested hi 1000, got 500)%'
 create table public.t292_num (id numeric primary key, payload text);
 insert into public.t292_num select g, 'num' from generate_series(1, 25) g;
 insert into public.t292_num values (22.5, 'num');
+select pgpm_formal.baseline('public.t292_num');
 call pgpm.transmute('public.t292_num', 'id', 10, p_retain => 10, p_paused => false);
 insert into public.t292_num values (45, 'frontier');
+select pgpm_formal.wrote('public.t292_num', 'id = 45');
 select pgpm.set_archive_fn('public.t292_num', 't292.half(regclass,name,text,text)'::regprocedure);
 
 call pgpm.maintain('public.t292_num');   -- [0, 30) -> 15
@@ -219,10 +225,14 @@ create table public.t292_old (id bigint primary key, payload text);
 create table public.t292_old2 (id bigint primary key, payload text);
 insert into public.t292_old select g, 'old' from generate_series(1, 25) g;
 insert into public.t292_old2 select g, 'old2' from generate_series(1, 25) g;
+select pgpm_formal.baseline('public.t292_old');
+select pgpm_formal.baseline('public.t292_old2');
 call pgpm.transmute('public.t292_old', 'id', 10, p_retain => 10, p_paused => false);
 call pgpm.transmute('public.t292_old2', 'id', 10, p_retain => 10, p_paused => false);
 insert into public.t292_old values (45, 'frontier');
 insert into public.t292_old2 values (45, 'frontier');
+select pgpm_formal.wrote('public.t292_old', 'id = 45');
+select pgpm_formal.wrote('public.t292_old2', 'id = 45');
 select pgpm._enforce_write_blocks('public.t292_old');
 select pgpm._enforce_write_blocks('public.t292_old2');
 select child_name as ch_old from pgpm.part where parent_table = 'public.t292_old'::regclass and lo = '0' \gset
@@ -230,6 +240,35 @@ select child_name as ch_old2 from pgpm.part where parent_table = 'public.t292_ol
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived)
   values ('public.t292_old'::regclass, '0', '15.5000000000000000', :'ch_old', 15),
          ('public.t292_old2'::regclass, '0', '15.0000000000000000', :'ch_old2', 14);
+select pgpm_formal.expect('DropOnlyCovered', '[1]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[2]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[3]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[4]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[5]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[6]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[7]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[8]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[9]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[10]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[11]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[12]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[13]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[14]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[15]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old');
+select pgpm_formal.expect('DropOnlyCovered', '[1]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[2]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[3]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[4]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[5]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[6]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[7]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[8]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[9]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[10]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[11]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[12]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[13]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
+select pgpm_formal.expect('DropOnlyCovered', '[14]', 'part D hand-writes this archive_ledger row as a pre-#1071 install recorded it, with no child_oid (lines above)', 'public.t292_old2');
 select pgpm.set_archive_fn('public.t292_old', 't292.whole(regclass,name,text,text)'::regprocedure);
 select pgpm.set_archive_fn('public.t292_old2', 't292.whole(regclass,name,text,text)'::regprocedure);
 

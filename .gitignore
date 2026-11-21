@@ -16,3 +16,7 @@ supabase/.temp/
 # rebuild a surprise for the other.
 /.venv-lockview/
 __pycache__/
+
+# the invariant oracle's per-file reports and track summaries, written by test.sh and bench/formal_check.sh
+# (formal methods Phase 3 W4); CI keeps them as artifacts
+/oracle-log/

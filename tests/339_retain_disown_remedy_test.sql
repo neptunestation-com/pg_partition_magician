@@ -38,9 +38,11 @@ select plan(34);
 -- ============================ PART A: the pass every install.sql run makes ============================
 create table public.rd339a (id bigint primary key, payload text);
 insert into public.rd339a values (150, 'old'), (160, 'old');
+select pgpm_formal.baseline('public.rd339a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rd339a', 'id', 100::bigint, p_obtain => 1, p_paused => false, p_retain => '100');
 select pgpm.extend_to('public.rd339a', '500');
 insert into public.rd339a values (250, 'aged'), (350, 'kept');   -- horizon floor(350 - 100) = 200: [100, 200) alone
+select pgpm_formal.wrote('public.rd339a', 'id in (250, 350)');
 create table public.rd339a_ref (rid int primary key, pid bigint references public.rd339a (id));
 
 select child_name as a_old from pgpm.part where parent_table = 'public.rd339a'::regclass and lo = '100' \gset
@@ -74,6 +76,7 @@ select ok(:'a_method' like '%attach it back to the parent on its bounds%',
 select coalesce((regexp_match(:'a_method', '(drop table [^;]+;(?: delete from pgpm\.part where [^;]+;)?)'))[1], 'select 1;')
   as a_remedy \gset
 :a_remedy
+select pgpm_formal.deleted('public.rd339a', 'id in (150, 160)');   -- the remedy the test just ran drops the disowned table
 
 select is(to_regclass(format('public.%I', :'a_old')), null, 'A: the disowned table is gone');
 
@@ -81,6 +84,7 @@ select is(to_regclass(format('public.%I', :'a_old')), null, 'A: the disowned tab
 -- to 300, so [200, 300) is aged too
 alter table public.rd339a_ref drop constraint rd339a_ref_pid_fkey;
 insert into public.rd339a values (450, 'kept');
+select pgpm_formal.wrote('public.rd339a', 'id = 450');
 select max(id) as a_before from pgpm.log \gset
 select pgpm.retain('public.rd339a');
 select pgpm.retain('public.rd339a');
@@ -104,9 +108,11 @@ select is((select array_agg(id order by id) from public.rd339a), array[350, 450]
 create schema rd339s;
 create table rd339s.rd339b (id bigint primary key, payload text);
 insert into rd339s.rd339b values (150, 'old'), (160, 'old');
+select pgpm_formal.baseline('rd339s.rd339b');
 call pgpm.transmute('rd339s.rd339b', 'id', 100::bigint, p_obtain => 1, p_paused => false, p_retain => '100');
 select pgpm.extend_to('rd339s.rd339b', '500');
 insert into rd339s.rd339b values (250, 'aged'), (350, 'kept');
+select pgpm_formal.wrote('rd339s.rd339b', 'id in (250, 350)');
 create table rd339s.rd339b_ref (rid int primary key, pid bigint references rd339s.rd339b (id));
 
 select child_name as b_old from pgpm.part where parent_table = 'rd339s.rd339b'::regclass and lo = '100' \gset
@@ -134,11 +140,13 @@ select is((regexp_match(:'b_method', 'drop table [^;]+; delete from pgpm\.part w
 select coalesce((regexp_match(:'b_method', '(drop table [^;]+;(?: delete from pgpm\.part where [^;]+;)?)'))[1], 'select 1;')
   as b_remedy \gset
 :b_remedy
+select pgpm_formal.deleted('rd339s.rd339b', 'id in (150, 160)');   -- the remedy the test just ran drops the disowned table
 
 select is(to_regclass(format('rd339s.%I', :'b_old')), null, 'B: the disowned table is gone');
 
 alter table rd339s.rd339b_ref drop constraint rd339b_ref_pid_fkey;
 insert into rd339s.rd339b values (450, 'kept');
+select pgpm_formal.wrote('rd339s.rd339b', 'id = 450');
 select max(id) as b_before from pgpm.log \gset
 select pgpm.retain('rd339s.rd339b');
 select pgpm.retain('rd339s.rd339b');
@@ -161,9 +169,11 @@ select is((select array_agg(id order by id) from rd339s.rd339b), array[350, 450]
 -- spells one (as parts A and B do), and the ATTACH otherwise, and then asks whether rows 150 and 160 are served.
 create table public.rd339c (id bigint primary key, payload text);
 insert into public.rd339c values (150, 'kept'), (160, 'kept');
+select pgpm_formal.baseline('public.rd339c');
 call pgpm.transmute('public.rd339c', 'id', 100::bigint, p_obtain => 1, p_paused => false, p_retain => '100');
 select pgpm.extend_to('public.rd339c', '500');
 insert into public.rd339c values (350, 'kept');
+select pgpm_formal.wrote('public.rd339c', 'id = 350');
 create table public.rd339c_ref (rid int primary key, pid bigint references public.rd339c (id));
 
 select child_name as c_old from pgpm.part where parent_table = 'public.rd339c'::regclass and lo = '100' \gset

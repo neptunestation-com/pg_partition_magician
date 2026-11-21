@@ -41,6 +41,9 @@
 # prove this guard actually fails when the defect is present.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
+# the invariant oracle at this guard's observation point (formal methods Phase 3 W4, bench/formal_check.sh)
+# shellcheck source=bench/formal_check.sh
+source "$(dirname "$0")/formal_check.sh"
 MONO=${MONO:-6000000}       # rows loaded before the conversion; the monolith covers them
 BATCH=${BATCH:-2000000}
 fail=0
@@ -54,6 +57,7 @@ check() { # <label> <actual> <expected>
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -d "$DB" -q -f "$INSTALL" >/dev/null 2>&1
+formal_install "$C" "$DB"
 
 # --- mg_ret: the throwaway retain-drop table. Tiny, and its name sorts before "ml" so it gets its turn
 # first in maintain_all()'s `order by parent_table` sweep. No retention-eligible partition yet -- the
@@ -197,4 +201,5 @@ check "LIVENESS: and regrained in the same tick" \
       "$(q "select (count(*) > 0)::text from pgpm.log
              where parent_table='public.ml'::regclass and action in ('regrain_copy','regrain_attach','regrain')")" "true"
 
+formal_check "$C" "$DB" end   # after every observation, in its own session (report mode: prints ORACLE, never FAIL)
 exit "$fail"

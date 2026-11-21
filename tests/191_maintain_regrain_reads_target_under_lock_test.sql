@@ -58,18 +58,22 @@ end $$;
 -- (floor 50, horizon 30), auto-regrain on at 5.
 create table public.rg_off (id bigint primary key, payload text);
 insert into public.rg_off values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rg_off');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rg_off', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rg_off', '60');
 insert into public.rg_off values (55, 'frontier');
+select pgpm_formal.wrote('public.rg_off', 'id = 55');
 select pgpm.set_regrain('public.rg_off', '5');
 select pgpm.set_archive_fn('public.rg_off', 's191.archiver(regclass,name,text,text)'::regprocedure);
 select child_name as off_mono from pgpm.part where parent_table = 'public.rg_off'::regclass and lo = '0' \gset
 
 create table public.rg_on (id bigint primary key, payload text);
 insert into public.rg_on values (3, 'a'), (4, 'b'), (12, 'c'), (17, 'd');
+select pgpm_formal.baseline('public.rg_on');
 call pgpm.transmute('public.rg_on', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rg_on', '60');
 insert into public.rg_on values (55, 'frontier');
+select pgpm_formal.wrote('public.rg_on', 'id = 55');
 select pgpm.set_regrain('public.rg_on', '5');
 select pgpm.set_archive_fn('public.rg_on', 's191.archiver(regclass,name,text,text)'::regprocedure);
 select child_name as on_mono from pgpm.part where parent_table = 'public.rg_on'::regclass and lo = '0' \gset

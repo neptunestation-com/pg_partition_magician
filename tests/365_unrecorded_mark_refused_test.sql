@@ -94,9 +94,11 @@ $$;
 -- ============================================================================================================
 create table pgpm_t365.a (id bigint primary key, payload text);
 insert into pgpm_t365.a values (1, 'orig'), (2, 'orig');
+select pgpm_formal.baseline('pgpm_t365.a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('pgpm_t365.a'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t365.a'::regclass, '60000');
 insert into pgpm_t365.a values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t365.a', 'id = 35005');
 create table public.a365_ref (id bigint primary key, p_id bigint references pgpm_t365.a(id));
 insert into public.a365_ref values (1, 35005);
 select child_name as a_doomed from pgpm.part where parent_table = 'pgpm_t365.a'::regclass and lo = '0' \gset
@@ -138,9 +140,11 @@ update cron.job set command = 'select 1';
 -- ============================================================================================================
 create table pgpm_t365.d (id bigint primary key, payload text);
 insert into pgpm_t365.d values (21, 'orig');
+select pgpm_formal.baseline('pgpm_t365.d');
 call pgpm.transmute('pgpm_t365.d'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t365.d'::regclass, '60000');
 insert into pgpm_t365.d values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t365.d', 'id = 35005');
 create table public.d365_ref (id bigint primary key, p_id bigint references pgpm_t365.d(id));
 insert into public.d365_ref values (1, 35005);
 select child_name as d_doomed from pgpm.part where parent_table = 'pgpm_t365.d'::regclass and lo = '0' \gset
@@ -150,8 +154,10 @@ update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t365.d'::regclass and lo = '0';
 select format('alter table pgpm_t365.%I rename to d_kept', :'d_doomed') \gexec
+select pgpm_formal.operator_owns('pgpm_t365.d_kept', 'pgpm_t365.d');   -- the detached retirement the operator renamed to keep
 select format('create table pgpm_t365.%I (id bigint, payload text)', :'d_doomed') \gexec
 select format('insert into pgpm_t365.%I values (97, ''mine'')', :'d_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t365.%I', :'d_doomed')::regclass);   -- the table created under the old name
 select format('pgpm_t365.%I', :'d_doomed') as d_sq \gset
 select ok(pgpm_t365.unrecorded('pgpm_t365.d') and not exists (select 1 from pg_inherits where inhrelid = to_regclass(:'d_sq')::oid),
   'LIVENESS: D: the mark records no oid, and a plain table holds its name');
@@ -166,9 +172,11 @@ select is(pgpm_t365.ids('pgpm_t365.d_kept'), array[21]::bigint[], 'D: the rename
 -- ============================================================================================================
 create table pgpm_t365.b (id bigint primary key, payload text);
 insert into pgpm_t365.b values (5, 'orig'), (6, 'orig'), (7, 'orig');
+select pgpm_formal.baseline('pgpm_t365.b');
 call pgpm.transmute('pgpm_t365.b'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t365.b'::regclass, '60000');
 insert into pgpm_t365.b values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t365.b', 'id = 35005');
 create table public.b365_ref (id bigint primary key, p_id bigint references pgpm_t365.b(id));
 insert into public.b365_ref values (1, 35005);
 select child_name as b_doomed from pgpm.part where parent_table = 'pgpm_t365.b'::regclass and lo = '0' \gset
@@ -178,8 +186,10 @@ update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t365.b'::regclass and lo = '0';
 select format('alter table pgpm_t365.%I rename to b_kept', :'b_doomed') \gexec
+select pgpm_formal.operator_owns('pgpm_t365.b_kept', 'pgpm_t365.b');   -- the detached retirement the operator renamed to keep
 select format('create table pgpm_t365.%I (id bigint, payload text)', :'b_doomed') \gexec
 select format('insert into pgpm_t365.%I values (99, ''mine'')', :'b_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t365.%I', :'b_doomed')::regclass);   -- the table created under the old name
 select format('pgpm_t365.%I', :'b_doomed') as b_sq \gset
 select ok(pgpm_t365.unrecorded('pgpm_t365.b') and pgpm_t365.reaches('pgpm_t365.b'),
   'LIVENESS: B: the mark records no oid, and retention reaches the range');
@@ -202,9 +212,11 @@ update cron.job set command = 'select 1';
 -- ============================================================================================================
 create table pgpm_t365.c (id bigint primary key, payload text);
 insert into pgpm_t365.c values (11, 'orig'), (12, 'orig'), (13, 'orig'), (14, 'orig');
+select pgpm_formal.baseline('pgpm_t365.c');
 call pgpm.transmute('pgpm_t365.c'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t365.c'::regclass, '60000');
 insert into pgpm_t365.c values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t365.c', 'id = 35005');
 create table public.c365_ref (id bigint primary key, p_id bigint references pgpm_t365.c(id));
 insert into public.c365_ref values (1, 35005);
 select child_name as c_doomed from pgpm.part where parent_table = 'pgpm_t365.c'::regclass and lo = '0' \gset
@@ -214,8 +226,10 @@ update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t365.c'::regclass and lo = '0';
 select format('alter table pgpm_t365.%I rename to c_kept', :'c_doomed') \gexec
+select pgpm_formal.operator_owns('pgpm_t365.c_kept', 'pgpm_t365.c');   -- the detached retirement the operator renamed to keep
 select format('create table pgpm_t365.%I (id bigint, payload text)', :'c_doomed') \gexec
 select format('insert into pgpm_t365.%I values (98, ''mine'')', :'c_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t365.%I', :'c_doomed')::regclass);   -- the table created under the old name
 select format('pgpm_t365.%I', :'c_doomed') as c_sq \gset
 -- the block a v0.4.0 tick put on the table under the name before the upgrade (#1437 verification V-01)
 select format('create trigger pgpm_write_block before insert or update or delete on %s for each row execute function pgpm._write_block_raise()', :'c_sq') \gexec
@@ -244,9 +258,11 @@ select lives_ok('insert into pgpm_t365.c_aside values (97, ''mine'')', 'C: run a
 -- ============================================================================================================
 create table pgpm_t365.e (id bigint primary key, payload text);
 insert into pgpm_t365.e values (31, 'orig'), (32, 'orig'), (33, 'orig');
+select pgpm_formal.baseline('pgpm_t365.e');
 call pgpm.transmute('pgpm_t365.e'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t365.e'::regclass, '60000');
 insert into pgpm_t365.e values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t365.e', 'id = 35005');
 create table public.e365_ref (id bigint primary key, p_id bigint references pgpm_t365.e(id));
 insert into public.e365_ref values (1, 35005);
 select child_name as e_doomed, child_oid as e_oid from pgpm.part where parent_table = 'pgpm_t365.e'::regclass and lo = '0' \gset
@@ -256,6 +272,7 @@ update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t365.e'::regclass and lo = '0';
 select format('pgpm_t365.%I', :'e_doomed') as e_rel \gset
+select pgpm_formal.operator_owns(:'e_rel'::regclass, 'pgpm_t365.e');   -- the detached v0.4.0 retirement the operator keeps
 select ok(pgpm_t365.unrecorded('pgpm_t365.e') and to_regclass(:'e_rel')::oid = :'e_oid'::oid
           and not exists (select 1 from pg_inherits where inhrelid = :'e_oid'::oid),
   'LIVENESS: E: the mark records no oid, and the detached partition stands under its own name');
@@ -283,6 +300,7 @@ select is(pgpm_t365.ids(:'e_rel'), array[31, 32, 33, 34]::bigint[], 'E: and hold
 -- ============================================================================================================
 create table pgpm_t365.f (id bigint primary key, payload text);
 insert into pgpm_t365.f values (41, 'orig'), (42, 'orig');
+select pgpm_formal.baseline('pgpm_t365.f');
 call pgpm.transmute('pgpm_t365.f'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t365.f'::regclass, '60000');
 select child_name as f_doomed, child_oid as f_oid from pgpm.part where parent_table = 'pgpm_t365.f'::regclass and lo = '0' \gset
@@ -300,9 +318,11 @@ select ok(exists (select 1 from pg_trigger where tgrelid = :'f_oid'::oid and tgn
 -- ============================================================================================================
 create table pgpm_t365.g (id bigint primary key, payload text);
 insert into pgpm_t365.g values (51, 'orig'), (52, 'orig'), (53, 'orig'), (54, 'orig'), (55, 'orig');
+select pgpm_formal.baseline('pgpm_t365.g');
 call pgpm.transmute('pgpm_t365.g'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t365.g'::regclass, '60000');
 insert into pgpm_t365.g values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t365.g', 'id = 35005');
 create table public.g365_ref (id bigint primary key, p_id bigint references pgpm_t365.g(id));
 insert into public.g365_ref values (1, 35005);
 select child_name as g_doomed from pgpm.part where parent_table = 'pgpm_t365.g'::regclass and lo = '0' \gset
@@ -312,6 +332,7 @@ update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t365.g'::regclass and lo = '0';
 select format('alter table pgpm_t365.%I rename to g_kept', :'g_doomed') \gexec
+select pgpm_formal.operator_owns('pgpm_t365.g_kept', 'pgpm_t365.g');   -- the detached retirement the operator renamed to keep
 select ok(pgpm_t365.unrecorded('pgpm_t365.g') and to_regclass(format('pgpm_t365.%I', :'g_doomed')) is null,
   'LIVENESS: G: the mark records no oid, and its name denotes nothing');
 select ok(pgpm_t365.blocked('pgpm_t365.g_kept'), 'LIVENESS: G: the renamed table carries the block retire() put on it');

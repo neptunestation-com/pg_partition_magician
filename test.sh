@@ -183,6 +183,36 @@ install_channel() {  # <channel> <profile> <service> [db]
   esac
 }
 
+# The invariant oracle's schema pgpm_formal and its event triggers (tests/formal/oracle.sql), test-only: every runner of
+# a file that calls pgpm_formal.baseline() installs it (tests/formal/migrate_baseline.py check holds them to that). It
+# depends on nothing of pgpm's, so a file may uninstall and reinstall pgpm under it, and a second run is a no-op.
+install_oracle() {  # <profile> <service> <db>
+  $DC --profile "$1" exec -T -e PGOPTIONS='-c client_min_messages=warning' "$2" \
+    psql -U postgres -d "$3" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null
+}
+
+# What the oracle says about one file's database, after the file and before its clone is dropped (formal methods
+# Phase 3 W4, docs/formal/phase3-design.md "Wiring"): ONE psql session runs tests/formal/report.sql, which calls
+# pgpm_formal.check() and judged() and writes their rows, tab separated, to <out>. REPORT MODE: nothing here fails a
+# file or a track. A session that fails (check() raising, a lost connection) is written as an E line, which
+# tests/formal/summarize.py counts and fails the track on at its end, with the liveness witness. <scope> is '' for the
+# whole database or a text[] literal of names (the pg_cron files on `postgres`). The archive track pipes the bucket's
+# contents in on standard input with <store> 1; every other caller passes 0 and redirects stdin from /dev/null.
+ORACLE_LOG="${PGPM_ORACLE_LOG:-$PWD/oracle-log}"
+oracle_report() {  # <out> <label> <scope> <store 0|1> <psql argv: the command that reaches the file's database>
+  local out="$1" label="$2" scope="$3" store="$4" rc=0
+  shift 4
+  "$@" -qAt -F "$(printf '\t')" -v ON_ERROR_STOP=1 -v file="$label" -v scope="$scope" -v load_store="$store" \
+    -f /repo/tests/formal/report.sql >"$out" 2>"$out.err" || rc=$?
+  if [ "$rc" != 0 ]; then
+    printf 'E\t%s\tthe oracle session exited %s: %s\n' "$label" "$rc" "$(tr '\t\n' '  ' <"$out.err" | cut -c1-600)" >>"$out"
+  fi
+  rm -f "$out.err"
+}
+oracle_summary() {  # <core|archive|timescale> <log dir> <title>: the track's summary; nonzero when its witness fails
+  python3 "$(dirname "$0")/tests/formal/summarize.py" "$1" "$2" "$3"
+}
+
 load_fixtures() {  # <profile> <service> [db] -- build the demo tables for the pgTAP suite
   local p="$1" s="$2" db="${3:-postgres}"
   psql_db "$p" "$s" "$db" -c "ALTER DATABASE \"$db\" SET poc.seed_count = 8000; ALTER DATABASE \"$db\" SET poc.events_count = 4000;" >/dev/null
@@ -265,6 +295,7 @@ prove_one() {  # <profile> <service> <db> <file basename> <log>
     return 1
   fi
   $DC --profile "$p" exec -T "$s" sh -c "pg_prove --timer -U postgres -d $db /repo/tests/$b" >>"$log" 2>&1 || rc=1
+  oracle_report "$ORACLE_DIR/${b%.sql}.oracle" "tests/$b" "" 0 $DC --profile "$p" exec -T "$s" psql -U postgres -d "$db" </dev/null
   psql_run "$p" "$s" -c "drop database if exists $db" >/dev/null 2>&1 || true
   return $rc
 }
@@ -303,6 +334,9 @@ run_version() {  # <pg_version>
     psql_db "$p" "$s" pgpm_tmpl -c "create extension if not exists pgtap;" >/dev/null
     install_channel "$ch" "$p" "$s" pgpm_tmpl
     load_fixtures "$p" "$s" pgpm_tmpl
+    # The invariant oracle (formal methods Phase 3, docs/formal/phase3-design.md): the custody files listed in
+    # tests/formal/custody_files.txt call pgpm_formal.baseline() and fail without it. Test-only, after pgpm.
+    install_oracle "$p" "$s" pgpm_tmpl
 
     # The files run PGPM_JOBS at a time (4 by default: a GitHub runner has four cores, and a channel's
     # 272 files are a second each of mostly idle waiting on docker exec, psql and pg_prove start-up), each
@@ -313,6 +347,8 @@ run_version() {  # <pg_version>
     # `postgres`, as they always have (see below). PGPM_JOBS=1 is the old serial run.
     local n=0 failed=0 pg_ready="" jobs="${PGPM_JOBS:-4}" logdir
     logdir=$(mktemp -d)
+    ORACLE_DIR="$ORACLE_LOG/pg$v-$ch"   # prove_one writes each file's oracle report here; kept after the run
+    rm -rf "$ORACLE_DIR"; mkdir -p "$ORACLE_DIR"
     local -a parallel=() serial=() alone=()
     for f in tests/*.sql; do
       local b; b="$(basename "$f")"; n=$((n + 1))
@@ -368,13 +404,24 @@ run_version() {  # <pg_version>
       if [ "$pg_ready" != "$ch" ]; then
         install_channel "$ch" "$p" "$s"
         load_fixtures "$p" "$s"
+        install_oracle "$p" "$s" postgres   # tests/78 is a custody file (tests/formal/custody_files.txt)
         pg_ready="$ch"
       fi
       echo; echo "### $b (on postgres)"
       if ! $DC --profile "$p" exec -T "$s" sh -c "pg_prove --timer -U postgres -d postgres /repo/tests/$b"; then
         failed=$((failed + 1))
       fi
+      # `postgres` is shared by both files and every channel, so the oracle judges only the parents the file made
+      # (by name, including the relations of that name the drop history saw: 78 drops dp78 at its end). 31 makes
+      # none, so its check() judges nothing scoped; it is still run, so a check() that raises there is counted.
+      local scope='{}'
+      [ "$b" = "78_retain_detach_dispatch_test.sql" ] && scope='{public.dp78,public.dpref78}'
+      oracle_report "$ORACLE_DIR/${b%.sql}.oracle" "tests/$b" "$scope" 0 $DC --profile "$p" exec -T "$s" psql -U postgres -d postgres </dev/null
     done
+    # The oracle's summary of the channel and its liveness witness (tests/formal/summarize.py): violations are
+    # reported only; the oracle not judging what this track must reach, or raising, fails the channel.
+    echo
+    oracle_summary core "$ORACLE_DIR" "PostgreSQL $v / $ch" || { echo "PG $v / $ch: the invariant oracle's liveness witness FAILED"; failed=$((failed + 1)); }
     psql_run "$p" "$s" -c "drop database if exists pgpm_tmpl" >/dev/null
     [ "$failed" -eq 0 ] || { echo "PG $v / $ch: FAIL ($failed file(s))"; return 1; }
 
@@ -438,6 +485,8 @@ run_timescale() {
     wait_pg "$prof" "$svc" 120
     echo "  edition: timescaledb $($DC "${px[@]}" -d postgres -tAc "select default_version||' ('||current_setting('timescaledb.license')||')' from pg_available_extensions where name='timescaledb'" 2>/dev/null | tr -d '\r')"
 
+    ORACLE_DIR="$ORACLE_LOG/timescale-$tag"   # each file's oracle report (formal Phase 3 W4); kept after the run
+    rm -rf "$ORACLE_DIR"; mkdir -p "$ORACLE_DIR"
     for f in tests/timescale/db/*.sql; do
       db="t_$(basename "$f" .sql | tr -cd 'a-z0-9_')"
       echo "--- ${f##*/} (db: $db) ---"
@@ -450,6 +499,7 @@ run_timescale() {
         --single-transaction -f /repo/pgpm_core/install.sql >/dev/null
       $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/pgpm_hypertable/install.sql >/dev/null
       $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/tests/timescale/fixtures.sql >/dev/null
+      $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null   # the invariant oracle
       # -tA gives clean TAP (no table chrome); no ON_ERROR_STOP so every assertion reports. psql's exit
       # status is kept, not left to `set -e` (which would end the track there with no verdict and no
       # teardown): a session lost part-way exits 2 and is judged below.
@@ -471,8 +521,11 @@ run_timescale() {
          || [ -z "$planned" ] || [ "$ran" != "$planned" ]; then
         echo "FAIL ($tag): $f (psql exit $rc)"; fail=1
       fi
+      oracle_report "$ORACLE_DIR/$(basename "$f" .sql).oracle" "$f" "" 0 $DC "${px[@]}" -d "$db" </dev/null
       $DC "${px[@]}" -d postgres -q -c "drop database if exists $db" >/dev/null
     done
+    echo
+    oracle_summary timescale "$ORACLE_DIR" "timescale supabase/postgres:$tag" || { echo "timescale ($tag): the invariant oracle's liveness witness FAILED"; fail=1; }
 
     # #422's cutover-identity guard proves itself the way every other guard does -- by being run
     # against a mutant that puts its defect back -- but it needs a real TimescaleDB, so its
@@ -806,8 +859,21 @@ run_archive() {
   $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q -f /repo/tests/archive/fixtures.sql >/dev/null
   $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null
   $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q -f /repo/pgpm_archive/install.sql >/dev/null
+  # the invariant oracle, as run_version's template has it (named here, not through install_oracle, so
+  # scripts/check_track_filters.py sees that this track reads it and holds archive.yml's path filter to it)
+  $DC "${px[@]}" -d pgpm_arch_tmpl -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null
 
-  local an=0
+  # The invariant oracle reads each file's retired objects back with pyarrow (tests/formal/load_store.py), so the venv the
+  # independent-reader verification below uses is made here, before the first file, rather than after the last.
+  if ! .venv-verify/bin/python -c 'import psycopg2, pyarrow, duckdb, pytz' >/dev/null 2>&1; then
+    [ -d .venv-verify ] || python3 -m venv .venv-verify
+    .venv-verify/bin/pip install -q -r scripts/requirements-verify.txt
+  fi
+  # the loader's own check: it decodes a JSON-annotated leaf to its value and leaves plain text alone (#1486)
+  if ! .venv-verify/bin/python tests/formal/load_store.py --selftest; then fail=1; fi
+  ORACLE_DIR="$ORACLE_LOG/archive"   # each file's oracle report (formal Phase 3 W4); kept after the run
+  rm -rf "$ORACLE_DIR"; mkdir -p "$ORACLE_DIR"
+  local an=0 aout keys
   for af in tests/archive/db/*.sql; do
     local ab adb; ab="$(basename "$af")"; an=$((an + 1)); adb="pgpm_a$an"
     $DC "${px[@]}" -d postgres -v ON_ERROR_STOP=1 -q -c "drop database if exists $adb" >/dev/null
@@ -823,9 +889,26 @@ run_archive() {
       $DC "${px[@]}" -d "$adb" -v ON_ERROR_STOP=1 -At -c "select parent_table || '.' || child_name || '  [' || lo || ', ' || hi || ')  attached=' || attached || '  write_blocked=' || pgpm._is_write_blocked(parent_table, child_name) || '  covered=' || pgpm._archive_fully_covered(parent_table, child_name) from pgpm.part order by parent_table::text, lo::numeric" || true
       $DC "${px[@]}" -d "$adb" -v ON_ERROR_STOP=1 -At -c "select 'ledger  ' || parent_table || '  [' || lo || ', ' || hi || ')  ' || child_name || '  key=' || coalesce(s3_key, '<null>') || '  rows=' || coalesce(rows_archived::text, '<null>') from pgpm.archive_ledger order by parent_table::text, lo::numeric" || true
     fi
+    # The oracle (formal Phase 3 W4): the retired chunks' objects, read from MinIO and decoded outside the database
+    # (tests/formal/load_store.py), go in on the report's standard input, so ArchiveNoClobber judges what the bucket
+    # holds now. A listing or a loader that fails is an E line in the report, counted by the summary.
+    aout="$ORACLE_DIR/${ab%.sql}.oracle"
+    keys=$($DC "${px[@]}" -d "$adb" -qAt -F "$(printf '\t')" -v ON_ERROR_STOP=1 -f /repo/tests/formal/store_keys.sql 2>"$aout.keys.err") \
+      || keys="ERROR $(tr '\n' ' ' <"$aout.keys.err")"
+    if [ "${keys#ERROR }" != "$keys" ] \
+       || ! printf '%s\n' "$keys" | .venv-verify/bin/python tests/formal/load_store.py "$net" curlimages/curl >"$aout.stage" 2>"$aout.keys.err"; then
+      : >"$aout.stage"   # no store: the report runs on, its ArchiveNoClobber not judged, and the failure is an E line
+      oracle_report "$aout" "tests/archive/db/$ab" "" 1 $DC "${px[@]}" -d "$adb" <"$aout.stage"
+      printf 'E\t%s\tthe bucket was not read: %s\n' "tests/archive/db/$ab" "$(tr '\t\n' '  ' <"$aout.keys.err" | cut -c1-600) ${keys#ERROR }" >>"$aout"
+    else
+      oracle_report "$aout" "tests/archive/db/$ab" "" 1 $DC "${px[@]}" -d "$adb" <"$aout.stage"
+    fi
+    rm -f "$aout.stage" "$aout.keys.err"
     $DC "${px[@]}" -d postgres -v ON_ERROR_STOP=1 -q -c "drop database if exists $adb" >/dev/null
   done
   $DC "${px[@]}" -d postgres -v ON_ERROR_STOP=1 -q -c "drop database if exists pgpm_arch_tmpl" >/dev/null
+  echo
+  oracle_summary archive "$ORACLE_DIR" "archive track" || { echo "archive track: the invariant oracle's liveness witness FAILED"; fail=1; }
 
   # The independent-reader verification below connects to `postgres`, so that database still needs the
   # extensions and both installers.
@@ -841,11 +924,7 @@ run_archive() {
   # (installs requirements the first time, and again whenever one of them will not import, so a venv
   # built before a requirement was added picks it up) since pyarrow/DuckDB are not instant to
   # install; safe to delete .venv-verify to force a clean reinstall.
-  echo "--- independent-reader verification (pyarrow + DuckDB) ---"
-  if ! .venv-verify/bin/python -c 'import psycopg2, pyarrow, duckdb, pytz' >/dev/null 2>&1; then
-    [ -d .venv-verify ] || python3 -m venv .venv-verify
-    .venv-verify/bin/pip install -q -r scripts/requirements-verify.txt
-  fi
+  echo "--- independent-reader verification (pyarrow + DuckDB) ---"   # the venv is made before the pgTAP files, above
   .venv-verify/bin/python scripts/verify_parquet.py "postgresql://postgres:postgres@localhost:5520/postgres" \
     || fail=1
   .venv-verify/bin/python scripts/verify_parquet_range.py "postgresql://postgres:postgres@localhost:5520/postgres" \
@@ -998,6 +1077,11 @@ run_archive() {
   # pairs bench/discriminate.sh completes with each encoder's refusal taken out and each of its two rules dropped.
   echo "--- no archive_fn strategy writes over a recorded chunk it does not reproduce guard (issue #975) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk.sh" pgpm_test-archive pgpm_perf258 || fail=1
+  # The invariant oracle's ArchiveNoClobber as a guard (formal Phase 3 W5) re-runs tests/archive/db/42 and reads its
+  # retired objects back: the clean-code half of the pair discriminate.sh completes with
+  # formal_archive_recorded_chunk_rows_unchecked.
+  echo "--- the oracle finds every retired chunk's rows in its object (formal Phase 3 W5) ---"
+  bash "$(dirname "$0")/bench/formal_archive_no_clobber.sh" pgpm_test-archive pgpm_perf478 || fail=1
   # The extension-resolution guard (#984) re-runs tests/archive/db/44 for the same reason: the clean-code half
   # of the pairs bench/discriminate.sh completes with the signers' search_path pin taken out, HMAC called
   # through it, and the NDJSON upload naming the http types again.
@@ -1430,6 +1514,14 @@ run_perf() {
     "bench/regrain_history_coarse_child.sh pgpm_perf465"
     "bench/obtain_backoff_headroom_logs.sh pgpm_perf451"
     "bench/autoregrain_skips_dropped.sh pgpm_perf471"
+    # The invariant oracle as a guard (formal Phase 3 W5): the clean-code halves of the pairs discriminate.sh completes
+    # with the formal_* mutations of pgpm and the oracle_* and summarize_* mutations of the oracle itself.
+    "bench/formal_no_lost_row.sh pgpm_perf472"
+    "bench/formal_drop_only_covered.sh pgpm_perf473"
+    "bench/formal_resolve_by_record.sh pgpm_perf474"
+    "bench/formal_no_wedge.sh pgpm_perf475"
+    "bench/formal_oracle_selftest.sh pgpm_perf476"
+    "bench/formal_summarize_selftest.sh pgpm_perf477"
   )
   local selected=()
   local n=${#guards[@]} idx

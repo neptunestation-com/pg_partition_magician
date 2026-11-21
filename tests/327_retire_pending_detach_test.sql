@@ -113,8 +113,10 @@ end $f$;
 -- [0, 100) holds 7, 42, 88; [100, 200) holds 150, 160 and is the one the operator detaches; [200, 300) holds 250.
 create table public.rp327a (id bigint primary key, payload text);
 insert into public.rp327a values (7, 'a'), (42, 'b'), (88, 'c');
+select pgpm_formal.baseline('public.rp327a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rp327a', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327a values (150, 'kept1'), (160, 'kept2'), (250, 'f');
+select pgpm_formal.wrote('public.rp327a', 'id in (150, 160, 250)');
 update pgpm.config set retain_batch = 1 where parent_table = 'public.rp327a'::regclass;
 select child_name as a0   from pgpm.part where parent_table = 'public.rp327a'::regclass and lo = '0'   \gset
 select child_name as a100 from pgpm.part where parent_table = 'public.rp327a'::regclass and lo = '100' \gset
@@ -123,11 +125,13 @@ select child_name as a200 from pgpm.part where parent_table = 'public.rp327a'::r
 -- the frontier moves to 600, so retention reaches [0, 300); the tick write-blocks all three and, paced by
 -- retain_batch, drops the oldest
 insert into public.rp327a values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327a', 'id = 600');
 call pgpm.maintain('public.rp327a');
 select ok(to_regclass(format('public.%I', :'a0')) is null
           and pgpm._is_write_blocked('public.rp327a', :'a100') and pgpm._is_write_blocked('public.rp327a', :'a200'),
   'LIVENESS: A: [0, 100) was retired, [100, 200) and [200, 300) are write-blocked and wait their turn');
 
+select pgpm_formal.operator_owns(format('public.%I', :'a100')::regclass);
 select ok(pg_temp.rp327_park_detach('rp327a', :'a100', 'rp327a'),
   'LIVENESS: A: the operator''s concurrent detach of [100, 200) is parked in its wait phase');
 select ok(pg_temp.rp327_kill_detach('rp327a'),
@@ -191,13 +195,16 @@ select is(pg_temp.rp327_ids('rp327a'), array[600]::bigint[],
 -- database) marks retiring_at and logs fail_retain_detach.
 create table public.rp327b (id bigint primary key, payload text);
 insert into public.rp327b values (110, 'k1'), (120, 'k2'), (130, 'k3');
+select pgpm_formal.baseline('public.rp327b');
 call pgpm.transmute('public.rp327b', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327b values (210, 'g'), (220, 'h');
+select pgpm_formal.wrote('public.rp327b', 'id in (210, 220)');
 create table public.rp327b_ref (id bigint primary key, b_id bigint references public.rp327b (id));
 update pgpm.config set retain_batch = 2 where parent_table = 'public.rp327b'::regclass;
 select child_name as b100 from pgpm.part where parent_table = 'public.rp327b'::regclass and lo = '100' \gset
 select child_name as b200 from pgpm.part where parent_table = 'public.rp327b'::regclass and lo = '200' \gset
 insert into public.rp327b values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327b', 'id = 600');
 insert into public.rp327b_ref values (1, 600);   -- references the frontier row, past no horizon: no crossing
 
 -- retention's write-block step runs ahead of the operator's detach, as maintain()'s does
@@ -205,6 +212,7 @@ select pgpm._enforce_write_blocks('public.rp327b');
 select ok(pgpm._is_write_blocked('public.rp327b', :'b100') and pgpm._is_write_blocked('public.rp327b', :'b200'),
   'LIVENESS: B: [100, 200) and [200, 300) are write-blocked');
 
+select pgpm_formal.operator_owns(format('public.%I', :'b100')::regclass);
 select ok(pg_temp.rp327_park_detach('rp327b', :'b100', 'rp327b'),
   'LIVENESS: B: the operator''s concurrent detach of [100, 200) is parked in its wait phase');
 select ok(pg_temp.rp327_kill_detach('rp327b'),
@@ -248,13 +256,16 @@ select is((select relkind::text || '/' || relispartition::text from pg_class
 -- (pgpm.part.detach_dispatched_oid, which such an install did not have). [100, 200) holds 101 and 102, the operator's.
 create table public.rp327d (id bigint primary key, payload text);
 insert into public.rp327d values (101, 'd1'), (102, 'd2');
+select pgpm_formal.baseline('public.rp327d');
 call pgpm.transmute('public.rp327d', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327d values (205, 'g'), (600, 'frontier');
+select pgpm_formal.wrote('public.rp327d', 'id in (205, 600)');
 create table public.rp327d_ref (id bigint primary key, d_id bigint references public.rp327d (id));
 insert into public.rp327d_ref values (1, 600);
 update pgpm.config set retain_batch = 1 where parent_table = 'public.rp327d'::regclass;
 select child_name as d100 from pgpm.part where parent_table = 'public.rp327d'::regclass and lo = '100' \gset
 select pgpm._enforce_write_blocks('public.rp327d');
+select pgpm_formal.operator_owns(format('public.%I', :'d100')::regclass);
 select ok(pg_temp.rp327_park_detach('rp327d', :'d100', 'rp327d') and pg_temp.rp327_kill_detach('rp327d'),
   'LIVENESS: D: the operator''s concurrent detach of [100, 200) was parked in its wait phase and interrupted');
 update pgpm.part set retiring_at = now() - interval '1 hour', retiring_oid = child_oid
@@ -288,10 +299,13 @@ select is(pg_temp.rp327_ids(:'d100'), array[101, 102]::bigint[],
 -- retire() would then honour. No incoming FK: the one-step path. [100, 200) holds 131, 132 and 133.
 create table public.rp327e (id bigint primary key, payload text);
 insert into public.rp327e values (131, 'e1'), (132, 'e2'), (133, 'e3');
+select pgpm_formal.baseline('public.rp327e');
 call pgpm.transmute('public.rp327e', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327e values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327e', 'id = 600');
 select child_name as e100 from pgpm.part where parent_table = 'public.rp327e'::regclass and lo = '100' \gset
 select pgpm._enforce_write_blocks('public.rp327e');
+select pgpm_formal.operator_owns(format('public.%I', :'e100')::regclass);
 select ok(pg_temp.rp327_park_detach('rp327e', :'e100', 'rp327e') and pg_temp.rp327_kill_detach('rp327e'),
   'LIVENESS: E: the operator''s concurrent detach of [100, 200) was parked in its wait phase and interrupted');
 update pgpm.part set retiring_at = now() - interval '1 hour', retiring_oid = child_oid
@@ -318,8 +332,10 @@ select is(pg_temp.rp327_ids(:'e100'), array[131, 132, 133]::bigint[],
 -- no partition pending a detach is dropped. [100, 200) holds 170 and 180.
 create table public.rp327r (id bigint primary key, payload text);
 insert into public.rp327r values (7, 'a');
+select pgpm_formal.baseline('public.rp327r');
 call pgpm.transmute('public.rp327r', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327r values (170, 'r1'), (180, 'r2'), (600, 'frontier');
+select pgpm_formal.wrote('public.rp327r', 'id in (170, 180, 600)');
 select child_name as r100 from pgpm.part where parent_table = 'public.rp327r'::regclass and lo = '100' \gset
 select pgpm._enforce_write_blocks('public.rp327r');
 create function pg_temp.rp327_waits(p_app text) returns boolean language plpgsql as $f$
@@ -391,8 +407,10 @@ select ok(case when to_regclass(format('public.%I', :'r100')) is null
 -- 162 and 163.
 create table public.rp327g (id bigint primary key, payload text);
 insert into public.rp327g values (161, 'g1'), (162, 'g2'), (163, 'g3');
+select pgpm_formal.baseline('public.rp327g');
 call pgpm.transmute('public.rp327g', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327g values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327g', 'id = 600');
 create table public.rp327g_ref (id bigint primary key, g_id bigint references public.rp327g (id));
 insert into public.rp327g_ref values (1, 600);
 update pgpm.config set retain_batch = 1 where parent_table = 'public.rp327g'::regclass;
@@ -404,6 +422,7 @@ select ok((select retiring_at is not null from pgpm.part where parent_table = 'p
           and exists (select 1 from pgpm.log where parent_table = 'public.rp327g'::regclass and action = 'fail_retain_detach' and lo = '100')
           and not exists (select 1 from pgpm.log where parent_table = 'public.rp327g'::regclass and action = 'retain_detach'),
   'LIVENESS: G: retire() stamped [100, 200) and its dispatch failed: pgpm issued no detach');
+select pgpm_formal.operator_owns(format('public.%I', :'g100')::regclass);
 select is(pg_temp.rp327_detach_concurrently('rp327g', :'g100'), 'completed',
   'LIVENESS: G: the operator''s concurrent detach of [100, 200) completes');
 select ok((select not relispartition from pg_class where oid = to_regclass(format('public.%I', :'g100')))
@@ -430,8 +449,10 @@ select is(pg_temp.rp327_ids(:'g100'), array[161, 162, 163]::bigint[],
 -- [100, 200) holds 171 and 172; [200, 300) holds 271, 272 and 273.
 create table public.rp327h (id bigint primary key, payload text);
 insert into public.rp327h values (171, 'h1'), (172, 'h2');
+select pgpm_formal.baseline('public.rp327h');
 call pgpm.transmute('public.rp327h', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327h values (271, 'i1'), (272, 'i2'), (273, 'i3'), (600, 'frontier');
+select pgpm_formal.wrote('public.rp327h', 'id in (271, 272, 273, 600)');
 create table public.rp327h_ref (id bigint primary key, h_id bigint references public.rp327h (id));
 insert into public.rp327h_ref values (1, 600);
 select child_name as h100 from pgpm.part where parent_table = 'public.rp327h'::regclass and lo = '100' \gset
@@ -441,6 +462,8 @@ update pgpm.part set retiring_at = now() - interval '1 hour', retiring_oid = chi
 insert into pgpm.log (parent_table, action, lo, hi, method)
   select 'public.rp327h'::regclass, 'fail_retain_detach', lo, hi, 'relation "cron.job" does not exist'
     from pgpm.part where parent_table = 'public.rp327h'::regclass and lo in ('100', '200');
+select pgpm_formal.operator_owns(format('public.%I', :'h100')::regclass);
+select pgpm_formal.operator_owns(format('public.%I', :'h200')::regclass);
 select format('alter table public.rp327h detach partition public.%I', :'h100') \gexec
 select format('alter table public.rp327h detach partition public.%I', :'h200') \gexec
 update pgpm.part set child_oid = null where parent_table = 'public.rp327h'::regclass and lo = '200';
@@ -482,8 +505,10 @@ update pgpm.part set retiring_at = null, retiring_oid = null where parent_table 
 -- its detach and records the dispatch, and the run of that command is interrupted in its wait phase.
 create table public.rp327c (id bigint primary key, payload text);
 insert into public.rp327c values (141, 'c1'), (142, 'c2'), (143, 'c3'), (144, 'c4');
+select pgpm_formal.baseline('public.rp327c');
 call pgpm.transmute('public.rp327c', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327c values (251, 'f1'), (252, 'f2'), (600, 'frontier');   -- [200, 300) is part F's
+select pgpm_formal.wrote('public.rp327c', 'id in (251, 252, 600)');
 create table public.rp327c_ref (id bigint primary key, c_id bigint references public.rp327c (id));
 insert into public.rp327c_ref values (1, 600);
 update pgpm.config set retain_batch = 1 where parent_table = 'public.rp327c'::regclass;
@@ -567,8 +592,10 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327
 -- [100, 200) holds 181 and 182.
 create table public.rp327i (id bigint primary key, payload text);
 insert into public.rp327i values (181, 'i1'), (182, 'i2');
+select pgpm_formal.baseline('public.rp327i');
 call pgpm.transmute('public.rp327i', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327i values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327i', 'id = 600');
 create table public.rp327i_ref (id bigint primary key, i_id bigint references public.rp327i (id));
 insert into public.rp327i_ref values (1, 600);
 update pgpm.config set retain_batch = 1 where parent_table = 'public.rp327i'::regclass;
@@ -598,8 +625,10 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327
 -- landed detach, counted) would count it as rows pgpm took out. [100, 200) holds 191, 192 and 193.
 create table public.rp327j (id bigint primary key, payload text);
 insert into public.rp327j values (191, 'j1'), (192, 'j2'), (193, 'j3');
+select pgpm_formal.baseline('public.rp327j');
 call pgpm.transmute('public.rp327j', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327j values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327j', 'id = 600');
 create table public.rp327j_ref (id bigint primary key, j_id bigint references public.rp327j (id));
 insert into public.rp327j_ref values (1, 600);
 update pgpm.config set retain_batch = 1 where parent_table = 'public.rp327j'::regclass;
@@ -611,6 +640,7 @@ select ok(:'j_cmd' = pgpm._detach_cmd('public.rp327j', 'public', :'j100')
           and (select retiring_at is not null and detach_dispatched_oid is null from pgpm.part
                 where parent_table = 'public.rp327j'::regclass and child_name = :'j100'),
   'LIVENESS: J: [100, 200) carries a mark with no dispatch record, the job armed with its detach');
+select pgpm_formal.operator_owns(format('public.%I', :'j100')::regclass);
 select lives_ok(format('alter table public.rp327j detach partition public.%I', :'j100'),
   'LIVENESS: J: the operator detaches [100, 200)');
 select pgpm.set_retain('public.rp327j', '1000');
@@ -639,20 +669,26 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327
 --   M  history that records the failed runs under the command's text, and the parent renamed since.
 create table public.rp327k (id bigint primary key, payload text);
 insert into public.rp327k values (101, 'k1'), (102, 'k2'), (103, 'k3');
+select pgpm_formal.baseline('public.rp327k');
 call pgpm.transmute('public.rp327k', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327k values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327k', 'id = 600');
 create table public.rp327k_ref (id bigint primary key, k_id bigint references public.rp327k (id));
 insert into public.rp327k_ref values (1, 600);
 create table public.rp327l (id bigint primary key, payload text);
 insert into public.rp327l values (111, 'l1'), (112, 'l2');
+select pgpm_formal.baseline('public.rp327l');
 call pgpm.transmute('public.rp327l', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327l values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327l', 'id = 600');
 create table public.rp327l_ref (id bigint primary key, l_id bigint references public.rp327l (id));
 insert into public.rp327l_ref values (1, 600);
 create table public.rp327m (id bigint primary key, payload text);
 insert into public.rp327m values (121, 'm1'), (122, 'm2'), (123, 'm3'), (124, 'm4');
+select pgpm_formal.baseline('public.rp327m');
 call pgpm.transmute('public.rp327m', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327m values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327m', 'id = 600');
 create table public.rp327m_ref (id bigint primary key, m_id bigint references public.rp327m (id));
 insert into public.rp327m_ref values (1, 600);
 update pgpm.config set retain_batch = 1 where parent_table in ('public.rp327k'::regclass, 'public.rp327l'::regclass, 'public.rp327m'::regclass);
@@ -662,12 +698,15 @@ select child_name as m100 from pgpm.part where parent_table = 'public.rp327m'::r
 -- each retired in turn as far as the dispatch (one detach in flight at a time), then detached by hand, so the next
 -- can be dispatched; each record then emptied, as the upgrade's added column leaves it
 select ok(not pgpm.retire('public.rp327k', :'k100'), 'fixture: K: dispatched');
+select pgpm_formal.operator_owns(format('public.%I', :'k100')::regclass);
 select format('alter table public.rp327k detach partition public.%I', :'k100') \gexec
 select ok(not pgpm.retire('public.rp327l', :'l100'), 'fixture: L: dispatched');
 select command as l_cmd from cron.job where jobname = 'pgpm_detach' \gset
+select pgpm_formal.operator_owns(format('public.%I', :'l100')::regclass);
 select format('alter table public.rp327l detach partition public.%I', :'l100') \gexec
 select ok(not pgpm.retire('public.rp327m', :'m100'), 'fixture: M: dispatched');
 select command as m_cmd from cron.job where jobname = 'pgpm_detach' \gset
+select pgpm_formal.operator_owns(format('public.%I', :'m100')::regclass);
 select format('alter table public.rp327m detach partition public.%I', :'m100') \gexec
 update pgpm.part set detach_dispatched_oid = null
  where parent_table in ('public.rp327k'::regclass, 'public.rp327l'::regclass, 'public.rp327m'::regclass) and lo = '100';
@@ -708,8 +747,10 @@ select is(pg_temp.rp327_ids(:'k100') || pg_temp.rp327_ids(:'l100') || pg_temp.rp
 -- the mark its record and the detach that then lands is completed as pgpm's own. [100, 200) holds 131 and 132.
 create table public.rp327n (id bigint primary key, payload text);
 insert into public.rp327n values (131, 'n1'), (132, 'n2');
+select pgpm_formal.baseline('public.rp327n');
 call pgpm.transmute('public.rp327n', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.rp327n values (600, 'frontier');
+select pgpm_formal.wrote('public.rp327n', 'id = 600');
 create table public.rp327n_ref (id bigint primary key, n_id bigint references public.rp327n (id));
 insert into public.rp327n_ref values (1, 600);
 update pgpm.config set retain_batch = 1 where parent_table = 'public.rp327n'::regclass;
@@ -737,5 +778,10 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327
 select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327n'::regclass
             and action = 'retain_disown'),
   0, 'N: and nothing disowned it');
+
+select pgpm_formal.expect('ResolveByRecord', 'public.rp327a_p0000000000000000100', $r$the operator's DETACH ... CONCURRENTLY is parked and its session killed (rp327_park_detach / rp327_kill_detach); the file then runs pgpm._detach_reap(), which by contract finishes the abandoned detach and leaves the table standing (asserted: LIVENESS detach_reap, relispartition false, #652 refusal after). pgpm issued no detach of its own$r$, 'public.rp327a');
+select pgpm_formal.expect('ResolveByRecord', 'public.rp327b_p0000000000000000100', $r$the operator's DETACH ... CONCURRENTLY is parked and its session killed (rp327_park_detach / rp327_kill_detach); the file then runs pgpm._detach_reap(), which by contract finishes the abandoned detach and leaves the table standing (asserted: LIVENESS detach_reap, relispartition false, #652 refusal after). pgpm issued no detach of its own$r$, 'public.rp327b');
+select pgpm_formal.expect('ResolveByRecord', 'public.rp327d_p0000000000000000100', $r$the operator's DETACH ... CONCURRENTLY is parked and its session killed (rp327_park_detach / rp327_kill_detach); the file then runs pgpm._detach_reap(), which by contract finishes the abandoned detach and leaves the table standing (asserted: LIVENESS detach_reap, relispartition false, #652 refusal after). pgpm issued no detach of its own$r$, 'public.rp327d');
+select pgpm_formal.expect('ResolveByRecord', 'public.rp327e_p0000000000000000100', $r$the operator's DETACH ... CONCURRENTLY is parked and its session killed (rp327_park_detach / rp327_kill_detach); the file then runs pgpm._detach_reap(), which by contract finishes the abandoned detach and leaves the table standing (asserted: LIVENESS detach_reap, relispartition false, #652 refusal after). pgpm issued no detach of its own$r$, 'public.rp327e');
 
 select * from finish();

@@ -55,6 +55,7 @@ create table public.rs131t (id bigint generated always as identity, ts timestamp
   primary key (id, ts));
 insert into public.rs131t (ts, payload) values
   (now() - interval '5 days 1 hour', 'd5b'), (now() - interval '5 days', 'd5'), (now() - interval '3 days', 'd3');
+select pgpm_formal.baseline('public.rs131t');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 
 select throws_like(
   $$ call pgpm.transmute('public.rs131t', 'ts', interval '1 day', p_retain => interval '-1 year 360 days', p_paused => false, p_obtain => 10) $$,
@@ -71,6 +72,7 @@ call pgpm.transmute('public.rs131t', 'ts', interval '1 day', p_retain => interva
 select is((select relkind::text from pg_class where oid = 'public.rs131t'::regclass), 'p',
   'the same call with retain 1 year converts the table');
 insert into public.rs131t (ts, payload) values (now() - interval '1 hour', 'h1'), (now(), 'written now');
+select pgpm_formal.wrote('public.rs131t', 'payload in (''h1'', ''written now'')');
 
 select child_name as t_write from pgpm.part
   where parent_table = 'public.rs131t'::regclass and attached

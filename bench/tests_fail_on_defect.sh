@@ -209,8 +209,9 @@ fresh() {  # a fresh <db> with pgtap
   q -d postgres -q -c "create database $DB" </dev/null >/dev/null 2>&1 &&
     q -d "$DB" -q -c "create extension if not exists pgtap" </dev/null >/dev/null 2>&1
 }
-install() {  # <install.sql text to load>
-  q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f - <"$1" >"$work/install.log" 2>&1
+install() {  # <install.sql text to load>, then the invariant oracle (custody files call pgpm_formal.baseline())
+  q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f - <"$1" >"$work/install.log" 2>&1 &&
+    q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/formal/oracle.sql" >>"$work/install.log" 2>&1
 }
 
 # plant <name> <find> <replace> [<find> <replace> ...]: this checkout's install.sql with each <find>

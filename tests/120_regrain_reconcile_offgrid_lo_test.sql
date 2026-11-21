@@ -43,9 +43,11 @@ end $$;
 -- INSERT into (20050) and holds 10 rows, fewer than the batch, so one copy tick completes it.
 create table public.rfa (id bigint primary key, payload text);
 insert into public.rfa select 20000 + 100 * g, 'orig' from generate_series(0, 399) g;
+select pgpm_formal.baseline('public.rfa');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rfa', 'id', 10000);
 select pgpm.obtain('public.rfa');
 insert into public.rfa values (65000, 'frontier');   -- past hi = 60000: the monolith is frozen
+select pgpm_formal.wrote('public.rfa', 'id = 65000');
 
 select is(
   (select child_name from pgpm.part where parent_table = 'public.rfa'::regclass and attached
@@ -73,8 +75,11 @@ select ok(to_regclass('public.rfa_p0000000000000014000') is null,
 
 -- committed DML inside the already-copied, clamped sub-range: one UPDATE, one DELETE, one INSERT
 update public.rfa set payload = 'updated' where id = 20600;
+select pgpm_formal.wrote('public.rfa', 'id = 20600');
 delete from public.rfa where id = 20700;
+select pgpm_formal.deleted('public.rfa', 'id = 20700');
 insert into public.rfa values (20050, 'inserted');
+select pgpm_formal.wrote('public.rfa', 'id = 20050');
 select is((select count(*)::int from public.rfa_pgpm_regrain_delta), 4,
   'LIVENESS: the delta holds the four captured keys (the UPDATE writes OLD and NEW; one DELETE; one INSERT)');
 
@@ -85,7 +90,7 @@ select is(
   0, 'nothing was treated as aged: no regrain_reconcile_aged row (no retention policy, so no aged range exists)');
 select is(
   (select rows from pgpm.log where parent_table = 'public.rfa'::regclass and action = 'regrain_reconcile'),
-  4::bigint, 'WITNESS: the regrain_reconcile row says all 4 captured keys were consumed');
+  4::bigint, 'LIVENESS: the regrain_reconcile row says all 4 captured keys were consumed');
 -- and they landed in the fine child the swap will attach, by identity, before the swap
 select is((select payload from public.rfa_p0000000000000020000 where id = 20050), 'inserted',
   'before the swap: 20050 (the INSERT) is in the fine child with its payload');
@@ -109,7 +114,7 @@ select is(
   (select c.relname from pg_inherits i join pg_class c on c.oid = i.inhrelid
     where i.inhparent = 'public.rfa'::regclass and c.relname = 'rfa_p0000000000000020000'),
   'rfa_p0000000000000020000'::name,
-  'WITNESS: the attached fine child is the one pgpm.part recorded, by name');
+  'LIVENESS: the attached fine child is the one pgpm.part recorded, by name');
 select is(
   (select child_oid from pgpm.part where parent_table = 'public.rfa'::regclass and child_name = 'rfa_p0000000000000020000'),
   'public.rfa_p0000000000000020000'::regclass::oid,
@@ -129,9 +134,11 @@ select is(
 -- change into one of them has nowhere to land and goes with the source at the swap: discarded, counted.
 create table public.rfb (id bigint primary key, payload text);
 insert into public.rfb select g, 'x' from generate_series(1, 200) g;
+select pgpm_formal.baseline('public.rfb');
 call pgpm.transmute('public.rfb', 'id', 50, p_retain => 900);
 select pgpm.obtain('public.rfb');
 insert into public.rfb values (1000, 'frontier');
+select pgpm_formal.wrote('public.rfb', 'id = 1000');
 
 select is(pgpm.regrain_step('public.rfb', 'rfb_p0000000000000000000_to_0000000000000000250', '50', 30),
   'prepared', 'aged: tick 1 installs capture');
@@ -142,6 +149,7 @@ select is(
   2, 'LIVENESS: two sub-ranges ([0, 50) and [50, 100)) were skipped as aged, so no child exists for them');
 
 delete from public.rfb where id = 10;   -- a backdated change in [0, 50): captured, eligible (10 < cursor 100)
+select pgpm_formal.deleted('public.rfb', 'id = 10');
 select is((select count(*)::int from public.rfb_pgpm_regrain_delta), 1,
   'LIVENESS: the backdated DELETE is captured');
 select is(pgpm.regrain_step('public.rfb', 'rfb_p0000000000000000000_to_0000000000000000250', '50', 30),
@@ -159,9 +167,11 @@ select is((select count(*)::int from public.rfb_pgpm_regrain_delta), 0,
 -- loss (A) is about. Induce it: the copied fine child for [0, 100) disappears out from under pgpm.
 create table public.rfc (id bigint primary key, payload text);
 insert into public.rfc select g * 10, 'x' from generate_series(1, 250) g;   -- 10, 20, ..., 2500
+select pgpm_formal.baseline('public.rfc');
 call pgpm.transmute('public.rfc', 'id', 1000);
 select pgpm.obtain('public.rfc');
 insert into public.rfc values (20000, 'frontier');
+select pgpm_formal.wrote('public.rfc', 'id = 20000');
 
 select is(pgpm.regrain_step('public.rfc', 'rfc_p0000000000000000000_to_0000000000000003000', '100', 50),
   'prepared', 'not aged: tick 1 installs capture');
@@ -170,6 +180,7 @@ select is(pgpm.regrain_step('public.rfc', 'rfc_p0000000000000000000_to_000000000
 drop table public.rfc_p0000000000000000000;
 delete from pgpm.part where parent_table = 'public.rfc'::regclass and child_name = 'rfc_p0000000000000000000';
 delete from public.rfc where id = 20;   -- captured, eligible (20 < cursor 100), and with nowhere to land
+select pgpm_formal.deleted('public.rfc', 'id = 20');
 select is((select count(*)::int from public.rfc_pgpm_regrain_delta), 1,
   'LIVENESS: the change is captured, in a sub-range that is below the cursor and NOT below any horizon');
 

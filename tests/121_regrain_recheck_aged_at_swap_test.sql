@@ -25,9 +25,11 @@ select plan(37);
 -- 4000 puts the horizon at 1000, so [0, 250) .. [750, 1000) are aged and only [1000, 1250) is copied.
 create table public.rl121 (id bigint primary key, payload text);
 insert into public.rl121 select g, 'p' || g from generate_series(1, 1000) g;
+select pgpm_formal.baseline('public.rl121');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rl121', 'id', 250, p_retain => 4000, p_regrain_batch => 1000);
 select pgpm.obtain('public.rl121');
 insert into public.rl121 values (5000, 'frontier');
+select pgpm_formal.wrote('public.rl121', 'id = 5000');
 
 select child_name as amono from pgpm.part
   where parent_table = 'public.rl121'::regclass and attached order by lo::numeric limit 1 \gset
@@ -107,9 +109,11 @@ select is((select array_agg(id order by id) from public.rl121 where id < 1250), 
 -- puts the horizon at 0, so nothing is aged at first; a second sentinel at 5500 moves it to 500.
 create table public.rp121 (id bigint primary key, payload text);
 insert into public.rp121 select g, 'x' from generate_series(1, 1000) g;
+select pgpm_formal.baseline('public.rp121');
 call pgpm.transmute('public.rp121', 'id', 250, p_retain => 4900, p_regrain_batch => 100);
 select pgpm.obtain('public.rp121');
 insert into public.rp121 values (5000, 'frontier');
+select pgpm_formal.wrote('public.rp121', 'id = 5000');
 create temp table rp121_pre as select id from public.rp121 where id < 1250;   -- the source, before any copy
 
 select child_name as pmono from pgpm.part
@@ -130,6 +134,7 @@ select is((select count(*)::int from rp121_pre where id < 250), 249,
 
 -- The frontier advances and the range ages out from under the half-copied child.
 insert into public.rp121 values (5500, 'frontier moved');
+select pgpm_formal.wrote('public.rp121', 'id = 5500');
 select is((select pgpm._retain_boundary(c) from pgpm.config c where c.parent_table = 'public.rp121'::regclass),
   '500', 'LIVENESS: (b) the horizon is now 500, so [0, 250) is entirely below it');
 

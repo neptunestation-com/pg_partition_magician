@@ -23,12 +23,16 @@ select plan(9);
 
 create table public.a387 (id bigint primary key, payload text);
 insert into public.a387 values (181, 'a'), (182, 'b');
+select pgpm_formal.baseline('public.a387');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.a387', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => true);
 insert into public.a387 values (600, 'frontier');
+select pgpm_formal.wrote('public.a387', 'id = 600');
 create table public.b387 (id bigint primary key, payload text);
 insert into public.b387 values (183, 'c');
+select pgpm_formal.baseline('public.b387');
 call pgpm.transmute('public.b387', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => true);
 insert into public.b387 values (650, 'frontier');
+select pgpm_formal.wrote('public.b387', 'id = 650');
 
 -- [100, 200)'s row made unanchored, its partition dropped, and the operator's table put under its name over another
 -- range; on a387 with the block an older install put on it by that name
@@ -50,7 +54,11 @@ begin
   return n;
 end $f$;
 select pg_temp.stranger('a387', true, array[9801, 9802]) as a_cell \gset
+select pgpm_formal.deleted('public.a387', 'id in (181, 182)');   -- stranger() dropped their partition by hand
+select pgpm_formal.operator_owns(format('public.%I', :'a_cell')::regclass);   -- the stranger, attached by hand
 select pg_temp.stranger('b387', false, array[9851]) as b_cell \gset
+select pgpm_formal.deleted('public.b387', 'id = 183');   -- stranger() dropped its partition by hand
+select pgpm_formal.operator_owns(format('public.%I', :'b_cell')::regclass);   -- the stranger, attached by hand
 
 select is((select string_agg(c.relname || ':' || pgpm._unanchored_stranger(p.parent_table, c.oid, p.lo, p.hi)::text, ',' order by c.relname)
              from pgpm.part p join pg_class c on c.oid in (to_regclass('public.' || :'a_cell'), to_regclass('public.' || :'b_cell'))
@@ -83,6 +91,7 @@ select is((select string_agg(c.relname, ',' order by c.relname) from pg_trigger 
 -- the remedy, run as the operator would
 select format('drop trigger if exists pgpm_write_block on public.%I', :'a_cell') \gexec
 select lives_ok($$insert into public.a387 values (9803, 'written')$$, 'once lifted by the named statement, the table takes writes');
+select pgpm_formal.wrote('public.a387', 'id = 9803');
 select is((select array_agg(id order by id) from public.a387 where id between 9800 and 9899), array[9801, 9802, 9803]::bigint[],
   'and holds its rows and the new one');
 

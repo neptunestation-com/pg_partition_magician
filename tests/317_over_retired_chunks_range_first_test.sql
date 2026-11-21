@@ -66,8 +66,10 @@ $$;
 -- A. id kind: 30,000 retired chunks, every one below every attached partition.
 create table t317.a (id bigint primary key, payload text not null);
 insert into t317.a select g, 'old' || g from generate_series(1, 90) g;
+select pgpm_formal.baseline('t317.a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('t317.a', 'id', 100, p_retain => 100::bigint, p_paused => true);
 insert into t317.a values (450, 'frontier');
+select pgpm_formal.wrote('t317.a', 'id = 450');
 select pgpm.set_archive_fn('t317.a', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, retired_at, child_oid)
 select 't317.a'::regclass, (-1000000 + g)::text, (-1000000 + g + 1)::text, 'gone_' || (g / 100), now(), 4000000000 + g
@@ -104,6 +106,7 @@ select cmp_ok(t317.reads_of($$select count(*) from pgpm._over_retired_chunks('t3
 -- instant but above it as text, one the reverse, and one has an offset-less bound.
 create table t317.b (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into t317.b (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+select pgpm_formal.baseline('t317.b');
 set search_path = t317_clock, pg_catalog, public;
 call pgpm.transmute('t317.b', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
 reset search_path;

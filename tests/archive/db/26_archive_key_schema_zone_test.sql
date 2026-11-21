@@ -104,10 +104,15 @@ create table t26a.evt (id bigint primary key, payload text);
 create table t26b.evt (id bigint primary key, payload text);
 insert into t26a.evt select g, 'a' from generate_series(1, 20) g;
 insert into t26b.evt select g, 'b' from generate_series(1, 3) g;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t26a.evt');
+select pgpm_formal.baseline('t26b.evt');
 call pgpm.transmute('t26a.evt', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 call pgpm.transmute('t26b.evt', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t26a.evt values (45000, 'frontier');   -- horizon 40000: [0, 10000) is aged in both
 insert into t26b.evt values (45000, 'frontier');
+select pgpm_formal.wrote('t26a.evt', 'id = 45000');
+select pgpm_formal.wrote('t26b.evt', 'id = 45000');
 select archive.configure('t26a.evt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select archive.configure('t26b.evt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t26a.evt', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
@@ -159,10 +164,14 @@ create table t26a.pq (id bigint primary key, payload text);
 create table t26b.pq (id bigint primary key, payload text);
 insert into t26a.pq select g, repeat('a', 40) from generate_series(1, 20) g;
 insert into t26b.pq select g, repeat('b', 40) from generate_series(1, 3) g;
+select pgpm_formal.baseline('t26a.pq');
+select pgpm_formal.baseline('t26b.pq');
 call pgpm.transmute('t26a.pq', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 call pgpm.transmute('t26b.pq', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t26a.pq values (45000, 'frontier');
 insert into t26b.pq values (45000, 'frontier');
+select pgpm_formal.wrote('t26a.pq', 'id = 45000');
+select pgpm_formal.wrote('t26b.pq', 'id = 45000');
 select archive.configure('t26a.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select archive.configure('t26b.pq', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t26a.pq', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
@@ -214,6 +223,7 @@ create table public.t26tz (ts timestamptz not null, id int not null, payload tex
 insert into public.t26tz values
   ('2024-01-01 00:10:00+00', 1, 'a'), ('2024-01-01 00:20:00+00', 2, 'a'), ('2024-01-01 00:30:00+00', 3, 'a'),
   ('2024-01-01 10:30:00+00', 4, 'b');
+select pgpm_formal.baseline('public.t26tz');
 call pgpm.transmute('public.t26tz', 'ts', interval '1 hour');
 select archive.configure('public.t26tz', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select child_name as child from pgpm.part where parent_table = 'public.t26tz'::regclass order by lo::timestamptz limit 1 \gset

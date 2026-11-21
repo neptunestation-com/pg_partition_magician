@@ -56,8 +56,11 @@ $$;
 create type t33.pair as (a int, b int);
 create table t33.cmp (id bigint primary key, t t33.pair, payload text not null);
 insert into t33.cmp values (1, (7, 8), 'keep-one'), (2, (9, 10), 'keep-two');
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t33.cmp');
 call pgpm.transmute('t33.cmp', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t33.cmp values (45000, (0, 0), 'frontier');
+select pgpm_formal.wrote('t33.cmp', 'id = 45000');
 select current_database() || '-t33/' as p \gset
 select archive.configure('t33.cmp', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t33.cmp', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
@@ -105,6 +108,7 @@ select is((select array_agg(format('%s|%s|%s|%s', d ->> 'id', d -> 't' ->> 'a', 
 create table t33.ts (t timestamptz not null, id int not null, payload text not null, primary key (t, id));
 insert into t33.ts values
   ('2024-01-01 00:10:00+00', 1, 'one'), ('2024-01-01 00:20:00+00', 2, 'two'), ('2024-01-01 10:30:00+00', 3, 'three');
+select pgpm_formal.baseline('t33.ts');
 call pgpm.transmute('t33.ts', 't', interval '1 hour');
 select archive.configure('t33.ts', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select tableoid::regclass as ts_child_rel from t33.ts where id = 1 \gset

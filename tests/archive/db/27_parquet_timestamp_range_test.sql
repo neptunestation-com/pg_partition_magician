@@ -116,9 +116,12 @@ select is((select substring(bytes from :tstz_off + 1 for 24) from t27.enc where 
 create table public.far27m (id bigint primary key, expires_at timestamptz);
 insert into public.far27m select g, now() from generate_series(1, 20) g;
 update public.far27m set expires_at = '294250-01-01 00:00:00+00' where id = 7;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.far27m');
 call pgpm.transmute('public.far27m', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into public.far27m select g, now() from generate_series(10000, 10009) g;
 insert into public.far27m values (45000, now());
+select pgpm_formal.wrote('public.far27m', 'id >= 10000');
 select mk_archive_config('far27m', false);
 update pgpm.config set retain_batch = 0 where parent_table = 'public.far27m'::regclass;
 select pgpm.set_archive_fn('public.far27m', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);

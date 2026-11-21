@@ -31,6 +31,8 @@ fi
 if [ "$fail" = 0 ]; then
   q -d "$DB" -q -c "ALTER DATABASE $DB SET poc.seed_count = 8000; ALTER DATABASE $DB SET poc.events_count = 4000;" >/dev/null 2>&1
   q -d "$DB" -q -f /repo/fixtures/demo.sql >/dev/null 2>&1
+  # the invariant oracle (tests/formal/oracle.sql): the test file calls pgpm_formal.baseline()
+  q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null 2>&1
   out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
   rc=$?
   echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20

@@ -49,6 +49,7 @@ select dblink_connect('t268', 'dbname=' || current_database());
 -- the table every swept call names: plain and unmanaged, so a call that is not refused acts on nothing
 create table public.t268_sweep (id bigint primary key, ts timestamptz not null default now());
 insert into public.t268_sweep values (1), (2), (3);
+select pgpm_formal.baseline('public.t268_sweep');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 
 -- a type-correct sample for every argument type a public routine takes; an unknown type is an ERROR, never
 -- a skipped case, so a routine with a new argument type cannot leave the sweep silently
@@ -215,6 +216,7 @@ select is(
 -- ======================================================================================================
 create table public.t268_sp (id bigint primary key, body text);
 insert into public.t268_sp select g * 10, 'r' || g from generate_series(1, 250) g;
+select pgpm_formal.baseline('public.t268_sp');
 create table public.t268_spc (rid bigint primary key,
                               id bigint constraint t268_spc_fk references public.t268_sp on delete cascade);
 insert into public.t268_spc values (1, 10), (2, 2500);
@@ -255,6 +257,7 @@ create temp table t268_oid (rel text primary key, oid oid);
 -- B1. a null argument (p_paused), and the same call without it converts
 create table public.t268_np (id bigint primary key, v text);
 insert into public.t268_np select g, 'x' from generate_series(1, 30) g;
+select pgpm_formal.baseline('public.t268_np');
 insert into t268_oid values ('public.t268_np', 'public.t268_np'::regclass);
 select throws_like(
   $$ select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_np', 'id', 10::bigint, p_paused => null) $c$) $$,
@@ -270,6 +273,7 @@ select lives_ok(
 -- B2. a negative-scale numeric key whose step its bounds cannot represent (#952 bullet 1, A952-1's fixture)
 create table public.t268_ns (id numeric(6,-2) primary key, v text);
 insert into public.t268_ns select g * 100, 'x' from generate_series(1, 20) g;
+select pgpm_formal.baseline('public.t268_ns');
 insert into t268_oid values ('public.t268_ns', 'public.t268_ns'::regclass);
 select is((select format_type(atttypid, atttypmod) from pg_attribute
             where attrelid = 'public.t268_ns'::regclass and attname = 'id') || ' / ' || (select max(id) from public.t268_ns)::text
@@ -283,6 +287,7 @@ select is(pg_temp.t268_state('public.t268_ns', (select oid from t268_oid where r
           || ' | ' || (select string_agg(id::text, ',' order by id) from public.t268_ns where id in (100, 1000, 2000)),
   'r | same oid | config:false | bound:false | claim:false | 100,1000,2000', 'B2: refused before anything committed');
 select lives_ok($$ insert into public.t268_ns values (2100, 'past hi') $$, 'B2: a write past the old frontier is accepted');
+select pgpm_formal.wrote('public.t268_ns', 'id = 2100');
 select lives_ok(
   $$ select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_ns', 'id', 100::bigint) $c$) $$,
   'LIVENESS: (B2) a step of 100, which the column can represent, converts the same table');
@@ -293,6 +298,7 @@ select is((select string_agg(pg_get_expr(c.relpartbound, c.oid), ', ') from pg_i
 -- B3. a bound past the column's precision: numeric(4,0) whose next step-10 boundary is 10000
 create table public.t268_ov (id numeric(4,0) primary key, v text);
 insert into public.t268_ov select g * 5, 'x' from generate_series(1, 1999) g;
+select pgpm_formal.baseline('public.t268_ov');
 insert into t268_oid values ('public.t268_ov', 'public.t268_ov'::regclass);
 select throws_ok($$ select 10000::numeric(4,0) $$, '22003', NULL,
   'LIVENESS: (B3) the boundary above the newest key, 10000, cannot be stored in numeric(4,0)');
@@ -307,6 +313,7 @@ select is(pg_temp.t268_state('public.t268_ov', (select oid from t268_oid where r
 -- B4. a NOT VALID incoming key under 'preserve' (#902)
 create table public.t268_nvi (id bigint primary key);
 insert into public.t268_nvi values (1), (4), (9);
+select pgpm_formal.baseline('public.t268_nvi');
 create table public.t268_nvi_ref (cid int primary key, nid bigint);
 insert into public.t268_nvi_ref values (1, 4), (2, 77);
 alter table public.t268_nvi_ref add constraint t268_nvi_fk foreign key (nid) references public.t268_nvi (id) not valid;
@@ -325,6 +332,7 @@ create table public.t268_tgt (k int primary key);
 insert into public.t268_tgt values (1), (2);
 create table public.t268_nvo (id bigint primary key, k int);
 insert into public.t268_nvo values (1, 1), (2, 2), (3, 5);
+select pgpm_formal.baseline('public.t268_nvo');
 alter table public.t268_nvo add constraint t268_nvo_fk foreign key (k) references public.t268_tgt (k) not valid;
 insert into t268_oid values ('public.t268_nvo', 'public.t268_nvo'::regclass);
 select throws_like(
@@ -340,6 +348,7 @@ select is(pg_temp.t268_state('public.t268_nvo', (select oid from t268_oid where 
 create table public.t268_nan (id numeric primary key, v text);
 insert into public.t268_nan select g, 'x' from generate_series(1, 40) g;
 insert into public.t268_nan values ('NaN', 'poison');
+select pgpm_formal.baseline('public.t268_nan');
 insert into t268_oid values ('public.t268_nan', 'public.t268_nan'::regclass);
 select throws_like(
   $$ select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_nan', 'id', 10::bigint) $c$) $$,
@@ -353,10 +362,12 @@ select is(pg_temp.t268_state('public.t268_nan', (select oid from t268_oid where 
 select current_setting('server_version_num')::int >= 180000 as pg18 \gset
 create table public.t268_nei (id bigint primary key, v text);
 insert into public.t268_nei select g, 'x' from generate_series(1, 50) g;
+select pgpm_formal.baseline('public.t268_nei');
 create table public.t268_nei_ref (cid int primary key, nid bigint);
 insert into public.t268_nei_ref values (1, 7), (2, 9999);
 create table public.t268_neo (id bigint primary key, k int);
 insert into public.t268_neo values (1, 1), (2, 404);
+select pgpm_formal.baseline('public.t268_neo');
 \if :pg18
 alter table public.t268_nei_ref add constraint t268_nei_fk foreign key (nid) references public.t268_nei (id) not enforced;
 alter table public.t268_neo add constraint t268_neo_fk foreign key (k) references public.t268_tgt (k) not enforced;

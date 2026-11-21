@@ -58,9 +58,11 @@ end $$;
 
 create table public.t313_ev (id bigint primary key, payload text);
 insert into public.t313_ev values (7, 'a'), (42, 'b'), (88, 'c');
+select pgpm_formal.baseline('public.t313_ev');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.t313_ev', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
 insert into public.t313_ev values (150, 'd'), (160, 'e');
 insert into public.t313_ev values (500, 'frontier');   -- horizon 200: [0, 100) and [100, 200) write-blocked
+select pgpm_formal.wrote('public.t313_ev', 'id in (150, 160, 500)');
 select pgpm._enforce_write_blocks('public.t313_ev');
 select pgpm.set_archive_fn('public.t313_ev', 't313.via_parent(regclass,name,text,text)'::regprocedure);
 select child_name as p0   from pgpm.part where parent_table = 'public.t313_ev'::regclass and lo = '0'   \gset

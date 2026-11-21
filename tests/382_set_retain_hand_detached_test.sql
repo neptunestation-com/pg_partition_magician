@@ -16,14 +16,17 @@ select plan(9);
 
 create table public.t382 (id bigint primary key, payload text);
 insert into public.t382 select g, 'base' from generate_series(1, 15000) g;
+select pgpm_formal.baseline('public.t382');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.t382', 'id', 10000, p_retain => 30000, p_paused => false);
 select pgpm.obtain('public.t382');
 insert into public.t382 values (25000, 'kept-a'), (26000, 'kept-b'), (35000, 'sib'), (55000, 'frontier');
+select pgpm_formal.wrote('public.t382', 'id in (25000, 26000, 35000, 55000)');
 call pgpm.maintain('public.t382');   -- horizon 20000: drops the monolith [0, 20000), keeps the rest
 
 select child_name as kept, child_oid as kept_oid from pgpm.part
  where parent_table = 'public.t382'::regclass and lo = '20000' \gset
 select child_oid as sib_oid from pgpm.part where parent_table = 'public.t382'::regclass and lo = '30000' \gset
+select pgpm_formal.operator_owns(format('public.%I', :'kept'));   -- detached by hand below and kept
 -- the operator detaches [20000, 30000) to keep it
 select format('alter table public.t382 detach partition public.%I', :'kept') \gexec
 

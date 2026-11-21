@@ -39,6 +39,7 @@ create function t357.ts(p text) returns timestamptz language plpgsql stable as $
 begin return p::timestamptz; exception when data_exception then return null; end $f$;
 create table t357.ev (ts timestamptz not null, body text);
 insert into t357.ev values (now() - interval '40 days', 'old'), (now(), 'now');
+select pgpm_formal.baseline('t357.ev');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('t357.ev', 'ts', interval '1 month', 2, p_paused => true);
 select pgpm.extend_to('t357.ev', pgpm._ts_text(date_trunc('month', now(), 'UTC') + interval '4 months'));
 
@@ -68,6 +69,7 @@ select format('drop table t357.%I', :'m2_name') \gexec
 -- PART B's chunk: a relation renamed aside (it exists, so it is not marked gone), under a name pgpm.part does not
 -- track, over M1's tracked partition
 create table t357.moved (ts timestamptz);
+select pgpm_formal.operator_owns('t357.moved');
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, child_oid, rows_archived)
 values ('t357.ev', pgpm._ts_text(:'m1'::timestamptz), pgpm._ts_text(:'m1'::timestamptz + interval '10 days'), 'moved',
         't357.moved'::regclass::oid, 0);

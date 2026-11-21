@@ -7,6 +7,8 @@
 select plan(2);
 
 select mk_keyed_hypertable('hp_ret', 240, '1 day', '10 days');   -- a keyed hypertable (no policy on Apache)
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('hp_ret');
 
 -- the operator supplies the retention window explicitly (the Apache-correct path)
 call pgpm.from_hypertable('hp_ret', 'ts', interval '1 month', p_retain => interval '90 days', p_paused => false);

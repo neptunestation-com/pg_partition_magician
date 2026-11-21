@@ -35,8 +35,10 @@ set client_min_messages = warning;
 -- step 10, retain 30. The monolith is [0, 10); obtain lays [10, 20) to [60, 70) ahead of it.
 create table public.rl263 (id bigint primary key, payload text);
 insert into public.rl263 values (1, 'a'), (2, 'b'), (3, 'c');
+select pgpm_formal.baseline('public.rl263');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rl263', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
 insert into public.rl263 values (15, 'held'), (21, 'x'), (22, 'y');
+select pgpm_formal.wrote('public.rl263', 'id in (15, 21, 22)');
 
 select child_name as p0  from pgpm.part where parent_table = 'public.rl263'::regclass and lo = '0'  \gset
 select child_name as p10 from pgpm.part where parent_table = 'public.rl263'::regclass and lo = '10' \gset
@@ -46,6 +48,7 @@ select child_name as p30 from pgpm.part where parent_table = 'public.rl263'::reg
 -- the frontier moves to 65: horizon floor(65 - 30) = 30, so [0, 10), [10, 20) and [20, 30) are aged and
 -- [30, 40) is not
 insert into public.rl263 values (65, 'frontier');
+select pgpm_formal.wrote('public.rl263', 'id = 65');
 
 select is((select string_agg(lo || '-' || hi, ',' order by lo::bigint) from pgpm.part
             where parent_table = 'public.rl263'::regclass and hi::bigint <= 30 and attached),

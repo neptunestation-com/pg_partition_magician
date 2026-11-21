@@ -52,6 +52,7 @@ insert into public.arc213 values
   (4, '2025-07-01 00:00:20+00', repeat('d', 200)),   -- the tie at the batch's newest value
   (5, '2025-07-01 00:00:30+00', repeat('e', 200)),
   (6, '2025-07-01 00:00:40+00', repeat('f', 200));
+select pgpm_formal.baseline('public.arc213');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.arc213', 'ts', interval '1 second', p_obtain => 2, p_retain => interval '0 seconds');
 select child_name as arc_mono from pgpm.part
  where parent_table = 'public.arc213'::regclass and attached order by lo::timestamptz limit 1 \gset
@@ -123,7 +124,9 @@ create table public.kol213_iso (id bigint not null, ts timestamptz not null, pri
 create table public.kol213 (id bigint not null, ts timestamptz not null, primary key (id, ts));
 -- row 1: 2026-03-31 23:00 IST (17:30Z), the last hour of March in Kolkata; the others well inside April and now
 insert into public.kol213_iso values (1, '2026-03-31 17:30:00+00'), (2, '2026-04-15 00:00:00+00'), (3, now() - interval '1 day');
+select pgpm_formal.baseline('public.kol213_iso');
 insert into public.kol213 select * from public.kol213_iso;
+select pgpm_formal.baseline('public.kol213');
 
 call pgpm.transmute('public.kol213_iso', 'ts', interval '1 month', p_obtain => 1);
 select is((select lo::timestamptz from pgpm.part where parent_table = 'public.kol213_iso'::regclass order by lo::timestamptz limit 1),

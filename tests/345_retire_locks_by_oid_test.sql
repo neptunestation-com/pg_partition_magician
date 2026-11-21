@@ -99,10 +99,12 @@ select set_config('pgpm345.r_pid', (select pid::text from dblink('r345', 'select
 create table public.r345a (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into public.r345a
 select g, clock_timestamp() - interval '10 seconds' + make_interval(secs => g / 1000.0), 'a' from generate_series(1, 3) g;
+select pgpm_formal.baseline('public.r345a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.r345a', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true);
 create table public.r345b (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into public.r345b
 select g, clock_timestamp() - interval '10 seconds' + make_interval(secs => g / 1000.0), 'b' from generate_series(1, 4) g;
+select pgpm_formal.baseline('public.r345b');
 call pgpm.transmute('public.r345b', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true);
 
 -- F's, G's and H's, each in a schema of its own (the schema is what their sessions rename)
@@ -110,11 +112,13 @@ create schema f345s;
 create table f345s.r (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into f345s.r
 select g, clock_timestamp() - interval '10 seconds' + make_interval(secs => g / 1000.0), 'f' from generate_series(1, 3) g;
+select pgpm_formal.baseline('f345s.r');
 call pgpm.transmute('f345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true);
 create schema g345s;
 create table g345s.r (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into g345s.r
 select g, date_trunc('second', clock_timestamp()) - interval '10 seconds' + make_interval(secs => g / 1000.0), 'g' from generate_series(1, 3) g;
+select pgpm_formal.baseline('g345s.r');
 create table public.g345_ref (id bigint, ts timestamptz, foreign key (id, ts) references g345s.r (id, ts) on delete cascade);
 insert into public.g345_ref select id, ts from g345s.r where id = 2;
 call pgpm.transmute('g345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true, p_incoming_fks => 'preserve');
@@ -123,6 +127,7 @@ create schema g2345s;
 create table g2345s.r (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into g2345s.r
 select g, date_trunc('second', clock_timestamp()) - interval '10 seconds' + make_interval(secs => g / 1000.0), 'g' from generate_series(1, 3) g;
+select pgpm_formal.baseline('g2345s.r');
 create table public.g2345_ref (id bigint, ts timestamptz, foreign key (id, ts) references g2345s.r (id, ts) on delete cascade);
 insert into public.g2345_ref select id, ts from g2345s.r where id = 2;
 call pgpm.transmute('g2345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true, p_incoming_fks => 'preserve');
@@ -131,11 +136,13 @@ create schema h345s;
 create table h345s.r (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into h345s.r
 select g, clock_timestamp() - interval '10 seconds' + make_interval(secs => g / 1000.0), 'h' from generate_series(1, 3) g;
+select pgpm_formal.baseline('h345s.r');
 call pgpm.transmute('h345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true);
 create schema w345s;
 create table w345s.r (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into w345s.r
 select g, clock_timestamp() - interval '10 seconds' + make_interval(secs => g / 1000.0), 'w' from generate_series(1, 3) g;
+select pgpm_formal.baseline('w345s.r');
 call pgpm.transmute('w345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true);
 select max(p.hi) as fgh_hi from pgpm.part p join pgpm.config c on c.parent_table = p.parent_table and c.monolith_oid = p.child_oid
  where p.parent_table in ('f345s.r'::regclass, 'g345s.r'::regclass, 'h345s.r'::regclass, 'w345s.r'::regclass, 'g2345s.r'::regclass) \gset
@@ -165,6 +172,7 @@ select dblink_exec('h345', format('create table public.%I (id bigint, payload te
 select dblink_exec('h345', format('insert into public.%I values (7, %L), (8, %L)', :'a_name', 'stranger', 'stranger')) as a6 \gset
 select o as a_squat from dblink('h345', format('select %L::regclass::oid', 'public.' || quote_ident(:'a_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as a7 \gset
+select pgpm_formal.operator_owns(:'a_squat'::oid::regclass);   -- the stranger the test creates under the name
 select x as a_ret from dblink_get_result('r345') as t(x text) \gset
 select count(*) as a_drained from dblink_get_result('r345') as t(x text) \gset
 
@@ -211,8 +219,10 @@ select ok(not exists (select 1 from pg_class where oid = :'b_oid'::oid)
 -- ======================= (C) the sibling: the regrain swap attaches the copy, not a table under its name =========
 create table public.r345c (id bigint primary key, payload text);
 insert into public.r345c select g * 10, 'c' from generate_series(1, 99) g;
+select pgpm_formal.baseline('public.r345c');
 call pgpm.transmute('public.r345c', 'id', 1000, p_paused => true);
 insert into public.r345c values (20000, 'frontier');
+select pgpm_formal.wrote('public.r345c', 'id = 20000');
 create function pg_temp.c_step() returns text language sql as $$
   select pgpm.regrain_step('public.r345c', (select child_name from pgpm.part
     where parent_table = 'public.r345c'::regclass and attached and lo = '0'), '500', 1000) $$;
@@ -234,6 +244,7 @@ select dblink_exec('h345', 'create table public.r345c_p0000000000000000000 (like
 select dblink_exec('h345', $$insert into public.r345c_p0000000000000000000 values (7, 'stranger'), (8, 'stranger')$$) as c6 \gset
 select o as c_squat from dblink('h345', $$select 'public.r345c_p0000000000000000000'::regclass::oid$$) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as c7 \gset
+select pgpm_formal.operator_owns(:'c_squat'::oid::regclass);   -- the stranger the test creates under the name
 select x as c_ret from dblink_get_result('r345', false) as t(x text) \gset
 select count(*) as c_drained from dblink_get_result('r345', false) as t(x text) \gset
 select ok(:'c_squat'::oid <> :'c_oid'::oid, 'LIVENESS: the copy''s name denotes another relation now, the stranger');
@@ -279,6 +290,7 @@ select dblink_exec('h345', format('create table f345s.%I (id bigint, payload tex
 select dblink_exec('h345', format('insert into f345s.%I values (7, %L), (8, %L)', :'f_name', 'stranger', 'stranger')) as f6 \gset
 select o as f_squat from dblink('h345', format('select %L::regclass::oid', 'f345s.' || quote_ident(:'f_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as f7 \gset
+select pgpm_formal.operator_owns(:'f_squat'::oid::regclass);   -- the stranger the test creates under the name
 select x as f_ret from dblink_get_result('r345', false) as t(x text) \gset
 select count(*) as f_drained from dblink_get_result('r345', false) as t(x text) \gset
 select ok(:'f_squat'::oid <> :'f_oid'::oid, 'LIVENESS: F: the partition''s name, in a schema of that name, denotes the stranger now');
@@ -314,6 +326,7 @@ select dblink_exec('h345', 'create table g345s.r (id bigint, ts timestamptz, pay
 select dblink_exec('h345', format('insert into g345s.r values (2, %L, %L), (9, %L, %L)', :'g_key_ts', 'stranger', :'g_key_ts'::timestamptz + interval '1 hour', 'stranger')) as g7 \gset
 select o as g_squat from dblink('h345', 'select ''g345s.r''::regclass::oid') as t(o oid) \gset
 select dblink_exec('h345', 'commit') as g8 \gset
+select pgpm_formal.operator_owns(:'g_squat'::oid::regclass);   -- the stranger the test creates under the name
 select x as g_ret from dblink_get_result('r345', false) as t(x text) \gset
 select count(*) as g_drained from dblink_get_result('r345', false) as t(x text) \gset
 select ok(:'g_squat'::oid <> :'g_parent'::oid, 'LIVENESS: G: the parent''s name denotes the stranger now');
@@ -344,10 +357,12 @@ select dblink_exec('h345', format('create table h345s.%I (id bigint, ts timestam
 select dblink_exec('h345', format('insert into h345s.%I values (7, now(), %L), (8, now(), %L)', :'h_name', 'stranger', 'stranger')) as h7 \gset
 select o as h_squat from dblink('h345', format('select %L::regclass::oid', 'h345s.' || quote_ident(:'h_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as h8 \gset
+select pgpm_formal.operator_owns(:'h_squat'::oid::regclass);   -- the stranger the test creates under the name
 select count(*) as h_rows from dblink_get_result('r345', false) as t(x text) \gset
 select ok(dblink_error_message('r345') like '%the write block''s CREATE TRIGGER reached another relation than the one it identified%',
   'H: retire() refuses, saying the write block''s CREATE TRIGGER reached another relation');
 select count(*) as h_drained from dblink_get_result('r345', false) as t(x text) \gset
+select pgpm_formal.wrote('h345s_aside.r', 'id = 4');   -- written by session h345, committed above
 select ok(:'h_squat'::oid <> :'h_oid'::oid, 'LIVENESS: H: the partition''s name denotes the stranger now');
 select ok(not exists (select 1 from pg_trigger where tgrelid = :'h_squat'::oid), 'H: the stranger carries no trigger of pgpm''s');
 select is(pg_temp.ids_of(:'h_squat'), array[7, 8]::bigint[], 'H: and keeps its rows 7, 8');
@@ -378,10 +393,12 @@ select dblink_exec('h345', format('create trigger pgpm_write_block before insert
 select dblink_exec('h345', format('alter table w345s.%I disable trigger pgpm_write_block', :'w_name')) as w9 \gset
 select o as w_squat from dblink('h345', format('select %L::regclass::oid', 'w345s.' || quote_ident(:'w_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as w10 \gset
+select pgpm_formal.operator_owns(:'w_squat'::oid::regclass);   -- the stranger the test creates under the name
 select count(*) as w_rows from dblink_get_result('r345', false) as t(x text) \gset
 select ok(dblink_error_message('r345') like '%the write block''s ENABLE ALWAYS reached another relation than the one it identified%',
   'H2: retire() refuses, saying the write block''s ENABLE ALWAYS reached another relation');
 select count(*) as w_drained from dblink_get_result('r345', false) as t(x text) \gset
+select pgpm_formal.wrote('w345s_aside.r', 'id = 4');   -- written by session h345, committed above
 select ok(:'w_squat'::oid <> :'w_oid'::oid, 'LIVENESS: H2: the partition''s name denotes the namesake now');
 select is((select tgenabled::text from pg_trigger where tgrelid = :'w_squat'::oid and tgname = 'pgpm_write_block'), 'D',
   'H2: the namesake''s trigger is left as its owner set it, disabled');
@@ -395,6 +412,7 @@ select is(pg_temp.ids_of(:'w_oid'), array[1, 2, 3, 4]::bigint[],
 create schema j345s;
 create table j345s.t (id bigint primary key, payload text);
 insert into j345s.t select g, 'j' from generate_series(1, 250) g;
+select pgpm_formal.baseline('j345s.t');
 call pgpm.transmute('j345s.t', 'id', 1000, p_obtain => 2, p_paused => true);
 select 'j345s.t'::regclass::oid as j_parent \gset
 select dblink_exec('h345', 'begin') as j1 \gset
@@ -410,6 +428,8 @@ select count(*) as j_rows from dblink_get_result('r345', false) as t(x text) \gs
 select ok(dblink_error_message('r345') like '%cannot untransmute % -- rows now live outside the original monolith%',
   'J: untransmute refuses at its door: the gate, asked under its lock through the parent''s name rendered then, saw the forward row');
 select count(*) as j_drained from dblink_get_result('r345', false) as t(x text) \gset
+select pgpm_formal.wrote('j345s_aside.t', 'id = 1500');   -- written by session h345, committed above
+select pgpm_formal.operator_owns('j345s.t');   -- the stranger the test creates under the parent's name
 select ok(exists (select 1 from pg_partitioned_table where partrelid = :'j_parent'::oid),
   'J: the table is still partitioned and managed');
 select is((select array_agg(id order by id) from j345s_aside.t where id >= 1000), array[1500]::bigint[],
@@ -424,8 +444,10 @@ create schema k345s;
 create schema k345d;
 create table k345s.t (id bigint primary key, payload text);
 insert into k345s.t select g * 10, 'k' from generate_series(1, 99) g;
+select pgpm_formal.baseline('k345s.t');
 call pgpm.transmute('k345s.t', 'id', 1000, p_paused => true);
 insert into k345s.t values (20000, 'frontier');
+select pgpm_formal.wrote('k345s.t', 'id = 20000');
 create function pg_temp.k_step() returns text language sql as $$
   select pgpm.regrain_step('k345s.t', (select child_name from pgpm.part
     where parent_table = 'k345s.t'::regclass and attached and lo = '0'), '500', 1000) $$;
@@ -436,6 +458,7 @@ select regrain_delta_oid as k_delta, (select relname from pg_class where oid = r
 select format('alter table k345s.%I set schema k345d', :'k_delta_name') as k_move \gset
 :k_move;
 insert into k345s.t values (25, 'inserted');   -- a new key: the copy holds no row for it
+select pgpm_formal.wrote('k345s.t', 'id = 25');
 select child_oid as k_copy, child_name as k_copy_name from pgpm.part
  where parent_table = 'k345s.t'::regclass and not attached and lo = '0' \gset
 select child_name as k_src_name from pgpm.part where parent_table = 'k345s.t'::regclass and attached and lo = '0' \gset
@@ -456,6 +479,8 @@ select dblink_exec('h345', format('create table k345s.%I (id bigint, payload tex
 select dblink_exec('h345', format('insert into k345s.%I values (25, %L)', :'k_src_name', 'stranger source')) as k9 \gset
 select o as k_squat from dblink('h345', format('select %L::regclass::oid', 'k345s.' || quote_ident(:'k_copy_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as k10 \gset
+select pgpm_formal.operator_owns(:'k_squat'::oid::regclass);   -- the stranger the test creates under the name
+select pgpm_formal.operator_owns(format('k345s.%I', :'k_src_name'));   -- the stranger the test creates under the source's name
 select count(*) as k_rows from dblink_get_result('r345', false) as t(x text) \gset
 select is(dblink_error_message('r345'), 'OK',
   'K: the tick completes: the reconcile locked the copy and the source by oid and followed them to the renamed schema');
@@ -488,6 +513,8 @@ select dblink_exec('g345', 'create table g2345s.ref2 (id bigint, ts timestamptz,
 select dblink_exec('g345', format('insert into g2345s.r values (2, %L, %L), (9, %L, %L)', :'g2_key_ts', 'stranger', :'g2_key_ts'::timestamptz + interval '1 hour', 'stranger')) as g28 \gset
 select o as g2_squat from dblink('g345', 'select ''g2345s.r''::regclass::oid') as t(o oid) \gset
 select o as g2_ref2 from dblink('g345', 'select ''g2345s.ref2''::regclass::oid') as t(o oid) \gset
+select pgpm_formal.operator_owns(:'g2_squat'::oid::regclass);   -- the stranger the test creates under the name
+select pgpm_formal.operator_owns(:'g2_ref2'::oid::regclass);
 select dblink_exec('g345', 'begin') as g29 \gset
 select dblink_exec('g345', 'lock table g2345s.ref2 in access exclusive mode') as g210 \gset
 select dblink_exec('h345', 'commit') as g211 \gset
@@ -510,14 +537,17 @@ update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_
 create schema l345s;
 create table l345s.t (id bigint primary key, payload text);
 insert into l345s.t select g * 10, 'l' from generate_series(1, 99) g;
+select pgpm_formal.baseline('l345s.t');
 call pgpm.transmute('l345s.t', 'id', 1000, p_paused => true);
 insert into l345s.t values (20000, 'frontier');
+select pgpm_formal.wrote('l345s.t', 'id = 20000');
 select is(pgpm.regrain_step('l345s.t', (select child_name from pgpm.part
     where parent_table = 'l345s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
   'fixture: L''s regrain is prepared: capture and its delta exist');
 select regrain_delta_oid as l_delta, (select relname from pg_class where oid = regrain_delta_oid) as l_delta_name
   from pgpm.config where parent_table = 'l345s.t'::regclass \gset
 insert into l345s.t values (25, 'captured');
+select pgpm_formal.wrote('l345s.t', 'id = 25');
 select dblink_exec('h345', 'begin') as l1 \gset
 select dblink_exec('h345', format('lock table l345s.%I in row exclusive mode', :'l_delta_name')) as l2 \gset
 select dblink_send_query('r345', $$select pgpm.regrain_cancel('l345s.t')::text$$) as l3 \gset
@@ -529,6 +559,7 @@ select dblink_exec('h345', format('create table l345s.%I (id bigint)', :'l_delta
 select dblink_exec('h345', format('insert into l345s.%I values (1), (2)', :'l_delta_name')) as l7 \gset
 select o as l_squat from dblink('h345', format('select %L::regclass::oid', 'l345s.' || quote_ident(:'l_delta_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as l8 \gset
+select pgpm_formal.operator_owns(:'l_squat'::oid::regclass);   -- the stranger the test creates under the name
 select count(*) as l_rows from dblink_get_result('r345', false) as t(x text) \gset
 select ok(dblink_error_message('r345') like '%regrain_cancel(%), emptying the delta, reached another relation than the one it identified%',
   'L: regrain_cancel refuses, saying its TRUNCATE reached another relation');
@@ -543,14 +574,17 @@ select ok((select count(*) from l345s_aside.:"l_delta_name" where id = 25) > 0, 
 create schema m345s;
 create table m345s.t (id bigint primary key, payload text);
 insert into m345s.t select g * 10, 'm' from generate_series(1, 99) g;
+select pgpm_formal.baseline('m345s.t');
 call pgpm.transmute('m345s.t', 'id', 1000, p_paused => true);
 insert into m345s.t values (20000, 'frontier');
+select pgpm_formal.wrote('m345s.t', 'id = 20000');
 select is(pgpm.regrain_step('m345s.t', (select child_name from pgpm.part
     where parent_table = 'm345s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
   'fixture: L2''s regrain is prepared');
 select regrain_delta_oid as m_delta, (select relname from pg_class where oid = regrain_delta_oid) as m_delta_name
   from pgpm.config where parent_table = 'm345s.t'::regclass \gset
 insert into m345s.t values (25, 'captured');
+select pgpm_formal.wrote('m345s.t', 'id = 25');
 create table public.m345_gate (x int);
 select 'public.m345_gate'::regclass::oid as m_gate \gset
 select dblink_exec('h345', 'begin') as m1 \gset
@@ -565,6 +599,7 @@ select dblink_exec('g345', format('insert into m345s.%I values (1), (2)', :'m_de
 select dblink_exec('g345', $q$create function m345s.m345_wait() returns trigger language plpgsql as $f$ begin perform count(*) from public.m345_gate; return null; end $f$$q$) as m8 \gset
 select dblink_exec('g345', format('create trigger m345_wait before truncate on m345s.%I for each statement execute function m345s.m345_wait()', :'m_delta_name')) as m9 \gset
 select o as m_squat from dblink('g345', format('select %L::regclass::oid', 'm345s.' || quote_ident(:'m_delta_name'))) as t(o oid) \gset
+select pgpm_formal.operator_owns(:'m_squat'::oid::regclass);   -- the stranger the test creates under the name
 select dblink_exec('g345', 'begin') as m10 \gset
 select dblink_exec('g345', 'lock table public.m345_gate in access exclusive mode') as m11 \gset
 select dblink_exec('h345', 'commit') as m12 \gset
@@ -588,8 +623,10 @@ select ok((select count(*) from m345s.:"m_delta_name" where id = 25) > 0, 'L2: t
 create schema n345s;
 create table n345s.t (id bigint primary key, payload text);
 insert into n345s.t select g * 10, 'n' from generate_series(1, 99) g;
+select pgpm_formal.baseline('n345s.t');
 call pgpm.transmute('n345s.t', 'id', 1000, p_paused => true);
 insert into n345s.t values (20000, 'frontier');
+select pgpm_formal.wrote('n345s.t', 'id = 20000');
 select child_name as n_name, child_oid as n_oid from pgpm.part where parent_table = 'n345s.t'::regclass and lo = '0' \gset
 select dblink_exec('h345', 'begin') as n1 \gset
 select dblink_exec('h345', 'insert into n345s.t values (15, ''written'')') as n2 \gset
@@ -601,10 +638,12 @@ select dblink_exec('h345', 'create schema n345s') as n5 \gset
 select dblink_exec('h345', format('create table n345s.%I (id bigint)', :'n_name')) as n6 \gset
 select o as n_squat from dblink('h345', format('select %L::regclass::oid', 'n345s.' || quote_ident(:'n_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as n7 \gset
+select pgpm_formal.operator_owns(:'n_squat'::oid::regclass);   -- the stranger the test creates under the name
 select count(*) as n_rows from dblink_get_result('r345', false) as t(x text) \gset
 select ok(dblink_error_message('r345') like '%regrain_step(%), renaming the source for its split, reached another relation than the one it identified%',
   'N: the tick refuses, saying its RENAME reached another relation');
 select count(*) as n_drained from dblink_get_result('r345', false) as t(x text) \gset
+select pgpm_formal.wrote('n345s_aside.t', 'id = 15');   -- written by session h345, committed above
 select ok(:'n_squat'::oid <> :'n_oid'::oid, 'LIVENESS: N: the source''s name denotes the namesake now');
 select is((select relname::text from pg_class where oid = :'n_squat'::oid), :'n_name'::text, 'N: the namesake keeps its name');
 select is((select child_name::text from pgpm.part where parent_table = 'n345s_aside.t'::regclass and child_oid = :'n_oid'::oid),
@@ -619,8 +658,10 @@ end $$;
 create schema o345s;
 create table o345s.t (id bigint primary key, payload text);
 insert into o345s.t select g * 10, 'o' from generate_series(1, 99) g;
+select pgpm_formal.baseline('o345s.t');
 call pgpm.transmute('o345s.t', 'id', 1000, p_paused => true);
 insert into o345s.t values (20000, 'frontier');
+select pgpm_formal.wrote('o345s.t', 'id = 20000');
 select is(pgpm.regrain_step('o345s.t', (select child_name from pgpm.part
     where parent_table = 'o345s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
   'fixture: O''s regrain is prepared: its delta is a scratch relation of the table');
@@ -637,6 +678,7 @@ select dblink_exec('h345', 'create schema o345s') as o4 \gset
 select dblink_exec('h345', format('create table o345s.%I (id bigint)', :'o_delta_name')) as o5 \gset
 select o as o_squat from dblink('h345', format('select %L::regclass::oid', 'o345s.' || quote_ident(:'o_delta_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as o6 \gset
+select pgpm_formal.operator_owns(:'o_squat'::oid::regclass);   -- the stranger the test creates under the name
 select count(*) as o_rows from dblink_get_result('r345', false) as t(x text) \gset
 select ok(dblink_error_message('r345') like '%handing a scratch relation to r345o, reached another relation than the one it identified%',
   'O: the hand-over refuses, saying its ALTER ... OWNER reached another relation');

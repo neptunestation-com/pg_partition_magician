@@ -37,8 +37,11 @@ insert into public.nt31 values (1, 1.50, 2.250), (2, 'NaN', 'NaN'), (3, null, 'N
 -- the chunk's rows with each NaN as null and req nullable: the file the object must be
 create table public.ntnull31 (id bigint primary key, amt numeric(5,2), req numeric(7,3));
 insert into public.ntnull31 values (1, 1.50, 2.250), (2, null, null), (3, null, null);
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.nt31');
 call pgpm.transmute('public.nt31', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into public.nt31 values (45000, 2.25, 1.000);   -- horizon 40000: [0, 10000) is aged
+select pgpm_formal.wrote('public.nt31', 'id = 45000');
 select archive.configure('public.nt31', 'archive-test-bucket', p_endpoint => 'http://minio:9000',
                          p_prefix => current_database() || '-t31/');
 select pgpm.set_archive_fn('public.nt31', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);

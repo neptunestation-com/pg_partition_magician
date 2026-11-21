@@ -97,9 +97,11 @@ $$;
 -- ============================================================================================================
 create table pgpm_t364.a (id bigint primary key, payload text);
 insert into pgpm_t364.a values (1, 'orig'), (2, 'orig');
+select pgpm_formal.baseline('pgpm_t364.a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('pgpm_t364.a'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.a'::regclass, '60000');
 insert into pgpm_t364.a values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.a', 'id = 35005');
 create table public.a364_ref (id bigint primary key, p_id bigint references pgpm_t364.a(id));
 insert into public.a364_ref values (1, 35005);
 select child_name as a_doomed, child_oid as a_oid from pgpm.part where parent_table = 'pgpm_t364.a'::regclass and lo = '0' \gset
@@ -111,6 +113,7 @@ update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent
 select format('alter table pgpm_t364.%I rename to a_kept', :'a_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'a_doomed') \gexec
 select format('insert into pgpm_t364.%I values (98, ''mine'')', :'a_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'a_doomed')::regclass);
 select format('pgpm_t364.%I', :'a_doomed') as a_sq \gset
 select is(pgpm._disown_unvouched_retirements(), 0, 'GUARD: A: the upgrade''s pass leaves the row''s mark');
 select ok((select child_oid is null and retiring_oid = :'a_oid'::oid and attached from pgpm.part
@@ -143,9 +146,11 @@ select is(pgpm_t364.ids('pgpm_t364.a_kept'), array[1, 2]::bigint[], 'A: the rena
 -- ============================================================================================================
 create table pgpm_t364.b (id bigint primary key, payload text);
 insert into pgpm_t364.b values (5, 'orig'), (6, 'orig'), (7, 'orig');
+select pgpm_formal.baseline('pgpm_t364.b');
 call pgpm.transmute('pgpm_t364.b'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.b'::regclass, '60000');
 insert into pgpm_t364.b values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.b', 'id = 35005');
 create table public.b364_ref (id bigint primary key, p_id bigint references pgpm_t364.b(id));
 insert into public.b364_ref values (1, 35005);
 select child_name as b_doomed, child_oid as b_oid from pgpm.part where parent_table = 'pgpm_t364.b'::regclass and lo = '0' \gset
@@ -156,6 +161,7 @@ update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent
 select format('alter table pgpm_t364.%I rename to b_kept', :'b_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'b_doomed') \gexec
 select format('insert into pgpm_t364.%I values (99, ''mine'')', :'b_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'b_doomed')::regclass);
 select format('pgpm_t364.%I', :'b_doomed') as b_sq \gset
 select pgpm_t364.lay_block(:'b_sq');
 select throws_like(format('insert into %s values (96, ''mine'')', :'b_sq'), '%past its retention boundary%',
@@ -180,9 +186,11 @@ select is(pgpm_t364.ids('pgpm_t364.b_kept'), array[5, 6, 7]::bigint[], 'B: the r
 -- ============================================================================================================
 create table pgpm_t364.d (id bigint primary key, payload text);
 insert into pgpm_t364.d values (31, 'orig'), (32, 'orig'), (33, 'orig');
+select pgpm_formal.baseline('pgpm_t364.d');
 call pgpm.transmute('pgpm_t364.d'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.d'::regclass, '60000');
 insert into pgpm_t364.d values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.d', 'id = 35005');
 create table public.d364_ref (id bigint primary key, p_id bigint references pgpm_t364.d(id));
 insert into public.d364_ref values (1, 35005);
 select child_name as d_doomed, child_oid as d_oid from pgpm.part where parent_table = 'pgpm_t364.d'::regclass and lo = '0' \gset
@@ -190,10 +198,14 @@ select ok(not pgpm.retire('pgpm_t364.d', :'d_doomed') and pgpm_t364.armed() <> '
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.d'::regclass and lo = '0';
+select pgpm_formal.expect('NoLostRow', '[31]', 'PART D builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed d_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.d');
+select pgpm_formal.expect('NoLostRow', '[32]', 'PART D builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed d_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.d');
+select pgpm_formal.expect('NoLostRow', '[33]', 'PART D builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed d_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.d');
 select format('alter table pgpm_t364.%I rename to d_kept', :'d_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint primary key, payload text)', :'d_doomed') \gexec
 select format('insert into pgpm_t364.%I values (37, ''impostor''), (38, ''impostor'')', :'d_doomed') \gexec
 select format('alter table pgpm_t364.d attach partition pgpm_t364.%I for values from (0) to (10000)', :'d_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'d_doomed')::regclass);
 select format('pgpm_t364.%I', :'d_doomed') as d_imp \gset
 select pgpm_t364.lay_block(:'d_imp');
 select ok(exists (select 1 from pg_inherits where inhparent = 'pgpm_t364.d'::regclass and inhrelid = to_regclass(:'d_imp')::oid),
@@ -213,9 +225,11 @@ select is(pgpm_t364.ids('pgpm_t364.d_kept'), array[31, 32, 33]::bigint[], 'D: th
 -- ============================================================================================================
 create table pgpm_t364.e (id bigint primary key, payload text);
 insert into pgpm_t364.e values (41, 'orig'), (42, 'orig'), (43, 'orig'), (44, 'orig');
+select pgpm_formal.baseline('pgpm_t364.e');
 call pgpm.transmute('pgpm_t364.e'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.e'::regclass, '60000');
 insert into pgpm_t364.e values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.e', 'id = 35005');
 create table public.e364_ref (id bigint primary key, p_id bigint references pgpm_t364.e(id));
 insert into public.e364_ref values (1, 35005);
 select child_name as e_doomed, child_oid as e_oid from pgpm.part where parent_table = 'pgpm_t364.e'::regclass and lo = '0' \gset
@@ -223,11 +237,16 @@ select ok(not pgpm.retire('pgpm_t364.e', :'e_doomed') and pgpm_t364.armed() <> '
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.e'::regclass and lo = '0';
+select pgpm_formal.expect('NoLostRow', '[41]', 'PART E builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed e_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.e');
+select pgpm_formal.expect('NoLostRow', '[42]', 'PART E builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed e_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.e');
+select pgpm_formal.expect('NoLostRow', '[43]', 'PART E builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed e_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.e');
+select pgpm_formal.expect('NoLostRow', '[44]', 'PART E builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed e_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.e');
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid)
   values ('pgpm_t364.e'::regclass, '0', '5000', :'e_doomed', 4, :'e_oid'::oid);
 select format('alter table pgpm_t364.%I rename to e_kept', :'e_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'e_doomed') \gexec
 select format('insert into pgpm_t364.%I values (95, ''mine'')', :'e_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'e_doomed')::regclass);
 select format('pgpm_t364.%I', :'e_doomed') as e_sq \gset
 select ok(not pgpm_t364.blocked(:'e_sq'), 'LIVENESS: E: the table under the name carries no block, so coverage looks unguarded');
 select ok(pgpm_t364.reaches('pgpm_t364.e'), 'LIVENESS: E: retention reaches the range');
@@ -244,9 +263,11 @@ select ok(not pgpm_t364.blocked(:'e_sq'), 'E: the operator''s table is not block
 -- ============================================================================================================
 create table pgpm_t364.g (id bigint primary key, payload text);
 insert into pgpm_t364.g values (51, 'orig'), (52, 'orig');
+select pgpm_formal.baseline('pgpm_t364.g');
 call pgpm.transmute('pgpm_t364.g'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.g'::regclass, '60000');
 insert into pgpm_t364.g values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.g', 'id = 35005');
 create table public.g364_ref (id bigint primary key, p_id bigint references pgpm_t364.g(id));
 insert into public.g364_ref values (1, 35005);
 select child_name as g_doomed, child_oid as g_oid from pgpm.part where parent_table = 'pgpm_t364.g'::regclass and lo = '0' \gset
@@ -257,6 +278,7 @@ update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent
 select format('alter table pgpm_t364.%I rename to g_kept', :'g_doomed') \gexec
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'g_doomed') \gexec
 select format('insert into pgpm_t364.%I values (93, ''mine'')', :'g_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'g_doomed')::regclass);
 select format('pgpm_t364.%I', :'g_doomed') as g_sq \gset
 select pgpm_t364.lay_block(:'g_sq');   -- the block the older tick laid
 select ok(pgpm_t364.blocked(:'g_sq'), 'LIVENESS: G: the operator''s table carries the older install''s block');
@@ -285,9 +307,11 @@ select is(pgpm_t364.ids('pgpm_t364.g_kept'), array[51, 52]::bigint[], 'G: the re
 create schema pgpm_t364_keep;
 create table pgpm_t364.i (id bigint primary key, payload text);
 insert into pgpm_t364.i values (71, 'orig'), (72, 'orig'), (73, 'orig');
+select pgpm_formal.baseline('pgpm_t364.i');
 call pgpm.transmute('pgpm_t364.i'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.i'::regclass, '60000');
 insert into pgpm_t364.i values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.i', 'id = 35005');
 create table public.i364_ref (id bigint primary key, p_id bigint references pgpm_t364.i(id));
 insert into public.i364_ref values (1, 35005);
 select child_name as i_doomed, child_oid as i_oid from pgpm.part where parent_table = 'pgpm_t364.i'::regclass and lo = '0' \gset
@@ -299,6 +323,7 @@ select format('alter table pgpm_t364.%I rename to i_kept', :'i_doomed') \gexec
 alter table pgpm_t364.i_kept set schema pgpm_t364_keep;
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'i_doomed') \gexec
 select format('insert into pgpm_t364.%I values (91, ''mine'')', :'i_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'i_doomed')::regclass);
 select format('pgpm_t364.%I', :'i_doomed') as i_sq \gset
 select pgpm_t364.lay_block(:'i_sq');
 select ok(not pgpm.retire('pgpm_t364.i', :'i_doomed'), 'fixture: I: retire() runs before any tick');
@@ -321,9 +346,11 @@ select is(pgpm_t364.ids('pgpm_t364_keep.i_kept'), array[71, 72, 73]::bigint[], '
 create schema "pgpm T364 Q";
 create table "pgpm T364 Q".q (id bigint primary key, payload text);
 insert into "pgpm T364 Q".q values (75, 'orig'), (76, 'orig');
+select pgpm_formal.baseline('"pgpm T364 Q".q');
 call pgpm.transmute('"pgpm T364 Q".q'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('"pgpm T364 Q".q'::regclass, '60000');
 insert into "pgpm T364 Q".q values (35005, 'frontier');
+select pgpm_formal.wrote('"pgpm T364 Q".q', 'id = 35005');
 create table public.q364_ref (id bigint primary key, p_id bigint references "pgpm T364 Q".q(id));
 insert into public.q364_ref values (1, 35005);
 select child_name as q_doomed, child_oid as q_oid from pgpm.part where parent_table = '"pgpm T364 Q".q'::regclass and lo = '0' \gset
@@ -335,6 +362,7 @@ select format('alter table "pgpm T364 Q".%I rename to q_kept', :'q_doomed') \gex
 alter table "pgpm T364 Q".q_kept set schema pgpm_t364_keep;
 select format('create table "pgpm T364 Q".%I (id bigint, payload text)', :'q_doomed') \gexec
 select format('insert into "pgpm T364 Q".%I values (74, ''mine'')', :'q_doomed') \gexec
+select pgpm_formal.operator_owns(format('%I.%I', 'pgpm T364 Q', :'q_doomed')::regclass);
 select format('%I.%I', 'pgpm T364 Q', :'q_doomed') as q_sq \gset
 select pgpm_t364.lay_block(:'q_sq');
 select ok(not pgpm.retire('"pgpm T364 Q".q', :'q_doomed'), 'fixture: Q: retire() runs before any tick');
@@ -353,9 +381,11 @@ select lives_ok(format('insert into %s values (73, ''mine'')', :'q_sq'), 'Q: run
 -- ============================================================================================================
 create table pgpm_t364.r (id bigint primary key, payload text);
 insert into pgpm_t364.r values (77, 'orig'), (78, 'orig');
+select pgpm_formal.baseline('pgpm_t364.r');
 call pgpm.transmute('pgpm_t364.r'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.r'::regclass, '60000');
 insert into pgpm_t364.r values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.r', 'id = 35005');
 create table public.r364_ref (id bigint primary key, p_id bigint references pgpm_t364.r(id));
 insert into public.r364_ref values (1, 35005);
 select child_name as r_doomed, child_oid as r_oid from pgpm.part where parent_table = 'pgpm_t364.r'::regclass and lo = '0' \gset
@@ -363,10 +393,14 @@ select ok(not pgpm.retire('pgpm_t364.r', :'r_doomed') and pgpm_t364.armed() <> '
 select command from cron.job where jobname = 'pgpm_detach' \gexec
 update cron.job set command = 'select 1';
 update pgpm.part set child_oid = null, detach_dispatched_oid = null where parent_table = 'pgpm_t364.r'::regclass and lo = '0';
+select pgpm_formal.expect('NoLostRow', '[77]', 'PART R builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed r_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.r');
+select pgpm_formal.expect('NoLostRow', '[78]', 'PART R builds an older install''s mark: the row''s child_oid and detach_dispatched_oid nulled after the dispatched detach landed, the retirement then renamed r_kept, so no recorded dispatch names the table holding the row', 'pgpm_t364.r');
 select format('alter table pgpm_t364.%I rename to r_kept', :'r_doomed') \gexec
 create table pgpm_t364.r_mine (id bigint, payload text) partition by range (id);
+select pgpm_formal.operator_owns('pgpm_t364.r_mine');
 select format('create table pgpm_t364.%I partition of pgpm_t364.r_mine for values from (0) to (1000)', :'r_doomed') \gexec
 insert into pgpm_t364.r_mine values (72, 'mine');
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'r_doomed')::regclass);
 select format('pgpm_t364.%I', :'r_doomed') as r_sq \gset
 select pgpm_t364.lay_block(:'r_sq');
 select ok(pgpm_t364.blocked(:'r_sq') and exists (select 1 from pg_inherits where inhrelid = to_regclass(:'r_sq')::oid
@@ -388,16 +422,20 @@ select lives_ok('insert into pgpm_t364.r_mine values (71, ''mine'')', 'R: run as
 create schema pgpm_t364_twin;
 create table pgpm_t364.k (id bigint primary key, payload text);
 insert into pgpm_t364.k values (15, 'orig'), (16, 'orig');
+select pgpm_formal.baseline('pgpm_t364.k');
 call pgpm.transmute('pgpm_t364.k'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.k'::regclass, '60000');
 insert into pgpm_t364.k values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.k', 'id = 35005');
 create table public.k364_ref (id bigint primary key, p_id bigint references pgpm_t364.k(id));
 insert into public.k364_ref values (1, 35005);
 create table pgpm_t364_twin.k (id bigint primary key, payload text);
 insert into pgpm_t364_twin.k values (17, 'twin');
+select pgpm_formal.baseline('pgpm_t364_twin.k');
 call pgpm.transmute('pgpm_t364_twin.k'::regclass, 'id', 10000::bigint, p_paused => true);
 select child_name as k_doomed, child_oid as k_oid from pgpm.part where parent_table = 'pgpm_t364.k'::regclass and lo = '0' \gset
 select child_oid as twin_oid from pgpm.part where parent_table = 'pgpm_t364_twin.k'::regclass and lo = '0' \gset
+select pgpm_formal.operator_owns(format('pgpm_t364_twin.%I', :'k_doomed')::regclass);
 select format('alter table pgpm_t364_twin.k detach partition pgpm_t364_twin.%I', :'k_doomed') \gexec
 select format('pgpm_t364_twin.%I', :'k_doomed') as twin_rel \gset
 select pgpm_t364.lay_block(:'twin_rel');   -- the block a table detached by hand keeps (#705)
@@ -409,10 +447,12 @@ select format('alter table pgpm_t364.%I rename to k_kept', :'k_doomed') \gexec
 alter table pgpm_t364.k_kept set schema pgpm_t364_twin;   -- the twin's schema is K's family's too from here
 create schema pgpm_t364_tenant;
 select format('create table pgpm_t364_tenant.%I (id bigint, payload text)', :'k_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364_tenant.%I', :'k_doomed')::regclass);
 select format('pgpm_t364_tenant.%I', :'k_doomed') as tenant_rel \gset
 select pgpm_t364.lay_block(:'tenant_rel');   -- a tenant's kept table: detached by hand, its row deleted, its block kept
 select format('create table pgpm_t364.%I (id bigint, payload text)', :'k_doomed') \gexec
 select format('insert into pgpm_t364.%I values (88, ''mine'')', :'k_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'k_doomed')::regclass);
 select format('pgpm_t364.%I', :'k_doomed') as k_sq \gset
 select pgpm_t364.lay_block(:'k_sq');
 select ok(pgpm_t364.blocked(:'k_sq'), 'LIVENESS: K: the operator''s table carries the older install''s block');
@@ -438,14 +478,17 @@ select is(pgpm_t364.ids('pgpm_t364_twin.k_kept'), array[15, 16]::bigint[], 'K: t
 -- ============================================================================================================
 create table pgpm_t364.p (id bigint primary key, payload text);
 insert into pgpm_t364.p values (11, 'orig'), (12, 'orig');
+select pgpm_formal.baseline('pgpm_t364.p');
 call pgpm.transmute('pgpm_t364.p'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.p'::regclass, '60000');
 insert into pgpm_t364.p values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.p', 'id = 35005');
 select child_name as p_doomed, child_oid as p_oid from pgpm.part where parent_table = 'pgpm_t364.p'::regclass and lo = '0' \gset
 select format('pgpm_t364.%I', :'p_doomed') as p_sq \gset
 select pgpm._enforce_write_blocks('pgpm_t364.p'::regclass);
 update pgpm.part set retiring_at = now(), retiring_oid = null, child_oid = null, detach_dispatched_oid = null
  where parent_table = 'pgpm_t364.p'::regclass and lo = '0';
+select pgpm_formal.operator_owns(format('pgpm_t364.%I', :'p_doomed')::regclass);
 select format('alter table pgpm_t364.p detach partition pgpm_t364.%I', :'p_doomed') \gexec
 select ok(pgpm_t364.blocked(:'p_sq') and to_regclass(:'p_sq')::oid = :'p_oid'::oid
           and not exists (select 1 from pg_inherits where inhrelid = :'p_oid'::oid),
@@ -462,6 +505,7 @@ select is(pgpm_t364.ids(:'p_sq'), array[11, 12]::bigint[], 'P: the retirement ke
 -- ============================================================================================================
 create table pgpm_t364.h (id bigint primary key, payload text);
 insert into pgpm_t364.h values (61, 'orig'), (62, 'orig');
+select pgpm_formal.baseline('pgpm_t364.h');
 call pgpm.transmute('pgpm_t364.h'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.h'::regclass, '60000');
 select child_name as h_doomed, child_oid as h_oid from pgpm.part where parent_table = 'pgpm_t364.h'::regclass and lo = '0' \gset
@@ -487,9 +531,11 @@ select ok(not pgpm_t364.blocked(:'h_str'), 'H: and blocks nothing');
 -- ============================================================================================================
 create table pgpm_t364.c (id bigint primary key, payload text);
 insert into pgpm_t364.c values (21, 'orig'), (22, 'orig');
+select pgpm_formal.baseline('pgpm_t364.c');
 call pgpm.transmute('pgpm_t364.c'::regclass, 'id', 10000::bigint, p_retain => 25000, p_paused => false);
 select pgpm.extend_to('pgpm_t364.c'::regclass, '60000');
 insert into pgpm_t364.c values (35005, 'frontier');
+select pgpm_formal.wrote('pgpm_t364.c', 'id = 35005');
 select child_name as c_doomed, child_oid as c_oid from pgpm.part where parent_table = 'pgpm_t364.c'::regclass and lo = '0' \gset
 update pgpm.part set retiring_at = now(), retiring_oid = child_oid, child_oid = null
  where parent_table = 'pgpm_t364.c'::regclass and lo = '0';

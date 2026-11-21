@@ -36,6 +36,7 @@ select plan(37);
 -- ======================= A. p_regrain_batch, p_paused, and the generic arguments =======================
 create table public.n_ts (id bigint not null, ts timestamptz not null, primary key (id, ts));
 insert into public.n_ts values (1, now() - interval '1 day'), (2, now() - interval '2 hours');
+select pgpm_formal.baseline('public.n_ts');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
@@ -113,6 +114,7 @@ select is((select array_agg(id order by id) from public.n_ts), array[1, 2]::bigi
 -- ======================= B. p_incoming_fks => null on a table with an incoming key =======================
 create table public.n_pa (id bigint not null, ts timestamptz not null, primary key (id, ts));
 insert into public.n_pa values (1, now() - interval '1 day'), (2, now() - interval '2 hours');
+select pgpm_formal.baseline('public.n_pa');
 create table public.n_ch (cid int primary key, pid bigint not null, pts timestamptz not null,
                           constraint n_ch_fk foreign key (pid, pts) references public.n_pa (id, ts));
 insert into public.n_ch values (1, 1, (select ts from public.n_pa where id = 1));
@@ -145,6 +147,7 @@ select is((select parent_table::text from pgpm.dropped_fk where constraint_name 
 -- ======================= C. p_force_frontier => null on a row a year ahead =======================
 create table public.n_ff (id bigint not null, ts timestamptz not null, primary key (id, ts));
 insert into public.n_ff values (1, now() - interval '1 day'), (2, now() + interval '1 year');
+select pgpm_formal.baseline('public.n_ff');
 
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
@@ -173,6 +176,7 @@ select ok((select p.hi::timestamptz > now() + interval '6 months'
 -- ======================= D. the id overload =======================
 create table public.n_id (id bigint primary key, body text);
 insert into public.n_id select g, 'row ' || g from generate_series(1, 15) g;   -- step 10 -> monolith [0, 20)
+select pgpm_formal.baseline('public.n_id');
 
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
@@ -211,6 +215,7 @@ select is((select string_agg('[' || lo || ',' || hi || ')', ' ' order by lo::num
 select is((select retain from pgpm.config where parent_table = 'public.n_id'::regclass), null,
   'LIVENESS: (D) registered with retain null');
 insert into public.n_id values (25, 'twenty-five');
+select pgpm_formal.wrote('public.n_id', 'id = 25');
 select is((select c.relname::text from public.n_id e join pg_class c on c.oid = e.tableoid where e.id = 25),
   'n_id_p0000000000000000020', 'LIVENESS: (D) id 25 lands in the forward partition [20, 30)');
 select is((select count(*)::int from pgpm.transmute_inflight

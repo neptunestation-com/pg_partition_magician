@@ -208,7 +208,8 @@ elif sel 26 || sel 42 || sel 48 || sel 54; then
 fi
 is_planted() { [[ "$planted" == *" $1 "* ]]; }
 
-# fresh <archive install.sql>: a new <db> with the extensions, the fixtures, the core and that module.
+# fresh <archive install.sql>: a new <db> with the extensions, the fixtures, the core, that module and the invariant
+# oracle (tests/formal/oracle.sql: the custody files here call pgpm_formal.baseline()).
 # tests/archive/db/44 creates the cluster-wide role t44_low and drops it before it ends; a run that died before
 # that leaves it, so it is dropped here first when nothing owns it any more.
 fresh() {
@@ -218,7 +219,8 @@ fresh() {
     q -d "$DB" -v ON_ERROR_STOP=1 -q -c "create extension if not exists http; create extension if not exists pgcrypto; create extension if not exists pgtap;" </dev/null >/dev/null 2>&1 &&
     q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/archive/fixtures.sql" >"$work/install.log" 2>&1 &&
     q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f - <"$ROOT/pgpm_core/install.sql" >"$work/install.log" 2>&1 &&
-    q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$1" >"$work/install.log" 2>&1
+    q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$1" >"$work/install.log" 2>&1 &&
+    q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/formal/oracle.sql" >>"$work/install.log" 2>&1
 }
 
 # judge <label> <expect: pass|fail> <test file>: run the file in <db> and read its TAP (pg_prove's verdict: the

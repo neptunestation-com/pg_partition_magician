@@ -82,6 +82,11 @@ begin
     v_lead := v_lead * 4;
   end loop;
 end $$;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md): here, not before transmute, which runs inside
+-- the fixture's retry loop above and may drop and rebuild the tables; before the first regrain_step
+select pgpm_formal.baseline('public.ev');
+select pgpm_formal.baseline('public.evn');
+select pgpm_formal.baseline('public.evd');
 select current_setting('t136.anc') as anc \gset
 select child_name as mono_ev from pgpm.part
  where parent_table = 'public.ev'::regclass and attached order by lo::timestamptz limit 1 \gset
@@ -138,12 +143,17 @@ select is(
 
 -- the changes, in the copied sub-range [anc - 4h30m, anc - 4h): one out, two in
 delete from public.ev where id = 1;
+select pgpm_formal.deleted('public.ev', 'id = 1');
 update public.ev set payload = 'updated' where id = 2;
 insert into public.ev values (5, :'anc'::timestamptz - interval '4 hours 30 minutes' + interval '30 s', 'new');
+select pgpm_formal.wrote('public.ev', 'id = 5');
 delete from public.evn where id = 1;
+select pgpm_formal.deleted('public.evn', 'id = 1');
 update public.evn set payload = 'updated' where id = 2;
 insert into public.evn values (5, (:'anc'::timestamptz - interval '4 hours 30 minutes' + interval '30 s') at time zone 'UTC', 'new');
+select pgpm_formal.wrote('public.evn', 'id = 5');
 delete from public.evd where id = 1;
+select pgpm_formal.deleted('public.evd', 'id = 1');
 select is(pgpm._regrain_delta_count('public.ev'), 4::bigint,
   'LIVENESS: the three changes to ev are captured (four delta rows: the UPDATE records its OLD and NEW key)');
 select is(pgpm._regrain_delta_count('public.evn'), 4::bigint,

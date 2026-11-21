@@ -28,6 +28,7 @@ select plan(19);
 -- ==================== (A) two unanchored rows whose partitions are gone ====================
 create table public.ub278 (id bigint primary key, payload text);
 insert into public.ub278 values (1, 'a'), (2, 'b');
+select pgpm_formal.baseline('public.ub278');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.ub278', 'id', 10::bigint, p_obtain => 6);
 
 create temporary table cells278 as
@@ -86,12 +87,14 @@ select ok(not exists (select 1 from pgpm.log where parent_table = 'public.ub278'
 
 select lives_ok($$ insert into public.ub278 values (25, 'in the first hole'), (55, 'in the second hole') $$,
   'writes into both rebuilt ranges are accepted');
+select pgpm_formal.wrote('public.ub278', 'id in (25, 55)');
 select is((select array_agg(id order by id) from public.ub278 where id in (25, 55)),
   array[25, 55]::bigint[], 'and land');
 
 -- ==================== (B) an unanchored row whose partition was renamed, not dropped ====================
 create table public.rn278 (id bigint primary key, payload text);
 insert into public.rn278 values (1, 'a'), (2, 'b'), (3, 'c');
+select pgpm_formal.baseline('public.rn278');
 call pgpm.transmute('public.rn278', 'id', 10::bigint, p_obtain => 4);
 
 create temporary table cellr278 as
@@ -117,6 +120,7 @@ select ok(not exists (select 1 from pgpm.log where parent_table = 'public.rn278'
 
 select lives_ok($$ insert into public.rn278 values (24, 'into the renamed partition') $$,
   'a write into [20, 30) is accepted');
+select pgpm_formal.wrote('public.rn278', 'id = 24');
 select is((select tableoid::oid from public.rn278 where id = 24), (select child_oid from cellr278),
   'a write into [20, 30) lands in the renamed partition');
 

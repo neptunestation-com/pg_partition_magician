@@ -67,6 +67,8 @@ for t in $TESTS; do
     printf 'FAIL  %-62s %s\n' "the uninstall script under test exists" "$UNINSTALL"
     fail=1; continue
   fi
+  # the invariant oracle (tests/formal/oracle.sql): the custody files call pgpm_formal.baseline()
+  q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null 2>&1
   out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB --set uninstall=$UNINSTALL $t" 2>&1)
   rc=$?
   # grep -E, not a sed alternation: this half runs on the HOST, and BSD sed has no `\|`.

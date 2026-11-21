@@ -57,6 +57,9 @@
 # mounted somewhere other than /repo.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; FILE="${3:-}"
+# the invariant oracle at this guard's observation point (formal methods Phase 3 W4, bench/formal_check.sh)
+# shellcheck source=bench/formal_check.sh
+source "$(dirname "$0")/formal_check.sh"
 TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/330_retirement_mark_needs_dispatch_test.sql}"
 INSTALL="${TAP_GUARD_INSTALL:-/repo/pgpm_core/install.sql}"
 SCRIPT="${TAP_GUARD_SCRIPT:-/repo/scripts/archive_partition_whole.sql}"
@@ -84,6 +87,9 @@ if [ "$fail" = 0 ] && ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f "$SCRIPT" >/dev/null
 fi
 
 if [ "$fail" = 0 ]; then
+  # the invariant oracle (tests/formal/oracle.sql): the test file calls pgpm_formal.baseline()
+  q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null 2>&1
+  formal_install "$C" "$DB"
   out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB -S archive_whole_script=$SCRIPT $TEST_FILE" 2>&1)
   rc=$?
   echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
@@ -98,5 +104,6 @@ if [ "$fail" = 0 ]; then
   fi
 fi
 
+formal_check "$C" "$DB" end   # after every observation, in its own session (report mode: prints ORACLE, never FAIL)
 q -q -c "drop database if exists $DB" >/dev/null 2>&1
 exit "$fail"

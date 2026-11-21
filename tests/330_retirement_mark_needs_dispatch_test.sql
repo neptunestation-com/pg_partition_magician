@@ -98,9 +98,11 @@ end $$;
 -- ================================ PART A: the acceptance flow through maintain() ================================
 create table public.rm330a (id bigint primary key, payload text);
 insert into public.rm330a values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rm330a');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.rm330a', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330a', '60');
 insert into public.rm330a values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('public.rm330a', 'id in (22, 55)');
 create table public.rm330a_ref (id bigint primary key, p_id bigint references public.rm330a (id));
 insert into public.rm330a_ref values (1, 55);   -- referenced: retire() takes the dispatched-detach path
 select child_name as a_mono, child_oid as a_mono_oid from pgpm.part
@@ -157,9 +159,11 @@ select is((select array_agg(distinct s.id order by s.id) from t330.sink s where 
 -- ================================ PART B: the shared predicates, both directions ================================
 create table public.rm330b (id bigint primary key, payload text);
 insert into public.rm330b values (1, 'a'), (2, 'b');
+select pgpm_formal.baseline('public.rm330b');
 call pgpm.transmute('public.rm330b', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330b', '100');
 insert into public.rm330b values (25, 'own'), (35, 'failed'), (45, 'other'), (55, 'sibling'), (95, 'frontier');
+select pgpm_formal.wrote('public.rm330b', 'id in (25, 35, 45, 55, 95)');
 select child_name as b_own,   child_oid as b_own_oid   from pgpm.part where parent_table = 'public.rm330b'::regclass and lo = '20' \gset
 select child_name as b_fail,  child_oid as b_fail_oid  from pgpm.part where parent_table = 'public.rm330b'::regclass and lo = '30' \gset
 select child_name as b_other, child_oid as b_other_oid from pgpm.part where parent_table = 'public.rm330b'::regclass and lo = '40' \gset
@@ -174,6 +178,7 @@ update pgpm.part set retiring_at = clock_timestamp(), retiring_oid = child_oid
 -- [40, 50): a record that names another relation (the [20, 30) table's), not this one
 update pgpm.part set retiring_at = clock_timestamp(), retiring_oid = child_oid, detach_dispatched_oid = :b_own_oid
  where parent_table = 'public.rm330b'::regclass and lo = '40';
+select pgpm_formal.operator_owns(r::regclass) from unnest(array[:b_own_oid, :b_fail_oid, :b_other_oid]::oid[]) r;   -- detached by hand below and kept
 select format('alter table public.rm330b detach partition public.%I', c) from unnest(array[:'b_own', :'b_fail', :'b_other']::name[]) c \gexec
 
 select ok(not exists (select 1 from pg_inherits where inhparent = 'public.rm330b'::regclass
@@ -220,9 +225,11 @@ update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_
 -- ================================ PART C: scripts/archive_partition_whole.sql ================================
 create table public.rm330c (id bigint primary key, payload text);
 insert into public.rm330c values (1, 'a');
+select pgpm_formal.baseline('public.rm330c');
 call pgpm.transmute('public.rm330c', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330c', '100');
 insert into public.rm330c values (21, 'x'), (24, 'y'), (27, 'z'), (31, 'p'), (33, 'q'), (95, 'frontier');
+select pgpm_formal.wrote('public.rm330c', 'id in (21, 24, 27, 31, 33, 95)');
 select pgpm._enforce_write_blocks('public.rm330c');
 select child_name as c_mono from pgpm.part where parent_table = 'public.rm330c'::regclass and lo = '0' \gset
 select child_name as c_p20, child_oid as c_p20_oid from pgpm.part where parent_table = 'public.rm330c'::regclass and lo = '20' \gset
@@ -230,6 +237,7 @@ select child_name as c_p30 from pgpm.part where parent_table = 'public.rm330c'::
 -- the state a failed dispatch leaves, then the operator's detach by hand; the archive strategy reads through the parent
 update pgpm.part set retiring_at = clock_timestamp(), retiring_oid = child_oid
  where parent_table = 'public.rm330c'::regclass and lo = '20';
+select pgpm_formal.operator_owns(format('public.%I', :'c_p20')::regclass);   -- detached by hand below and kept
 select format('alter table public.rm330c detach partition public.%I', :'c_p20') \gexec
 select pgpm.set_archive_fn('public.rm330c', 't330.via_parent(regclass,name,text,text)'::regprocedure);
 
@@ -269,9 +277,11 @@ update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_
 -- typed (attach it back) archives ids 1, 2 and 15 before the drop.
 create table public.rm330d (id bigint primary key, payload text);
 insert into public.rm330d values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rm330d');
 call pgpm.transmute('public.rm330d', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330d', '60');
 insert into public.rm330d values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('public.rm330d', 'id in (22, 55)');
 create table public.rm330d_ref (id bigint primary key, p_id bigint references public.rm330d (id));
 insert into public.rm330d_ref values (1, 55);   -- referenced: retire() takes the dispatched-detach path
 select child_name as d_mono, child_oid as d_mono_oid from pgpm.part
@@ -367,9 +377,11 @@ end $$;
 
 create table public.rm330e (id bigint primary key, payload text);
 insert into public.rm330e values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rm330e');
 call pgpm.transmute('public.rm330e', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330e', '60');
 insert into public.rm330e values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('public.rm330e', 'id in (22, 55)');
 select child_name as e_mono, child_oid as e_mono_oid from pgpm.part
  where parent_table = 'public.rm330e'::regclass and lo = '0' \gset
 select child_name as e_p20 from pgpm.part where parent_table = 'public.rm330e'::regclass and lo = '20' \gset
@@ -519,9 +531,11 @@ end $$;
 
 create table public.rm330f (id bigint primary key, payload text);
 insert into public.rm330f values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rm330f');
 call pgpm.transmute('public.rm330f', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330f', '60');
 insert into public.rm330f values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('public.rm330f', 'id in (22, 55)');
 select pgpm._enforce_write_blocks('public.rm330f');
 select child_name as f_mono, child_oid as f_mono_oid from pgpm.part
  where parent_table = 'public.rm330f'::regclass and lo = '0' \gset
@@ -591,9 +605,11 @@ select is((select array_agg(distinct s.id order by s.id) from t330.sink s where 
 update t330.gate_f set go = false;
 create table public.rm330g (id bigint primary key, payload text);
 insert into public.rm330g values (3, 'a'), (4, 'b'), (16, 'c');
+select pgpm_formal.baseline('public.rm330g');
 call pgpm.transmute('public.rm330g', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330g', '60');
 insert into public.rm330g values (23, 'aged'), (56, 'frontier');
+select pgpm_formal.wrote('public.rm330g', 'id in (23, 56)');
 select pgpm._enforce_write_blocks('public.rm330g');
 select child_name as g_mono, child_oid as g_mono_oid from pgpm.part
  where parent_table = 'public.rm330g'::regclass and lo = '0' \gset
@@ -606,6 +622,7 @@ select ok(pgpm._is_write_blocked('public.rm330g', :'g_mono')
           and not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.rm330g'::regclass),
   'LIVENESS: G: the monolith [0, 20) is attached, write-blocked and uncovered: the script''s next partition');
 
+select pgpm_formal.operator_owns(format('public.%I', :'g_mono')::regclass);   -- the race below detaches it by hand and it is kept
 select * from t330.race_concurrent('public.rm330g', :'g_mono',
   $$select pgpm_archive_next_partition_whole('public.rm330g'::regclass)$$) \gset g_
 select diag('G: ' || :'g_result');
@@ -643,9 +660,11 @@ select results_eq($$ select p_child, p_lo, p_hi, seen from t330.calls where pare
 update t330.gate set open = false;
 create table public.rm330h (id bigint primary key, payload text);
 insert into public.rm330h values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rm330h');
 call pgpm.transmute('public.rm330h', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330h', '60');
 insert into public.rm330h values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('public.rm330h', 'id in (22, 55)');
 select child_name as h_mono, child_oid as h_mono_oid from pgpm.part
  where parent_table = 'public.rm330h'::regclass and lo = '0' \gset
 select pgpm.set_archive_fn('public.rm330h', 't330.gated(regclass,name,text,text)'::regprocedure);
@@ -706,9 +725,11 @@ select is((select array_agg(distinct s.id order by s.id) from t330.sink s where 
 -- a false one keeps nothing covered: coverage is read as a watermark) and it is kept, then archived from lo.
 create table public.rm330i (id bigint primary key, payload text);
 insert into public.rm330i values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rm330i');
 call pgpm.transmute('public.rm330i', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330i', '100');
 insert into public.rm330i values (21, 'x'), (27, 'y'), (95, 'frontier');
+select pgpm_formal.wrote('public.rm330i', 'id in (21, 27, 95)');
 select pgpm._enforce_write_blocks('public.rm330i');
 select child_name as i_mono, child_oid as i_mono_oid from pgpm.part
  where parent_table = 'public.rm330i'::regclass and lo = '0' \gset
@@ -774,9 +795,11 @@ begin
 end $$;
 create table public.rm330j (id bigint primary key, payload text);
 insert into public.rm330j values (1, 'a'), (2, 'b'), (15, 'c');
+select pgpm_formal.baseline('public.rm330j');
 call pgpm.transmute('public.rm330j', 'id', 10::bigint, p_retain => 20, p_paused => false);
 select pgpm.extend_to('public.rm330j', '60');
 insert into public.rm330j values (22, 'aged'), (55, 'frontier');
+select pgpm_formal.wrote('public.rm330j', 'id in (22, 55)');
 select child_oid as j_mono_oid from pgpm.part where parent_table = 'public.rm330j'::regclass and lo = '0' \gset
 select pgpm.set_archive_fn('public.rm330j', 't330.uncounted(regclass,name,text,text)'::regprocedure);
 update pgpm.config set archive_batch = 5 where parent_table = 'public.rm330j'::regclass;

@@ -36,24 +36,29 @@ returns pgpm.archive_result language sql as $$
 -- t318.t: the table that is dropped by hand, with three archived chunks
 create table t318.t (id bigint primary key, payload text not null);
 insert into t318.t select g, 'old' || g from generate_series(1, 90) g;
+select pgpm_formal.baseline('t318.t');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('t318.t', 'id', 100, p_retain => 100::bigint, p_paused => false);
 insert into t318.t select g, 'mid' || g from generate_series(110, 120) g;
 insert into t318.t select g, 'late' || g from generate_series(210, 215) g;
 insert into t318.t values (450, 'frontier');
+select pgpm_formal.wrote('t318.t', 'id >= 110');
 update pgpm.config set retain_batch = 0, archive_batch = 10 where parent_table = 't318.t'::regclass;
 select pgpm.set_archive_fn('t318.t', 't318.strat(regclass,name,text,text)'::regprocedure);
 
 -- t318.u: a live managed table with one archived chunk, which forget_missing must leave alone
 create table t318.u (id bigint primary key, payload text not null);
 insert into t318.u select g, 'u' || g from generate_series(1, 40) g;
+select pgpm_formal.baseline('t318.u');
 call pgpm.transmute('t318.u', 'id', 100, p_retain => 100::bigint, p_paused => false);
 insert into t318.u values (250, 'frontier');
+select pgpm_formal.wrote('t318.u', 'id = 250');
 update pgpm.config set retain_batch = 0, archive_batch = 10 where parent_table = 't318.u'::regclass;
 select pgpm.set_archive_fn('t318.u', 't318.strat(regclass,name,text,text)'::regprocedure);
 
 -- t318.w: a second table dropped by hand, never archived
 create table t318.w (id bigint primary key);
 insert into t318.w select g from generate_series(1, 10) g;
+select pgpm_formal.baseline('t318.w');
 call pgpm.transmute('t318.w', 'id', 100, p_paused => false);
 
 call pgpm.maintain('t318.t');

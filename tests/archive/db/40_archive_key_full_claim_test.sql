@@ -69,8 +69,11 @@ select current_database() || '/t40/' as p \gset
 -- ======================= PART A: chunk first, then an export spelling its key =======================
 create table t40.evt (id bigint primary key, payload text not null);
 insert into t40.evt values (1, 'old'), (2, 'old');
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('t40.evt');
 call pgpm.transmute('t40.evt', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t40.evt values (45000, 'frontier');   -- horizon 40000: [0, 10000) is aged
+select pgpm_formal.wrote('t40.evt', 'id = 45000');
 select archive.configure('t40.evt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t40.evt', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't40.evt'::regclass::oid as evt_oid \gset
@@ -89,6 +92,7 @@ select is(t40.holder(:'p' || 't40.evt_0.ndjson'), 't40.evt/chunk', 'A: the chunk
 -- a relation in the parent's schema, named like the chunk, that pgpm does not track
 create table t40.evt_0 (id bigint primary key, payload text not null);
 insert into t40.evt_0 values (7, 'export'), (8, 'export');
+select pgpm_formal.operator_owns('t40.evt_0');
 select lives_ok($$ select archive.to_s3('t40.evt', 'evt_0', null, null) $$,
   'LIVENESS: (A) archive.to_s3 of the untracked t40.evt_0 completed');
 select is((select parent_oid from archive.object_key_owner where key_base = :'p' || 't40.evt_0'), :'evt_oid'::oid,
@@ -111,16 +115,19 @@ select is(t40.rows(:'p' || 't40.evt_0.ndjson') || '/' || t40.rows(:'p' || 't40.e
 -- the export's.
 create table t40.log (id bigint primary key, payload text not null);
 insert into t40.log values (45000, 'frontier');
+select pgpm_formal.baseline('t40.log');
 call pgpm.transmute('t40.log', 'id', 10000::bigint, p_paused => true);
 select archive.configure('t40.log', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 create table t40.ev2 (id bigint primary key, payload text not null);
 insert into t40.ev2 values (1, 'old'), (2, 'old');
+select pgpm_formal.baseline('t40.ev2');
 call pgpm.transmute('t40.ev2', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 select archive.configure('t40.ev2', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 select pgpm.set_archive_fn('t40.ev2', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't40.ev2'::regclass::oid as ev2_oid \gset
 create table t40.ev2_0 (id bigint primary key, payload text not null);
 insert into t40.ev2_0 values (7, 'export');
+select pgpm_formal.operator_owns('t40.ev2_0');
 
 select is(t40.clear(:'p' || 't40.ev2_0.ndjson') || '/' || t40.clear(:'p' || 't40.ev2.' || :'ev2_oid' || '_0.ndjson'), '404/404',
   'fixture: (B) nothing at the shared key nor at the chunk''s oid-shaped key before the work');
@@ -129,6 +136,7 @@ select is(t40.rows(:'p' || 't40.ev2_0.ndjson'), '7:export', 'LIVENESS: (B) the e
 select is(t40.holder(:'p' || 't40.ev2_0.ndjson'), 't40.log/export', 'B: and claimed that key as t40.log''s export');
 
 insert into t40.ev2 values (45000, 'frontier');
+select pgpm_formal.wrote('t40.ev2', 'id = 45000');
 call pgpm.maintain('t40.ev2');
 select is((select s3_key from pgpm.archive_ledger where parent_table = 't40.ev2'::regclass and lo = '0'),
           :'p' || 't40.ev2.' || :'ev2_oid' || '_0.ndjson',
@@ -142,8 +150,10 @@ select is(t40.rows(:'p' || 't40.ev2_0.ndjson'), '7:export',
 -- ======================= PART C: the compressed shapes =======================
 create table t40.gz (id bigint primary key, payload text not null);
 insert into t40.gz values (1, 'old'), (2, 'old');
+select pgpm_formal.baseline('t40.gz');
 call pgpm.transmute('t40.gz', 'id', 10000::bigint, p_retain => 5000::bigint, p_paused => false);
 insert into t40.gz values (45000, 'frontier');
+select pgpm_formal.wrote('t40.gz', 'id = 45000');
 select archive.configure('t40.gz', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p', p_compress => true);
 select pgpm.set_archive_fn('t40.gz', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
 select 't40.gz'::regclass::oid as gz_oid \gset
@@ -159,6 +169,7 @@ select is(t40.holder(:'p' || 't40.gz_0.ndjson.gz'), 't40.gz/chunk',
   'C: the claim names the whole key the PUT wrote, .gz included');
 create table t40.gz_0 (id bigint primary key, payload text not null);
 insert into t40.gz_0 values (7, 'export');
+select pgpm_formal.operator_owns('t40.gz_0');
 select lives_ok($$ select archive.to_s3('t40.gz', 'gz_0', null, null) $$,
   'LIVENESS: (C) the compressed export of the untracked t40.gz_0 completed');
 select ok(:'gz_chunk'::bytea is not null and t40.bytes(:'p' || 't40.gz_0.ndjson.gz') = :'gz_chunk'::bytea,
@@ -172,6 +183,7 @@ select ok(t40.bytes(:'p' || 't40.gz_0.' || :'gz_oid' || '.ndjson.gz') is not nul
 -- claimed here for another writer (oid 1, a chunk), so the export has no key it may write.
 create table t40.evt_10000 (id bigint primary key, payload text not null);
 insert into t40.evt_10000 values (9, 'refused');
+select pgpm_formal.operator_owns('t40.evt_10000');
 insert into archive.object_key_claim (object_key, parent_oid, kind) values
   (:'p' || 't40.evt_10000.ndjson', 1, 'chunk'), (:'p' || 't40.evt_10000.' || :'evt_oid' || '.ndjson', 1, 'chunk');
 select is(t40.clear(:'p' || 't40.evt_10000.ndjson') || '/' || t40.clear(:'p' || 't40.evt_10000.' || :'evt_oid' || '.ndjson'), '404/404',
@@ -195,6 +207,12 @@ select is(t40.holder(:'p' || 't40.evt_0.ndjson'), 't40.evt/chunk',
 select is(t40.holder(:'p' || 't40.ev2_0.ndjson'), 't40.log/export',
   'E: and left a claim already made as it was');
 
+select pgpm_formal.expect('ArchiveNoClobber', '[1]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.evt');
+select pgpm_formal.expect('ArchiveNoClobber', '[2]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.evt');
+select pgpm_formal.expect('ArchiveNoClobber', '[1]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.ev2');
+select pgpm_formal.expect('ArchiveNoClobber', '[2]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.ev2');
+select pgpm_formal.expect('ArchiveNoClobber', '[1]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.gz');
+select pgpm_formal.expect('ArchiveNoClobber', '[2]', 'the file''s closing cleanup DELETEs every object it wrote, the retired chunk''s among them, so after the file the chunk''s recorded rows are in no object; the file asserts the object held them (A/B/C above) before deleting it', 't40.gz');
 select count(t40.clear(k)) from unnest(array[
   :'p' || 't40.evt_0.ndjson', :'p' || 't40.evt_0.' || :'evt_oid' || '.ndjson',
   :'p' || 't40.ev2_0.ndjson', :'p' || 't40.ev2.' || :'ev2_oid' || '_0.ndjson',

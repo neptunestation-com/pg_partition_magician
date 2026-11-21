@@ -64,9 +64,12 @@ end $$;
 
 create table public.t289_ord (id bigint primary key, payload text);
 insert into public.t289_ord values (7, 'a');
+select pgpm_formal.baseline('public.t289_ord');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
 call pgpm.transmute('public.t289_ord', 'id', 100, p_retain => 1000, p_paused => false);
 insert into public.t289_ord values (250, 'b'), (260, 'c'), (1050, 'd');
+select pgpm_formal.wrote('public.t289_ord', 'id in (250, 260, 1050)');
 insert into public.t289_ord values (2150, 'frontier');   -- horizon 1150: [0, 100) to [1000, 1100) write-blocked
+select pgpm_formal.wrote('public.t289_ord', 'id = 2150');
 select pgpm._enforce_write_blocks('public.t289_ord');
 select pgpm.set_archive_fn('public.t289_ord', 't289.ord(regclass,name,text,text)'::regprocedure);
 select child_name as ord0    from pgpm.part where parent_table = 'public.t289_ord'::regclass and lo = '0'    \gset
@@ -112,6 +115,7 @@ end $$;
 
 create table public.t289_ts (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
 insert into public.t289_ts (ts) values ('2020-08-10 09:00+00'), ('2020-08-12 09:00+00'), ('2020-08-20 09:00+00');
+select pgpm_formal.baseline('public.t289_ts');
 call pgpm.transmute('public.t289_ts', 'ts', interval '1 second', p_obtain => 2, p_retain => interval '0 seconds', p_paused => false);
 select pg_sleep(2.5);   -- the monolith and the first grid cells age past a retain of 0 on the 1 s grid
 select pgpm._enforce_write_blocks('public.t289_ts');
@@ -180,8 +184,10 @@ end $$;
 create schema t289_moved;
 create table public.t289_mv (id bigint primary key, payload text);
 insert into public.t289_mv values (2, 'a'), (5, 'b'), (9, 'c');
+select pgpm_formal.baseline('public.t289_mv');
 call pgpm.transmute('public.t289_mv', 'id', 1000, p_retain => 19000, p_paused => false);
 insert into public.t289_mv values (20000, 'frontier');
+select pgpm_formal.wrote('public.t289_mv', 'id = 20000');
 select pgpm._enforce_write_blocks('public.t289_mv');
 select pgpm.set_archive_fn('public.t289_mv', 't289.read(regclass,name,text,text)'::regprocedure);
 select child_name as mv, child_oid as mv_oid from pgpm.part where parent_table = 'public.t289_mv'::regclass and lo = '0' \gset
@@ -209,8 +215,10 @@ select ok(:'msg_mv' like '%fully archived in one file (3 rows%', 'C: and the mes
 -- ---------------------------------------------------------------- PART D: CONTROL, a decoy in the partition's schema
 create table public.t289_dc (id bigint primary key, payload text);
 insert into public.t289_dc values (4, 'a'), (8, 'b');
+select pgpm_formal.baseline('public.t289_dc');
 call pgpm.transmute('public.t289_dc', 'id', 1000, p_retain => 19000, p_paused => false);
 insert into public.t289_dc values (20000, 'frontier');
+select pgpm_formal.wrote('public.t289_dc', 'id = 20000');
 select pgpm._enforce_write_blocks('public.t289_dc');
 select pgpm.set_archive_fn('public.t289_dc', 't289.read(regclass,name,text,text)'::regprocedure);
 select child_name as dc, child_oid as dc_oid from pgpm.part where parent_table = 'public.t289_dc'::regclass and lo = '0' \gset
@@ -222,6 +230,7 @@ select format($$ create trigger pgpm_write_block before insert or update or dele
                    on public.%I for each row execute function pgpm._write_block_raise() $$, :'dc') \gexec
 select format('alter table public.%I enable always trigger pgpm_write_block', :'dc') \gexec
 select format('public.%I', :'dc')::regclass::oid as dc_decoy \gset
+select pgpm_formal.operator_owns(:'dc_decoy'::oid::regclass);
 
 select ok(pgpm._is_write_blocked('t289_moved.t289_dc', :'dc')
           and not pgpm._archive_fully_covered('t289_moved.t289_dc', :'dc')

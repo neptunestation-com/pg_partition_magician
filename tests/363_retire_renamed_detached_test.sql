@@ -106,6 +106,7 @@ $$;
 
 -- ========== PART A: the detached retirement, renamed by the operator, is released (the issue's reproduction) ==========
 call pgpm_t363.landed('ra', array[1, 2]);
+select pgpm_formal.baseline('pgpm_t363.ra');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md); landed() fills and transmutes
 select child_name as a_doomed, hi as a_hi, child_oid as a_oid from pgpm.part
  where parent_table = 'pgpm_t363.ra'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.ra', :'a_doomed'), 'fixture: (A) retire() dispatches the detach');
@@ -163,6 +164,7 @@ update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_
 
 -- ========== PART B: a squatter took the old name; the renamed table is released all the same ==========
 call pgpm_t363.landed('rb', array[5, 6, 7]);
+select pgpm_formal.baseline('pgpm_t363.rb');
 select child_name as b_doomed, hi as b_hi, child_oid as b_oid from pgpm.part
  where parent_table = 'pgpm_t363.rb'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.rb', :'b_doomed'), 'fixture: (B) retire() dispatches the detach');
@@ -170,6 +172,7 @@ select pgpm_t363.armed() \gexec
 select format('alter table pgpm_t363.%I rename to rb_kept', :'b_doomed') \gexec
 select format('create table pgpm_t363.%I (id bigint, payload text)', :'b_doomed') \gexec
 select format('insert into pgpm_t363.%I values (99, ''squat'')', :'b_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t363.%I', :'b_doomed')::regclass);   -- the squatter
 select format('pgpm_t363.%I', :'b_doomed') as b_squat \gset
 select isnt(to_regclass(:'b_squat')::oid, :'b_oid'::oid, 'LIVENESS: (B) the old name denotes a different relation now');
 select ok(pgpm_t363.reached('pgpm_t363.rb', :'b_hi'), 'LIVENESS: (B) retention reaches the partition');
@@ -185,8 +188,10 @@ update cron.job set command = 'select 1';
 
 -- ========== PART D: detached by hand with no mark, and renamed; refused as detached by hand ==========
 call pgpm_t363.landed('rd', array[31, 32, 33, 34]);
+select pgpm_formal.baseline('pgpm_t363.rd');
 select child_name as d_doomed, hi as d_hi, child_oid as d_oid from pgpm.part
  where parent_table = 'pgpm_t363.rd'::regclass and lo = '0' \gset
+select pgpm_formal.operator_owns(:'d_oid'::oid::regclass);   -- detached by hand below and kept
 select format('alter table pgpm_t363.rd detach partition pgpm_t363.%I', :'d_doomed') \gexec
 select format('alter table pgpm_t363.%I rename to rd_mine', :'d_doomed') \gexec
 select ok(not pgpm_t363.is_partition(:'d_oid'::oid) and to_regclass('pgpm_t363.rd_mine')::oid = :'d_oid'::oid,
@@ -201,6 +206,7 @@ select is(pgpm_t363.ids('pgpm_t363.rd_mine'), array[31, 32, 33, 34]::bigint[], '
 
 -- ========== PART E: an older install's row, no child_oid; the remedy names the renamed table, not the squatter ==========
 call pgpm_t363.landed('re', array[41, 42, 43]);
+select pgpm_formal.baseline('pgpm_t363.re');
 select child_name as e_doomed, hi as e_hi, child_oid as e_oid from pgpm.part
  where parent_table = 'pgpm_t363.re'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.re', :'e_doomed'), 'fixture: (E) retire() dispatches the detach');
@@ -211,6 +217,7 @@ update pgpm.part set child_oid = null, detach_dispatched_oid = null
 select format('alter table pgpm_t363.%I rename to re_kept', :'e_doomed') \gexec
 select format('create table pgpm_t363.%I (id bigint, payload text)', :'e_doomed') \gexec
 select format('insert into pgpm_t363.%I values (98, ''squat'')', :'e_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t363.%I', :'e_doomed')::regclass);   -- the squatter
 select ok((select child_oid is null and retiring_oid = :'e_oid'::oid from pgpm.part
             where parent_table = 'pgpm_t363.re'::regclass and lo = '0'),
   'LIVENESS: (E) the row records the retirement by its mark alone, child_oid null');
@@ -228,11 +235,13 @@ update cron.job set command = 'select 1';
 
 -- ========== PART F: the recorded relation is gone; the identity failure stands ==========
 call pgpm_t363.landed('rf', array[11]);
+select pgpm_formal.baseline('pgpm_t363.rf');
 select child_name as f_doomed, hi as f_hi, child_oid as f_oid from pgpm.part
  where parent_table = 'pgpm_t363.rf'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.rf', :'f_doomed'), 'fixture: (F) retire() dispatches the detach');
 select pgpm_t363.armed() \gexec
 select format('drop table pgpm_t363.%I', :'f_doomed') \gexec
+select pgpm_formal.deleted('pgpm_t363.rf', 'id = 11');   -- the table holding it was dropped by hand
 select ok(not exists (select 1 from pg_class where oid = :'f_oid'::oid), 'LIVENESS: (F) the detached table was dropped by hand');
 select ok(pgpm_t363.reached('pgpm_t363.rf', :'f_hi'), 'LIVENESS: (F) retention reaches the partition');
 select ok(not pgpm.retire('pgpm_t363.rf', :'f_doomed'), 'F: retire() returns false');
@@ -246,6 +255,7 @@ update cron.job set command = 'select 1';
 -- tests/77's #407 substitution on a row with no child_oid (PR #1433 verification V-01): the release used to clear the
 -- row's only anchor, so the next calls took the impostor for the partition, detached it and dropped it, rows and all.
 call pgpm_t363.landed('rg', array[51, 52]);
+select pgpm_formal.baseline('pgpm_t363.rg');
 select child_name as g_doomed, hi as g_hi, child_oid as g_oid from pgpm.part
  where parent_table = 'pgpm_t363.rg'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.rg', :'g_doomed'), 'fixture: (G) retire() dispatches the detach');
@@ -257,6 +267,7 @@ select format('alter table pgpm_t363.%I rename to rg_kept', :'g_doomed') \gexec
 select format('create table pgpm_t363.%I (id bigint primary key, payload text)', :'g_doomed') \gexec
 select format('insert into pgpm_t363.%I values (57, ''impostor''), (58, ''impostor''), (59, ''impostor'')', :'g_doomed') \gexec
 select format('alter table pgpm_t363.rg attach partition pgpm_t363.%I for values from (0) to (10000)', :'g_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t363.%I', :'g_doomed')::regclass);   -- the impostor, attached by hand
 select to_regclass(format('pgpm_t363.%I', :'g_doomed'))::oid as g_imp \gset
 select ok(exists (select 1 from pg_inherits where inhrelid = :'g_imp'::oid and inhparent = 'pgpm_t363.rg'::regclass)
           and (select child_oid is null and retiring_oid = :'g_oid'::oid from pgpm.part where parent_table = 'pgpm_t363.rg'::regclass and lo = '0'),
@@ -284,11 +295,13 @@ update cron.job set command = 'select 1';
 -- (PR #1433 verification V-03) a live partition of another table: the remedy for a range retention reaches would tell
 -- the operator to drop it, so retire() leaves it to the identity refusal, as before
 call pgpm_t363.landed('rh', array[61, 62]);
+select pgpm_formal.baseline('pgpm_t363.rh');
 select child_name as h_doomed, hi as h_hi, child_oid as h_oid from pgpm.part
  where parent_table = 'pgpm_t363.rh'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.rh', :'h_doomed'), 'fixture: (H) retire() dispatches the detach');
 select pgpm_t363.armed() \gexec
 select format('alter table pgpm_t363.%I rename to rh_kept', :'h_doomed') \gexec
+select pgpm_formal.operator_owns('pgpm_t363.rh_kept', 'pgpm_t363.rh');   -- attached below to the operator's own table
 create table pgpm_t363.mine (id bigint primary key, payload text) partition by range (id);
 alter table pgpm_t363.mine attach partition pgpm_t363.rh_kept for values from (0) to (10000);
 select is((select inhparent::regclass from pg_inherits where inhrelid = :'h_oid'::oid), 'pgpm_t363.mine'::regclass,
@@ -306,6 +319,7 @@ update cron.job set command = 'select 1';
 -- The recall's release (#1424) clears the same mark, so it anchors the row too: once retention reaches the range
 -- again, retire() compares the name against the renamed table and leaves an impostor attached under it alone.
 call pgpm_t363.landed('ri', array[71, 72]);
+select pgpm_formal.baseline('pgpm_t363.ri');
 select child_name as i_doomed, hi as i_hi, child_oid as i_oid from pgpm.part
  where parent_table = 'pgpm_t363.ri'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.ri', :'i_doomed'), 'fixture: (I) retire() dispatches the detach');
@@ -321,9 +335,11 @@ select is((select child_oid from pgpm.part where parent_table = 'pgpm_t363.ri'::
 select format('create table pgpm_t363.%I (id bigint primary key, payload text)', :'i_doomed') \gexec
 select format('insert into pgpm_t363.%I values (75, ''impostor''), (76, ''impostor'')', :'i_doomed') \gexec
 select format('alter table pgpm_t363.ri attach partition pgpm_t363.%I for values from (0) to (10000)', :'i_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t363.%I', :'i_doomed')::regclass);   -- the impostor, attached by hand
 select to_regclass(format('pgpm_t363.%I', :'i_doomed'))::oid as i_imp \gset
 -- newer rows move the frontier on (56000 - 45000 puts the horizon at 11000), and retention reaches the range again
 insert into pgpm_t363.ri values (56000, 'newer');
+select pgpm_formal.wrote('pgpm_t363.ri', 'id = 56000');
 select ok(pgpm_t363.reached('pgpm_t363.ri', :'i_hi'), 'LIVENESS: (I) retention reaches the partition again');
 select pgpm.retire('pgpm_t363.ri', :'i_doomed');
 select pgpm_t363.armed() \gexec
@@ -340,6 +356,7 @@ update cron.job set command = 'select 1';
 -- Every path that clears a mark on a row with no child_oid used to leave it with no anchor at all, so a table attached
 -- under the name since was taken for the partition, detached and dropped (PR #1433 verification V-01).
 call pgpm_t363.landed('rj', array[81, 82]);
+select pgpm_formal.baseline('pgpm_t363.rj');
 select child_name as j_doomed, hi as j_hi, child_oid as j_oid from pgpm.part
  where parent_table = 'pgpm_t363.rj'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.rj', :'j_doomed'), 'fixture: (J) retire() dispatches the detach');
@@ -357,6 +374,7 @@ select format('alter table pgpm_t363.%I rename to rj_kept', :'j_doomed') \gexec
 select format('create table pgpm_t363.%I (id bigint primary key, payload text)', :'j_doomed') \gexec
 select format('insert into pgpm_t363.%I select i, ''impostor'' from unnest(array[87, 88, 89]) i', :'j_doomed') \gexec
 select format('alter table pgpm_t363.rj attach partition pgpm_t363.%I for values from (0) to (10000)', :'j_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t363.%I', :'j_doomed')::regclass);   -- the impostor, attached by hand
 select to_regclass(format('pgpm_t363.%I', :'j_doomed'))::oid as j_imp \gset
 select ok(exists (select 1 from pg_inherits where inhrelid = :'j_imp'::oid and inhparent = 'pgpm_t363.rj'::regclass),
   'LIVENESS: (J) an impostor is attached under the name');
@@ -378,6 +396,7 @@ update cron.job set command = 'select 1';
 -- Every path that clears a mark on a row with no child_oid used to leave it with no anchor at all, so a table attached
 -- under the name since was taken for the partition, detached and dropped (PR #1433 verification V-01).
 call pgpm_t363.landed('rk', array[91, 92]);
+select pgpm_formal.baseline('pgpm_t363.rk');
 select child_name as k_doomed, hi as k_hi, child_oid as k_oid from pgpm.part
  where parent_table = 'pgpm_t363.rk'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.rk', :'k_doomed'), 'fixture: (K) retire() dispatches the detach');
@@ -395,6 +414,7 @@ select format('alter table pgpm_t363.%I rename to rk_kept', :'k_doomed') \gexec
 select format('create table pgpm_t363.%I (id bigint primary key, payload text)', :'k_doomed') \gexec
 select format('insert into pgpm_t363.%I select i, ''impostor'' from unnest(array[96, 97, 98]) i', :'k_doomed') \gexec
 select format('alter table pgpm_t363.rk attach partition pgpm_t363.%I for values from (0) to (10000)', :'k_doomed') \gexec
+select pgpm_formal.operator_owns(format('pgpm_t363.%I', :'k_doomed')::regclass);   -- the impostor, attached by hand
 select to_regclass(format('pgpm_t363.%I', :'k_doomed'))::oid as k_imp \gset
 select ok(exists (select 1 from pg_inherits where inhrelid = :'k_imp'::oid and inhparent = 'pgpm_t363.rk'::regclass),
   'LIVENESS: (K) an impostor is attached under the name');
@@ -414,6 +434,7 @@ update cron.job set command = 'select 1';
 
 -- ========== PART C: renamed while still attached; no detached retirement to hand over ==========
 call pgpm_t363.landed('rc', array[21, 22]);
+select pgpm_formal.baseline('pgpm_t363.rc');
 select child_name as c_doomed, hi as c_hi, child_oid as c_oid from pgpm.part
  where parent_table = 'pgpm_t363.rc'::regclass and lo = '0' \gset
 select ok(not pgpm.retire('pgpm_t363.rc', :'c_doomed'), 'fixture: (C) retire() dispatches the detach');

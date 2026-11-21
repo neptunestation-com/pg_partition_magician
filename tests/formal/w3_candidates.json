@@ -1,0 +1,97 @@
+{
+  "_about": "Formal methods Phase 3 W3 (docs/formal/phase3-design.md): what the oracle reported over the custody files that was neither a placement to fix nor a state the file says it builds. Not judged here: each candidate is a claim for W6 to read. resolved_by_oracle_fix lists what W3 found to be the oracle's own defects, fixed in tests/formal/oracle.sql, each with a case in tests/formal/oracle_selftest_test.sql.",
+  "candidates": [
+    {
+      "file": "tests/327_retire_pending_detach_test.sql",
+      "part": "A",
+      "invariant": "ResolveByRecord",
+      "identity": "public.rp327a_p0000000000000000100",
+      "detail": "the operator's relation was detached from its parent by pgpm",
+      "reading": "Part A builds the operator's DETACH ... CONCURRENTLY of [100, 200) in a dblink session, parks it in its wait phase and kills it (rp327_park_detach + rp327_kill_detach), leaving the partition pending detach; pgpm._detach_reap then finishes the abandoned detach (DETACH ... FINALIZE) and leaves the table standing, which the file asserts as documented behaviour (#705). The oracle records only the FINALIZE (under a pgpm frame) because the test's own first phase never reached ddl_command_end in the killed session, so it reports the operator's relation as detached by pgpm. Not (b): the file asserts that pgpm finishes the operator's detach and never says it builds a state where pgpm detaches the operator's table; the ResolveByRecord rule does not distinguish completing an operator-initiated pending detach from pgpm detaching it."
+    },
+    {
+      "file": "tests/327_retire_pending_detach_test.sql",
+      "part": "B",
+      "invariant": "ResolveByRecord",
+      "identity": "public.rp327b_p0000000000000000100",
+      "detail": "the operator's relation was detached from its parent by pgpm",
+      "reading": "Part B builds the operator's DETACH ... CONCURRENTLY of [100, 200) in a dblink session, parks it in its wait phase and kills it (rp327_park_detach + rp327_kill_detach), leaving the partition pending detach; pgpm._detach_reap then finishes the abandoned detach (DETACH ... FINALIZE) and leaves the table standing, which the file asserts as documented behaviour (#705). The oracle records only the FINALIZE (under a pgpm frame) because the test's own first phase never reached ddl_command_end in the killed session, so it reports the operator's relation as detached by pgpm. Not (b): the file asserts that pgpm finishes the operator's detach and never says it builds a state where pgpm detaches the operator's table; the ResolveByRecord rule does not distinguish completing an operator-initiated pending detach from pgpm detaching it."
+    },
+    {
+      "file": "tests/327_retire_pending_detach_test.sql",
+      "part": "D",
+      "invariant": "ResolveByRecord",
+      "identity": "public.rp327d_p0000000000000000100",
+      "detail": "the operator's relation was detached from its parent by pgpm",
+      "reading": "Part D builds the operator's DETACH ... CONCURRENTLY of [100, 200) in a dblink session, parks it in its wait phase and kills it (rp327_park_detach + rp327_kill_detach), leaving the partition pending detach; pgpm._detach_reap then finishes the abandoned detach (DETACH ... FINALIZE) and leaves the table standing, which the file asserts as documented behaviour (#705). The oracle records only the FINALIZE (under a pgpm frame) because the test's own first phase never reached ddl_command_end in the killed session, so it reports the operator's relation as detached by pgpm. Not (b): the file asserts that pgpm finishes the operator's detach and never says it builds a state where pgpm detaches the operator's table; the ResolveByRecord rule does not distinguish completing an operator-initiated pending detach from pgpm detaching it."
+    },
+    {
+      "file": "tests/327_retire_pending_detach_test.sql",
+      "part": "E",
+      "invariant": "ResolveByRecord",
+      "identity": "public.rp327e_p0000000000000000100",
+      "detail": "the operator's relation was detached from its parent by pgpm",
+      "reading": "Part E builds the operator's DETACH ... CONCURRENTLY of [100, 200) in a dblink session, parks it in its wait phase and kills it (rp327_park_detach + rp327_kill_detach), leaving the partition pending detach; pgpm._detach_reap then finishes the abandoned detach (DETACH ... FINALIZE) and leaves the table standing, which the file asserts as documented behaviour (#705). The oracle records only the FINALIZE (under a pgpm frame) because the test's own first phase never reached ddl_command_end in the killed session, so it reports the operator's relation as detached by pgpm. Not (b): the file asserts that pgpm finishes the operator's detach and never says it builds a state where pgpm detaches the operator's table; the ResolveByRecord rule does not distinguish completing an operator-initiated pending detach from pgpm detaching it."
+    },
+    {
+      "file": "tests/59_retain_batch_test.sql",
+      "part": "lines 39-54 then 74",
+      "invariant": "DropOnlyCovered",
+      "identity": "[1] .. [50000] (50000 identities, ids 1..50000)",
+      "detail": "gone with control value N below the horizon, and no retired chunk of rb9 holds it",
+      "reading": "The file drops the monolith [0, 60000) (ids 1..50000) with retain() at lines 39 and 53 while rb9 has NO archive strategy (archive_fn null, the default), which is retention as documented: no archive, nothing to cover. Only afterwards, at line 74, does it set archive_fn = _archive_noop to test the coverage gate on the two later partitions (which hold no baselined rows). check() reads today's pgpm.config (cfg ->> 'archive_fn' at the end of the file) and judges every row ever aged out against it, so drops made under no strategy are reported as uncovered. The file builds nothing wrong and asserts nothing contrary; it is the same shape the design note records for the horizon ('the oracle reads today's horizon, not the one the drop ran under'), but for the archive strategy, and here it cannot be declared one identity per call (50000)."
+    },
+    {
+      "file": "tests/389_archive_chunk_unshaped_key_test.sql",
+      "part": "whole file (odd keys, original lines 83-86)",
+      "invariant": "NoLostRow",
+      "identity": "[\"5e19100z\"], [\"5e1d048z\"], [\"5e5afb0z\"]",
+      "detail": "visible 0 of 1 (parent 0, custody 0, operator 0); its control value could not be read as a native grid value",
+      "reading": "The file inserts three text_time keys without the declared shape ('z' is no hex digit) into the 2020 child on purpose; its contract is that they travel inside the chunk whose encoded bounds hold them and the partition is covered and retired (retain_drop logged; 'what remains is -9 and -3'). pgpm routes such keys by string order. The oracle decodes each lost row's control value with _col_to_native and, when that fails, reports the row lost instead of judging it against the retain_drop ranges or the partition bounds in the column's own order. Not (b): the file builds no broken state; the rows were archived and retired as designed."
+    }
+  ],
+  "resolved_by_oracle_fix": [
+    {
+      "file": "tests/204_retain_recall_moved_parent_test.sql",
+      "part": "B",
+      "invariant": "NoLostRow",
+      "identity": "[50005]",
+      "fix": "parent_seen: the ledger follows its parent once the monolith is released"
+    },
+    {
+      "file": "tests/349_regrain_swap_detach_by_oid_test.sql",
+      "part": "A, B, C",
+      "invariant": "NoLostRow",
+      "identity": "[10] .. [990] by 10 and [20000], in each part (300)",
+      "fix": "parent_seen: a namesake under the moved parent's old name no longer answers for it"
+    },
+    {
+      "file": "tests/197_moved_parent_lifecycle_test.sql and tests/355_retire_referenced_by_anchor_test.sql (part I)",
+      "part": "-",
+      "invariant": "(wrote() raised: no baseline)",
+      "identity": "-",
+      "fix": "parent_seen; both files now baseline before transmute"
+    },
+    {
+      "file": "tests/231_crossing_keys_datestyle_test.sql, tests/253_crossing_keys_control_collation_test.sql, tests/266_retire_crossing_delete_parent_rls_test.sql",
+      "part": "-",
+      "invariant": "NoLostRow",
+      "identity": "the referenced doomed rows (1, 2 and 2)",
+      "fix": "retain_crossing counts as retention running over the row"
+    },
+    {
+      "file": "tests/347_over_retired_chunks_unnamed_widest_test.sql",
+      "part": "G",
+      "invariant": "(check() raised)",
+      "identity": "-",
+      "fix": "a retired chunk's bound this session cannot parse is read at its widest"
+    },
+    {
+      "file": "tests/archive/db/33_ndjson_row_alias_shadowed_test.sql, tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql",
+      "part": "-",
+      "invariant": "NoLostRow",
+      "identity": "t33.cmp [1] [2]; t48.nt [1] .. [40]",
+      "fix": "rows are read as to_jsonb(t.*), which a column named t cannot shadow"
+    }
+  ]
+}

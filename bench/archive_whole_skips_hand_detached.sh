@@ -49,6 +49,8 @@ if [ "$fail" = 0 ] && ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f "$SCRIPT" >/dev/null
 fi
 
 if [ "$fail" = 0 ]; then
+  # the invariant oracle (tests/formal/oracle.sql): the test file calls pgpm_formal.baseline()
+  q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null 2>&1
   out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB -S archive_whole_script=$SCRIPT $TEST_FILE" 2>&1)
   rc=$?
   echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20

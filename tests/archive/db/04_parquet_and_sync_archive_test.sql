@@ -9,8 +9,11 @@
 select plan(3);
 
 call mk_archive_table('a4', 60, 10, 20, p_paused => false);   -- monolith [0, 70), premakes 4 ahead
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.a4');
 insert into public.a4 (id, payload) values (71, 'y');    -- into [70,80)
 insert into public.a4 (id, payload) values (109, 'frontier');   -- advances the frontier to 109
+select pgpm_formal.wrote('public.a4', 'id in (71, 109)');
 
 select mk_archive_config('a4', false);
 

@@ -35,20 +35,26 @@ select plan(18);
 create table public.h59 (id bigint not null, ts timestamptz not null, v text, primary key (id, ts));
 select create_hypertable('public.h59', 'ts', chunk_time_interval => interval '1 day') \g /dev/null
 insert into public.h59 select g, now() - g * interval '1 day', 'r' || g from generate_series(1, 4) g;
+-- the invariant oracle's row ledger (docs/formal/phase3-design.md)
+select pgpm_formal.baseline('public.h59');
 create table public.ref59 (rid int primary key, h_id bigint, h_ts timestamptz,
                            constraint ref59_fk foreign key (h_id, h_ts) references public.h59 (id, ts));
 insert into public.ref59 select id, id, ts from public.h59 where id in (2, 3);
 create index h59_v_idx on public.h59 (v);
 create table public.h59_v_idx_pgpm (squatter int);   -- takes the name transmute's carried index needs
+select pgpm_formal.operator_owns('public.h59_v_idx_pgpm');
 
 create table public.h59b (id bigint not null, ts timestamptz not null, v text, primary key (id, ts));
 select create_hypertable('public.h59b', 'ts', chunk_time_interval => interval '1 day') \g /dev/null
 insert into public.h59b select g, now() - g * interval '1 day', 'b' || g from generate_series(1, 3) g;
+select pgpm_formal.baseline('public.h59b');
 create index h59b_v_idx on public.h59b (v);
 create table public.h59b_v_idx_pgpm (squatter int);
+select pgpm_formal.operator_owns('public.h59b_v_idx_pgpm');
 
 create table public.p59 (id bigint not null, ts timestamptz not null, primary key (id, ts));
 insert into public.p59 select g, now() - g * interval '1 day' from generate_series(1, 2) g;
+select pgpm_formal.baseline('public.p59');
 
 call pgpm.from_hypertable_copy('public.h59', 'ts');
 call pgpm.from_hypertable_copy('public.h59b', 'ts');
