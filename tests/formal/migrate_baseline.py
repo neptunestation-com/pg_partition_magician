@@ -142,8 +142,13 @@ def runners_of(rel, root=ROOT):
                 if n.endswith((".sh", ".py")):
                     fp = os.path.join(dirpath, n)
                     try:
-                        # by basename: a multi-file wrapper names its files without the directory
-                        if os.path.basename(rel) in open(fp).read():
+                        # by stem: a multi-file wrapper names its files without the directory, and some without the
+                        # .sql too (reads_under_caller_rls.sh loops over `241_..._test` and adds it); the stem's own
+                        # number prefix keeps 7_x_test from matching inside 17_x_test
+                        stem = os.path.basename(rel)[:-len(".sql")]
+                        # a comment that names a file does not run it (liveness_witness_labels.sh cites tests/241)
+                        code = "\n".join(ln for ln in open(fp).read().splitlines() if not ln.lstrip().startswith("#"))
+                        if re.search(r"(?<![\w])" + re.escape(stem), code):
                             found.append(os.path.relpath(fp, root))
                     except UnicodeDecodeError:
                         pass
@@ -244,6 +249,9 @@ def selftest():
         cases["bench/shared.sh"] = "q -f /repo/tests/formal/oracle.sql\n"
         cases["bench/bare.sh"] = "pg_prove /repo/tests/1_good_test.sql\n"
         cases["bench/byname.sh"] = 'FILES="1_good_test.sql"\nfor f in $FILES; do pg_prove "$DIR/$f"; done\n'
+        cases["bench/bystem.sh"] = 'for t in 1_good_test; do pg_prove "/repo/tests/$t.sql"; done\n'
+        cases["bench/longer.sh"] = 'pg_prove /repo/tests/11_good_test.sql\n'
+        cases["bench/cites.sh"] = '# reads tests/1_good_test.sql, never runs it\ngrep -c premise "$f"\n'
         for rel, body in cases.items():
             open(os.path.join(d, rel), "w").write(body)
         open(os.path.join(d, "test.sh"), "w").write(
@@ -261,11 +269,14 @@ def selftest():
                      "run_timescale does not install",
                      "bench/bare.sh: runs tests/1_good_test.sql",
                      "bench/byname.sh: runs tests/1_good_test.sql",
+                     "bench/bystem.sh: runs tests/1_good_test.sql",
                      "6_schema_test.sql:2: pgpm acts on s6.c before its baseline"):
             if want not in got:
                 print(f"selftest FAIL: no finding containing {want!r}\n{got}")
                 ok = False
-        if any(x in got for x in ("1_good_test.sql:", "bench/wrap.sh", "7_said_test.sql:", "8_again_test.sql:")):
+        if any(x in got for x in ("1_good_test.sql:", "bench/wrap.sh", "bench/longer.sh", "bench/cites.sh",
+                                  "7_said_test.sql:",
+                                  "8_again_test.sql:")):
             print(f"selftest FAIL: the good file was reported\n{got}")
             ok = False
     print("selftest:", "PASS" if ok else "FAIL")

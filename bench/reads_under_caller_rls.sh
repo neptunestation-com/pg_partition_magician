@@ -85,6 +85,8 @@ if [ "$MODE" = core ]; then
     if ! q -d "$db" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
       printf 'FAIL  %-66s %s\n' "the module under test installed" "$INSTALL"; fail=1
     else
+      # the invariant oracle (tests/formal/oracle.sql): tests/241 calls pgpm_formal.baseline()
+      q -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/tests/formal/oracle.sql >/dev/null 2>&1
       prove "$db" "/repo/tests/$t.sql"
     fi
     q -q -c "drop database if exists $db" >/dev/null 2>&1
