@@ -5811,10 +5811,13 @@ $$;''',
     "recall_unreadable_job_read_idle": (
         "bench/retain_recall_armed_detach.sh",
         "Issue #1451 path 2, the unreadable half: a role whose read of cron.job raises (no access to schema cron at "
-        "all) is taken to have read the job idle (the pre-fix handler's 'nothing can be armed'). One site, the handler. "
-        "tests/194 part L catches it.",
+        "all) is taken to have read the job idle (the pre-fix handler's 'nothing can be armed'). Two sites, the vouch's "
+        "unreadable answer and the recall's handler, which PR #1492 restored as a second layer. tests/194 part L "
+        "catches it.",
         [("    return not p_dispatched and p_retiring_by is not null;\n",
-          "    return true;\n", 1)],
+          "    return true;\n", 1),
+         ("        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;\n",
+          "        v_read := true;\n", 1)],
     ),
     "recall_command_unread_vouched": (
         "bench/retain_recall_armed_detach.sh",
@@ -5893,10 +5896,13 @@ $$;''',
         "bench/retain_recall_armed_detach.sh",
         "PR #1459 round 2 P1-01: a role whose read of cron.job raises (no access to schema cron) is refused the "
         "reading outright, so a mark this release made whose dispatch was refused, held by no job, is kept for good "
-        "and counted with a message blaming an older pgpm, where any tick cleared it at once before #1451. One site, "
-        "the read's error handler. tests/194 part T catches it.",
+        "and counted with a message blaming an older pgpm, where any tick cleared it at once before #1451. Two sites, "
+        "the vouch's unreadable answer and the recall's handler, which PR #1492 restored as a second layer. tests/194 "
+        "part T catches it.",
         [("    return not p_dispatched and p_retiring_by is not null;\n",
-          "    return false;\n", 1)],
+          "    return false;\n", 1),
+         ("        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;\n",
+          "        v_read := false;\n", 1)],
     ),
     "recall_release_unread_job": (
         "bench/retain_recall_armed_detach.sh",
