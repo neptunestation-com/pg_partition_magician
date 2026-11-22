@@ -5813,8 +5813,8 @@ $$;''',
         "Issue #1451 path 2, the unreadable half: a role whose read of cron.job raises (no access to schema cron at "
         "all) is taken to have read the job idle (the pre-fix handler's 'nothing can be armed'). One site, the handler. "
         "tests/194 part L catches it.",
-        [("        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;\n",
-          "        v_read := true;\n", 1)],
+        [("    return not p_dispatched and p_retiring_by is not null;\n",
+          "    return true;\n", 1)],
     ),
     "recall_reads_another_roles_job": (
         "bench/retain_recall_armed_detach.sh",
@@ -5822,8 +5822,8 @@ $$;''',
         "per role that ran pgpm.schedule(), so a table owner who also ran it reads its own idle job while the "
         "administrator's still holds the detach, clears the mark a minute on, and the administrator's run strands the "
         "rows. One site, the role in the reading's test. tests/194 part O catches it.",
-        [("             or (r.detach_dispatched_oid is not null and r.retiring_by is not distinct from current_user)   -- never null\n",
-          "             or (r.detach_dispatched_oid is not null)\n", 1)],
+        [("      or (p_dispatched and p_retiring_by is not distinct from current_user)   -- never null\n",
+          "      or (p_dispatched)\n", 1)],
     ),
     "recall_unrecorded_mark_read": (
         "bench/retain_recall_armed_detach.sh",
@@ -5831,8 +5831,8 @@ $$;''',
         "after an upgrade from v0.6.0 run by a role that could not read the job (which left the record out), its tick "
         "clears the mark at once and the still-armed job strands the rows. One site, the reading's test. tests/194 "
         "part P catches it.",
-        [("             or (r.detach_dispatched_oid is null and r.retiring_by is not null);   -- this release's, never dispatched\n",
-          "             or (r.detach_dispatched_oid is null);\n", 1)],
+        [("      or (not p_dispatched and p_retiring_by is not null);   -- this release's, never dispatched\n",
+          "      or (not p_dispatched);\n", 1)],
     ),
     "retiring_by_claimed_on_retry": (
         "bench/retain_recall_armed_detach.sh",
@@ -5850,8 +5850,8 @@ $$;''',
         "read as one an older pgpm may have dispatched, so a non-superuser's ticks keep it for good, counted, where "
         "before #1451 they cleared it at once: nothing holds the detach. One site, the reading's third clause. "
         "tests/194 part R catches it.",
-        [("             or (r.detach_dispatched_oid is null and r.retiring_by is not null);   -- this release's, never dispatched\n",
-          "             ;\n", 1)],
+        [("      or (not p_dispatched and p_retiring_by is not null);   -- this release's, never dispatched\n",
+          "      ;\n", 1)],
     ),
     "retiring_by_kept_on_other_roles_dispatch": (
         "bench/retain_recall_armed_detach.sh",
@@ -5866,8 +5866,8 @@ $$;''',
         "PR #1459 round 2: the reading's role test is a plain equality, null on a dispatched mark that names no role, "
         "so v_read is null and the refusal's 'if not v_read' is skipped: the owner's tick clears the mark silently "
         "with the administrator's job still armed. One site, the comparison. tests/194 part S catches it.",
-        [("             or (r.detach_dispatched_oid is not null and r.retiring_by is not distinct from current_user)   -- never null\n",
-          "             or (r.detach_dispatched_oid is not null and r.retiring_by = current_user)\n", 1)],
+        [("      or (p_dispatched and p_retiring_by is not distinct from current_user)   -- never null\n",
+          "      or (p_dispatched and p_retiring_by = current_user)\n", 1)],
     ),
     "recall_unreadable_cron_keeps_refused_mark": (
         "bench/retain_recall_armed_detach.sh",
@@ -5875,8 +5875,8 @@ $$;''',
         "reading outright, so a mark this release made whose dispatch was refused, held by no job, is kept for good "
         "and counted with a message blaming an older pgpm, where any tick cleared it at once before #1451. One site, "
         "the read's error handler. tests/194 part T catches it.",
-        [("        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;\n",
-          "        v_read := false;\n", 1)],
+        [("    return not p_dispatched and p_retiring_by is not null;\n",
+          "    return false;\n", 1)],
     ),
     "recall_release_unread_job": (
         "bench/retain_recall_armed_detach.sh",
@@ -5938,8 +5938,9 @@ $$;''',
         "bench/retain_recall_armed_detach.sh",
         "PR #1459 round 4: _unrecorded_mark_unread holds for a superuser too, who reads every role's job, so an older "
         "mark with no record is never released at all. One site, the helper's role test. tests/194 part X catches it.",
-        [("     and not exists (select 1 from pg_roles where rolname = current_user and rolsuper);\n",
-          "     ;\n", 1)],
+        [("  return exists (select 1 from pg_roles where rolname = current_user and rolsuper)\n"
+          "      or (p_dispatched",
+          "  return (p_dispatched", 1)],
     ),
     "recall_future_stamp_raises": (
         "bench/retain_recall_armed_detach.sh",
@@ -18478,31 +18479,57 @@ MUTATIONS["forget_missing_unvouched_disarm"] = (
     "Issue #1461's defect: forget_missing() run by a role that cannot read every pgpm_detach job (pg_cron's row "
     "security) forgets a retirement whose dispatched detach another role's job holds, which nothing then disarms. The "
     "refusal removed. tests/395 parts B and D catch it.",
-    [("    if found then\n      raise exception 'pg_partition_magician: forget_missing refused, nothing cleared:",
-      "    if false then\n      raise exception 'pg_partition_magician: forget_missing refused, nothing cleared:", 1)],
+    [("  if found then\n    raise exception 'pg_partition_magician: forget_missing refused, nothing cleared:",
+      "  if false then\n    raise exception 'pg_partition_magician: forget_missing refused, nothing cleared:", 1)],
 )
 MUTATIONS["forget_missing_refuses_retiring_role"] = (
     "bench/forget_missing_vouches_detach.sh",
     "Issue #1461, the over-wide fix: every non-superuser's forget_missing() is refused over a dispatched retirement, "
     "the one role whose own job alone holds the detach (retiring_by, #1451) too, though it sees and idles that job. "
     "tests/395 part C catches it.",
-    [("       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)\n", "", 1)],
+    [("     and not pgpm._detach_job_vouched(d.dispatched, d.retiring_by)\n",
+      "     and not pgpm._detach_job_vouched(false, null)\n", 1)],
 )
 MUTATIONS["forget_missing_retiring_role_null_unsafe"] = (
     "bench/forget_missing_vouches_detach.sh",
     "Issue #1461, Codex's P1 on #1490: the vouch compares retiring_by bare, so a retirement two roles dispatched "
     "(retiring_by nulled, the dispatch recorded, tests/194 part S) reads as no refusal and a non-superuser forgets it "
     "while another role's job holds its detach. tests/395 part F catches it.",
-    [("       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)\n",
-      "       and not (v_read and d.dispatched and d.retiring_by = current_user)\n", 1)],
+    [("      or (p_dispatched and p_retiring_by is not distinct from current_user)   -- never null\n",
+      "      or (p_dispatched and p_retiring_by = current_user)\n", 1)],
 )
 MUTATIONS["dropped_retirements_count_undispatched"] = (
     "bench/forget_missing_vouches_detach.sh",
     "Issues #1461 and #1487, the over-wide reading: a mark this release made and never dispatched (retiring_by set, "
     "no record of a dispatch), which no job holds, is read as one a job may hold, so a non-superuser's forget_missing() "
-    "is refused over it. tests/395 part E catches it.",
+    "is refused over it. tests/395 part E catches it: since #1491 forget_missing's vouch (_detach_job_vouched) takes "
+    "such a mark too, so part E asserts the record the build refusals read.",
     [("   where p.retiring_at is not null and not (p.detach_dispatched_oid is null and p.retiring_by is not null)\n",
       "   where p.retiring_at is not null\n", 1)],
+)
+MUTATIONS["retire_completion_unvouched_idle"] = (
+    "bench/retire_completion_vouches_detach.sh",
+    "Issue #1491's defect: retire()'s completion idles the pgpm_detach jobs the caller sees and drops the partition and "
+    "its pgpm.part row whoever the caller is, so the table's non-superuser owner, shown only its own job, leaves the "
+    "administrator's armed with nothing recording it, and its next run detaches a re-created namesake's partition. The "
+    "deferral removed. tests/397 parts A, B and C catch it.",
+    [("  if r.retiring_at is not null and not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
+      "  if false then\n", 1)],
+)
+MUTATIONS["retire_one_step_completion_unvouched"] = (
+    "bench/retire_completion_vouches_detach.sh",
+    "Issue #1491, the half fix: the deferral covers the landed detach's completion only, not #835's one-step drop of a "
+    "partition whose dispatched detach has not run, where the owner's conditional disarm misses the administrator's "
+    "job the same way. tests/397 part C catches it.",
+    [("  if r.retiring_at is not null and not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
+      "  if r.retiring_at is not null and v_referenced and not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n", 1)],
+)
+MUTATIONS["retire_completion_refuses_retiring_role"] = (
+    "bench/retire_completion_vouches_detach.sh",
+    "Issue #1491, the over-wide fix: every non-superuser's completion is kept, the role whose own job alone holds the "
+    "detach (retiring_by, #1451) too, though its disarm reaches that job. tests/397 part D catches it.",
+    [("  if r.retiring_at is not null and not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
+      "  if r.retiring_at is not null and not pgpm._detach_job_vouched(false, null) then\n", 1)],
 )
 MUTATIONS["transmute_builds_dropped_detach_name"] = (
     "bench/build_refuses_dropped_detach_name.sh",

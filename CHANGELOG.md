@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`retire` completes a retirement only when its role can vouch that no other role's `pgpm_detach` job still
+  holds the detach** (#1491). The completion returned the jobs it could see to idle and dropped the partition and
+  its `pgpm.part` row, and pg_cron shows a non-superuser only its own job, so the table's owner completing a
+  retirement the administrator dispatched left the administrator's job armed with nothing recording it; once the
+  table was dropped and re-created on the same grid, the job's next run detached the namesake partition, nothing
+  logged. Both completions (the landed detach's, and #835's one-step drop) now keep the partition and its row for
+  any other role, logging `fail_retain_drop`, counted, naming the role to run as; that role's tick or a
+  superuser's completes it, and the kept row is what `forget_missing` and the build refusals of #1487 read if the
+  table is dropped meanwhile. The rule, "who can read the job" (#1451), is one helper now,
+  `_detach_job_vouched`, which the recall, `_unrecorded_mark_unread` and `forget_missing` share with no change in
+  what they do. tests/397; `bench/retire_completion_vouches_detach.sh`, three mutations.
 - **An armed `pgpm_detach` job no longer outlives a dropped table's retirement into a re-created namesake**
   (#1461, #1487, #1488). A retirement's `DETACH PARTITION` names the partition, and a table dropped by hand
   while the job held it, then re-created under the same name and grid, had its partition of that name

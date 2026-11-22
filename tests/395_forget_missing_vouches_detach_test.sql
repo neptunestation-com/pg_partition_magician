@@ -18,7 +18,8 @@
 --   PART C  the one role whose own job holds the detach (retiring_by) is not refused: its call idles its job.
 --   PART D  a mark older than #1451's record (no retiring_by, no record of the dispatch) is refused for a
 --           non-superuser, naming a superuser as the one who can run it.
---   PART E  a mark this release made and never dispatched is held by no job: the non-superuser's call clears it.
+--   PART E  a mark this release made and never dispatched is held by no job: the non-superuser's call clears it, and
+--           it is no record the build refusals read (_dropped_retirements).
 --   PART F  a retirement two roles dispatched (the dispatch recorded, retiring_by nulled, tests/194 part S) is
 --           refused for a non-superuser, naming a superuser: a null role is no role that can vouch.
 --
@@ -32,7 +33,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(39);
+select plan(40);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -224,6 +225,10 @@ select is((select format('%s %s', retiring_by, detach_dispatched_oid is null) fr
   'LIVENESS: (E) the mark records a role and no dispatch');
 select (select oid from pg_class where oid = 'public.fe395'::regclass) as e_oid \gset
 drop table public.fe395 cascade;
+-- #1491: forget_missing's vouch (_detach_job_vouched) takes such a mark too, so the record itself is asserted, which the
+-- build refusals read: no name of it is refused
+select ok(not exists (select 1 from pgpm._dropped_retirements() where child_name = :'e_marked'),
+  'E: the dropped table''s never-dispatched mark is no retirement a job may hold');
 set role pgpm_test395_owner;
 do $$
 begin

@@ -2415,20 +2415,45 @@ begin
 end;
 $$;
 
+-- _detach_job_vouched (#1451, #1491): whether this role can vouch that no pgpm_detach job it cannot see holds a
+-- retirement's detach, from whether pgpm recorded the dispatch (p_dispatched, never null) and the role it recorded
+-- (p_retiring_by). The one rule for every site that acts on "no job holds it": the recall, the #705 disowns
+-- (_unrecorded_mark_unread), forget_missing, and retire()'s completion. With no cron.job nothing runs a detach. With
+-- one, pg_cron keeps a job per role that ran pgpm.schedule() and shows a role only its own: a superuser reads every
+-- job; a dispatched detach is held by the recorded role's job alone (retiring_by, nulled once two roles dispatched it,
+-- so a null vouches for nothing); a mark this release made and never dispatched (retiring_by set) by none; one older
+-- than the record (retiring_by null) an older pgpm may have dispatched, which only a superuser reads. A role that
+-- cannot read cron.job vouches only for that never-dispatched mark.
+create or replace function pgpm._detach_job_vouched(p_dispatched boolean, p_retiring_by name)
+returns boolean language plpgsql stable as $$
+begin
+  if not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where n.nspname = 'cron' and c.relname = 'job') then
+    return true;
+  end if;
+  begin
+    execute 'select 1 from cron.job limit 1';
+  exception when others then
+    return not p_dispatched and p_retiring_by is not null;
+  end;
+  return exists (select 1 from pg_roles where rolname = current_user and rolsuper)
+      or (p_dispatched and p_retiring_by is not distinct from current_user)   -- never null
+      or (not p_dispatched and p_retiring_by is not null);   -- this release's, never dispatched
+end;
+$$;
+
 -- _unrecorded_mark_unread (#1451): whether this role cannot tell that no pgpm_detach job holds the detach of p_child's
--- mark, asked where a mark with no record of pgpm's dispatch would be disowned. A mark this release made (retiring_by)
--- with no record was never dispatched, and no job holds it. One older than this release an older pgpm may have
--- dispatched unrecorded, and with pg_cron only a superuser reads every role's job: anyone else's disown would idle only
--- its own, and the job's next run would take the released table out again after the ATTACH the release spells.
+-- mark, asked where a mark with no record of pgpm's dispatch would be disowned (_detach_job_vouched, undispatched). A
+-- mark this release made (retiring_by) with no record was never dispatched, and no job holds it. One older than this
+-- release an older pgpm may have dispatched unrecorded, and with pg_cron only a superuser reads every role's job:
+-- anyone else's disown would idle only its own, and the job's next run would take the released table out again after
+-- the ATTACH the release spells.
 create or replace function pgpm._unrecorded_mark_unread(p_parent regclass, p_child name)
 returns boolean language plpgsql stable as $$
 begin
   return exists (select 1 from pgpm.part p
                   where p.parent_table = p_parent and p.child_name = p_child
-                    and p.retiring_at is not null and p.retiring_by is null)
-     and exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-                  where n.nspname = 'cron' and c.relname = 'job')
-     and not exists (select 1 from pg_roles where rolname = current_user and rolsuper);
+                    and p.retiring_at is not null and not pgpm._detach_job_vouched(false, p.retiring_by));
 end;
 $$;
 
@@ -4648,7 +4673,7 @@ begin
   end if;
 
   -- the claim: one owner per partition at a time
-  select p.lo, p.hi, p.attached, p.retiring_at, p.retiring_oid, p.child_oid, p.detach_dispatched_oid into r
+  select p.lo, p.hi, p.attached, p.retiring_at, p.retiring_oid, p.child_oid, p.detach_dispatched_oid, p.retiring_by into r
     from pgpm.part p
    where p.parent_table = p_parent and p.child_name = p_child
      for update skip locked;
@@ -5082,7 +5107,25 @@ begin
                 'detached from the parent by something other than retirement; not dropping it');
       return false;
     end if;
+  end if;
 
+  -- A COMPLETION THIS ROLE CANNOT VOUCH FOR IS KEPT (#1491), on either path below, ahead of its disarm. pg_cron keeps a
+  -- pgpm_detach job per role that ran pgpm.schedule() and shows a role only its own, so the disarm reaches only the
+  -- jobs this role sees, and the drop deletes the row, the one record that a job may hold this detach. Another role's
+  -- job then stayed armed with nothing left to idle it, and once the table was dropped and re-created on the same grid
+  -- its next run detached the namesake partition, nothing logged. Kept, the row is still read by the recall and, after
+  -- a DROP TABLE, by forget_missing and the build refusals (_dropped_retirements); a tick that can vouch completes it.
+  if r.retiring_at is not null and not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+              format('%I.%I %s, and role %s cannot read every pgpm_detach job that may still hold its detach (pg_cron shows a role only its own), so it could not return such a job to idle, whose next run would detach a partition later made under that name; kept, not dropped. Run maintenance as %s, and its tick drops it',
+                     v_nsp, p_child, case when v_attached then 'ends its retirement in a one-step drop' else 'is detached by its retirement' end,
+                     current_user, case when r.detach_dispatched_oid is not null and r.retiring_by is not null
+                                        then format('role %s or a superuser', r.retiring_by) else 'a superuser' end));
+    return false;
+  end if;
+
+  if v_referenced then
     -- DISARM BEFORE THE DROP, not after it (#407). The standing job still carries this partition's
     -- detach command and fires it every tick until something resets it, so the window in which a
     -- stale name sits armed is not one cron interval: it lasts until the drop SUCCEEDS, and a drop
@@ -5258,20 +5301,16 @@ begin
     -- dispatched is held by no job, a reading for anyone. Any other session, or one that cannot read cron.job, knows
     -- nothing of the job that holds the detach; for a mark older than this release, only a superuser does.
     v_armed := false;
-    v_read := true;
+    v_read := pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by);
     v_cron := exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
                        where n.nspname = 'cron' and c.relname = 'job');
     if v_cron then
-      v_read := exists (select 1 from pg_roles where rolname = current_user and rolsuper)
-             or (r.detach_dispatched_oid is not null and r.retiring_by is not distinct from current_user)   -- never null
-             or (r.detach_dispatched_oid is null and r.retiring_by is not null);   -- this release's, never dispatched
       begin
         execute 'select coalesce(bool_or(command = $1), false) from cron.job'
              || ' where jobname = ''pgpm_detach'' and database = current_database()'
           into v_armed using v_cmd_q;
       exception when others then
-        -- cron.job is there and this role cannot read it: only a mark this release made and never dispatched is read
-        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;
+        null;   -- cron.job is there and this role cannot read it: read as not armed, and v_read says so
       end;
     end if;
 
@@ -16484,33 +16523,22 @@ $$;
 create or replace function pgpm.forget_missing()
 returns table (parent_oid oid, partitions_forgotten int, orphan_tables text[])
 language plpgsql as $$
-declare r record; v_orphans text[]; v_parts int; v_retiring name[]; v_cmd text; v_cmds text[]; v_chunks text; v_read boolean := false;
+declare r record; v_orphans text[]; v_parts int; v_retiring name[]; v_cmd text; v_cmds text[]; v_chunks text;
 begin
   -- #1461: refused before anything is deleted when a pgpm_detach job this role cannot see may hold a forgotten
   -- retirement's detach (_dropped_retirements). pg_cron shows a role only its own jobs, so with pg_cron only a
   -- superuser, or the one non-superuser role whose job holds a dispatched detach (retiring_by, #1451), can return
-  -- every such job to idle below. Left armed, the job detached a re-created namesake's partition. Raised, not
-  -- skipped: this is the operator's command, and a skip would read as nothing to forget.
-  if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'cron' and c.relname = 'job')
-     and not exists (select 1 from pg_roles where rolname = current_user and rolsuper) then
-    begin
-      execute 'select true from cron.job limit 1';
-      v_read := true;
-    exception when others then
-      null;   -- cron.job unreadable: this role vouches for nothing
-    end;
-    select d.parent_table::oid as oid, d.child_name, d.retiring_by, d.dispatched into r
-      from pgpm._dropped_retirements() d
-     where exists (select 1 from pgpm.config c where c.parent_table = d.parent_table)
-       -- coalesced: a retirement two roles dispatched keeps its record and nulls retiring_by (#1459), and a bare
-       -- comparison with that null read as no refusal; only a superuser vouches for it
-       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)
-     order by 1, 2 limit 1;
-    if found then
-      raise exception 'pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid % was retiring %, whose detach pgpm % to a pgpm_detach cron job, and role % cannot read every job that may hold it (pg_cron shows a role only its own). Left armed, it detaches the same-named partition of a table re-created under that name. Run select * from pgpm.forget_missing(); as %.',
-        r.oid, r.child_name, case when r.dispatched then 'dispatched' else 'may have dispatched (a mark older than this release)' end,
-        current_user, case when r.dispatched and r.retiring_by is not null then format('role %s or a superuser', quote_ident(r.retiring_by)) else 'a superuser' end;
-    end if;
+  -- every such job to idle below (_detach_job_vouched). Left armed, the job detached a re-created namesake's partition.
+  -- Raised, not skipped: this is the operator's command, and a skip would read as nothing to forget.
+  select d.parent_table::oid as oid, d.child_name, d.retiring_by, d.dispatched into r
+    from pgpm._dropped_retirements() d
+   where exists (select 1 from pgpm.config c where c.parent_table = d.parent_table)
+     and not pgpm._detach_job_vouched(d.dispatched, d.retiring_by)
+   order by 1, 2 limit 1;
+  if found then
+    raise exception 'pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid % was retiring %, whose detach pgpm % to a pgpm_detach cron job, and role % cannot read every job that may hold it (pg_cron shows a role only its own). Left armed, it detaches the same-named partition of a table re-created under that name. Run select * from pgpm.forget_missing(); as %.',
+      r.oid, r.child_name, case when r.dispatched then 'dispatched' else 'may have dispatched (a mark older than this release)' end,
+      current_user, case when r.dispatched and r.retiring_by is not null then format('role %s or a superuser', quote_ident(r.retiring_by)) else 'a superuser' end;
   end if;
   for r in
     select c.parent_table, c.parent_table::oid as oid

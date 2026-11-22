@@ -1516,6 +1516,7 @@ run_perf() {
     "bench/autoregrain_skips_dropped.sh pgpm_perf471"
     "bench/forget_missing_vouches_detach.sh pgpm_perf479"
     "bench/build_refuses_dropped_detach_name.sh pgpm_perf480"
+    "bench/retire_completion_vouches_detach.sh pgpm_perf481"
     # The invariant oracle as a guard (formal Phase 3 W5): the clean-code halves of the pairs discriminate.sh completes
     # with the formal_* mutations of pgpm and the oracle_* and summarize_* mutations of the oracle itself.
     "bench/formal_no_lost_row.sh pgpm_perf472"
