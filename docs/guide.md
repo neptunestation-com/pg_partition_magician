@@ -980,7 +980,9 @@ Four things follow, and none of them are optional:
   runs as a role other than the one whose job holds the detach, and not as a superuser, the mark is kept and
   `fail_retain_recall` is counted until a tick runs as the role it names or as a superuser. A retirement mark
   left by a pgpm older than this release is released only by a superuser's tick, since only a superuser can
-  return every role's job to idle; any other role's tick keeps it, counted.
+  return every role's job to idle; any other role's tick keeps it, counted. The same holds for the drop that
+  completes a retirement: a tick that cannot see every job that may hold the detach keeps the partition and
+  logs `fail_retain_drop`, counted, naming the role to run as, and that role's tick or a superuser's drops it.
 - **Writes to the *referencing* table are blocked while the detach runs**, once per retirement, for a
   duration set by that table's size. Reads of it, and your managed table entirely, are unaffected. This is
   irreducible: it is PostgreSQL proving the foreign key still holds. An index on the referencing column is

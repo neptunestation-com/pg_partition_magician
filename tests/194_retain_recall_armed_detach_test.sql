@@ -86,6 +86,8 @@
 --   PART Y: a stamp past the cluster's xid counter (pgpm.part restored into a younger cluster) is of no live
 --           transaction: the clock starts and retain() does not fail (PR #1459 round 4, P1-01).
 --   PART Z: with no pg_cron, nothing can run a detach, and an older mark is cleared at once (PR #1459 round 4, P1-02).
+--   PART AA: a role granted cron.job's other columns but not its command reads the table and not the job: its
+--           ticks keep the owner's own dispatched mark, counted (PR #1492, Codex P2).
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in
 -- for the two things pgpm touches (cron.job and cron.alter_job), and runs whatever the standing job holds
@@ -101,7 +103,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(226);
+select plan(232);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -1227,5 +1229,53 @@ select is(pgpm_test194.mark('public.rr194z', '0'), 'retiring_at null, dispatched
 select ok(pgpm_test194.attached('public.rr194z', :'z_doomed') and pgpm_test194.ids('public.rr194z', 20000) = array[291, 292, 293]::bigint[],
   'Z: the partition never left the parent: ids 291, 292, 293 are served');
 alter schema cron_aside rename to cron;
+
+-- ====== PART AA: a role that reads cron.job but not its command is no reading (PR #1492, Codex P2) ======
+alter table cron.job enable row level security;
+insert into cron.job values (5, 'pgpm_detach', current_database(), 'select 1', 'pgpm_test194_owner');
+set role pgpm_test194_owner;
+create table public.rr194aa (id bigint primary key, payload text);
+insert into public.rr194aa select g, 'aa' from generate_series(301, 306) g;
+reset role;   -- the ledger is the test harness's, not the owner's
+select pgpm_formal.baseline('public.rr194aa');
+set role pgpm_test194_owner;
+call pgpm.transmute('public.rr194aa', 'id', 10000::bigint, p_retain => 25000, p_paused => false);
+select pgpm.extend_to('public.rr194aa', '60000');
+insert into public.rr194aa values (50005, 'frontier');
+create table public.rr194aa_ref (id bigint primary key, p_id bigint references public.rr194aa(id));
+insert into public.rr194aa_ref values (1, 50005);
+select child_name as aa_doomed from pgpm.part where parent_table = 'public.rr194aa'::regclass and lo = '0' \gset
+select set_config('t194.aa_retire', (pgpm.retire('public.rr194aa', :'aa_doomed'))::text, false);
+reset role;
+select pgpm_formal.wrote('public.rr194aa', 'id = 50005');
+select ok(current_setting('t194.aa_retire') = 'false'
+          and (select command from cron.job where jobid = 5) ~ 'detach partition'
+          and (select retiring_by::text from pgpm.part where parent_table = 'public.rr194aa'::regclass and lo = '0') = 'pgpm_test194_owner',
+  'LIVENESS: (AA) the owner''s own tick dispatched the detach to its own job, recorded as its own');
+-- the owner keeps SELECT on cron.job's other columns, not on its command: the table reads, the command does not
+revoke select on cron.job from pgpm_test194_owner;
+grant select (jobid, jobname, database, username) on cron.job to pgpm_test194_owner;
+set role pgpm_test194_owner;
+select lives_ok('select jobid from cron.job', 'LIVENESS: (AA) the owner reads cron.job');
+select throws_ok('select command from cron.job', '42501', NULL, 'LIVENESS: (AA) and not its command');
+reset role;
+select pgpm.set_retain('public.rr194aa', '45000');
+set role pgpm_test194_owner;
+select pgpm.retain('public.rr194aa');
+select pgpm.retain('public.rr194aa');
+reset role;
+select pgpm_test194.minute_passes('public.rr194aa', '0');
+set role pgpm_test194_owner;
+select pgpm.retain('public.rr194aa');
+reset role;
+select ok(pgpm_test194.mark('public.rr194aa', '0') ~ '^retiring_at set, dispatched [0-9]+$',
+  'AA: a minute on, the owner''s ticks keep the mark: a read of the job that raised is no reading of it');
+select ok((select count(*) from pgpm.log where parent_table = 'public.rr194aa'::regclass and action = 'fail_retain_recall') > 0,
+  'AA: refused, counted');
+select ok((select command from cron.job where jobid = 5) ~ 'detach partition', 'LIVENESS: (AA) the owner''s job still holds the detach');
+revoke select (jobid, jobname, database, username) on cron.job from pgpm_test194_owner;
+grant select on cron.job to pgpm_test194_owner;
+delete from cron.job where jobid = 5;
+alter table cron.job disable row level security;
 
 select * from finish();

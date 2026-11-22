@@ -18,21 +18,24 @@
 --   PART C  the one role whose own job holds the detach (retiring_by) is not refused: its call idles its job.
 --   PART D  a mark older than #1451's record (no retiring_by, no record of the dispatch) is refused for a
 --           non-superuser, naming a superuser as the one who can run it.
---   PART E  a mark this release made and never dispatched is held by no job: the non-superuser's call clears it.
+--   PART E  a mark this release made and never dispatched is held by no job: the non-superuser's call clears it, and
+--           it is no record the build refusals read (_dropped_retirements).
 --   PART F  a retirement two roles dispatched (the dispatch recorded, retiring_by nulled, tests/194 part S) is
 --           refused for a non-superuser, naming a superuser: a null role is no role that can vouch.
+--   PART G  a role granted cron.job's other columns but not its command reads the table and cannot idle the job by
+--           its command: its own dispatched retirement is refused, nothing cleared (PR #1492, Codex P2).
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in for cron.job
 -- (with pg_cron's username column and its row-security policy) and cron.alter_job, as tests/194 does. pgTAP's
 -- bookkeeping is this session's temp objects, which the role cannot touch, so what the role observes goes through
 -- set_config and is asserted after reset role.
 --
--- ASYMMETRIC FIXTURES. Each part's table holds a different id set (A 1-3, B 11-12, C 21-24, D 31, E 41-45, F 33-36), and the
+-- ASYMMETRIC FIXTURES. Each part's table holds a different id set (A 1-3, B 11-12, C 21-24, D 31, E 41-45, F 33-36, G 25-29 odd), and the
 -- three jobs hold three different commands, so an assertion aimed at the wrong table or job cannot pass.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(39);
+select plan(45);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -224,6 +227,10 @@ select is((select format('%s %s', retiring_by, detach_dispatched_oid is null) fr
   'LIVENESS: (E) the mark records a role and no dispatch');
 select (select oid from pg_class where oid = 'public.fe395'::regclass) as e_oid \gset
 drop table public.fe395 cascade;
+-- #1491: forget_missing's vouch (_detach_job_vouched) takes such a mark too, so the record itself is asserted, which the
+-- build refusals read: no name of it is refused
+select ok(not exists (select 1 from pgpm._dropped_retirements() where child_name = :'e_marked'),
+  'E: the dropped table''s never-dispatched mark is no retirement a job may hold');
 set role pgpm_test395_owner;
 do $$
 begin
@@ -268,6 +275,61 @@ select ok(current_setting('t395.f') ~ ('^P0001 pg_partition_magician: forget_mis
   'F: a retirement two roles dispatched is refused for the owner, naming a superuser');
 select ok(exists (select 1 from pgpm.config where parent_table = :f_oid::regclass), 'F: and nothing was cleared');
 select is((select array_agg(parent_oid) from pgpm.forget_missing()), array[:f_oid]::oid[], 'F: a superuser''s call clears it');
+
+-- ==================== (G) a role that reads cron.job but not its command vouches for nothing ====================
+select pg_temp.mk('fg395', array[25, 27, 29]);
+call pgpm.transmute('public.fg395', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
+insert into public.fg395 values (85, 'frontier');
+create table public.fg395_ref (id bigint primary key, fg_id bigint references public.fg395 (id));
+insert into public.fg395_ref values (700, 85);
+select child_name as g_doomed from pgpm.part where parent_table = 'public.fg395'::regclass and lo = '20' \gset
+select format('alter table %s owner to pgpm_test395_owner', r) from (
+  select 'public.fg395'::regclass r union all select 'public.fg395_ref'::regclass
+  union all select inhrelid::regclass from pg_inherits where inhparent = 'public.fg395'::regclass) t \gexec
+set role pgpm_test395_owner;
+select set_config('t395.g_retire', pgpm.retire('public.fg395', :'g_doomed')::text, false);
+reset role;
+select ok(current_setting('t395.g_retire') = 'false'
+          and pg_temp.cmd(1) = format('alter table public.fg395 detach partition public.%I concurrently', :'g_doomed')
+          and (select retiring_by::text from pgpm.part where parent_table = 'public.fg395'::regclass and child_name = :'g_doomed') = 'pgpm_test395_owner',
+  'LIVENESS: (G) the owner''s retire() armed its own job, recorded as its own');
+select (select oid from pg_class where oid = 'public.fg395'::regclass) as g_oid \gset
+drop table public.fg395 cascade;
+-- the owner keeps SELECT on cron.job's other columns, not on its command: the table reads, the command does not
+revoke select on cron.job from pgpm_test395_owner;
+grant select (jobid, jobname, database, username) on cron.job to pgpm_test395_owner;
+set role pgpm_test395_owner;
+do $$
+declare v text;
+begin
+  perform jobid from cron.job;
+  begin
+    perform command from cron.job;
+    v := 'command read';
+  exception when insufficient_privilege then
+    v := 'table read, command refused';
+  end;
+  perform set_config('t395.g_probe', v, false);
+end $$;
+do $$
+begin
+  perform pgpm.forget_missing();
+  perform set_config('t395.g', 'not refused', false);
+exception when others then
+  perform set_config('t395.g', sqlstate || ' ' || sqlerrm, false);
+end $$;
+reset role;
+select is(current_setting('t395.g_probe'), 'table read, command refused', 'LIVENESS: (G) the owner reads cron.job and not its command');
+select ok(current_setting('t395.g') ~ ('^P0001 pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid '
+            || :g_oid || ' was retiring ' || :'g_doomed' || ', '),
+  'G: the owner, whose read of the command it would idle fails, is refused');
+select ok(exists (select 1 from pgpm.config where parent_table = :g_oid::regclass)
+          and pg_temp.cmd(1) = format('alter table public.fg395 detach partition public.%I concurrently', :'g_doomed'),
+  'G: and nothing was cleared, its job still holding the detach for a call that can idle it');
+select ok((select array_agg(parent_oid) from pgpm.forget_missing()) = array[:g_oid]::oid[] and pg_temp.cmd(1) = 'select 1',
+  'G: a superuser''s call clears it and idles the job');
+revoke select (jobid, jobname, database, username) on cron.job from pgpm_test395_owner;
+grant select on cron.job to pgpm_test395_owner;
 
 alter table cron.job disable row level security;
 select * from finish();

@@ -503,7 +503,7 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    select at, action, lo, hi, method from pgpm.log
     where parent_table = 'public.events'::regclass
       and action in ('fail_retain_detach', 'fail_retain_crossing', 'fail_retain_identity',
-                     'retain_detach', 'retain_crossing')
+                     'fail_retain_drop', 'retain_detach', 'retain_crossing')
     order by id desc limit 20;
    ```
 
@@ -519,6 +519,12 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
      records the oid at dispatch (`pgpm.part.retiring_oid`) as well as the one recorded when the
      partition was created (`child_oid`), and refuses when the name stops resolving to **either**.
      `method` says which, so a stale dispatch and a stale catalog row are distinguishable.
+   - `fail_retain_drop` saying the role `cannot read every pgpm_detach job that may still hold its
+     detach` -- the detach landed (or, the foreign key dropped since, the partition is due its one-step
+     drop), but maintenance ran as a role that can see only its own `pgpm_detach` job, and another role's
+     may still hold the detach. The partition and its row are kept, counted, so that job is not left armed
+     with a name a re-created table would reuse. Run maintenance as the role `method` names, or as a
+     superuser: that tick returns the job to idle and drops the partition.
    - `retain_detaching` non-zero for many ticks with none of these logged means the detach is
      dispatched but the `pgpm` job is not running: check `cron.job_run_details`.
 
@@ -734,7 +740,9 @@ one day believing it manages an unrelated table that lands on that oid.
    clears nothing, and names the role that can run it. Do this **before** re-creating a table under the same
    name: until then `transmute` refuses to make a partition under a name the dropped table was retiring,
    and `obtain`, `extend_to` and `regrain` leave it unbuilt, each naming `forget_missing`, because the armed
-   job would detach it.
+   job would detach it. A retirement whose detach had landed but whose drop the owner's tick could not vouch
+   for (`fail_retain_drop` naming the role to run as) is still recorded the same way, and its detached
+   partition is still there, so it is listed in `orphan_tables`.
 
    If the table was archiving, its `pgpm.archive_ledger` rows go too, and the objects they named now hold the
    only copy of those rows. The `forget_missing` log row keeps the record: its `method` lists every chunk's
