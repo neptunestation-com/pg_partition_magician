@@ -16,6 +16,8 @@
 #   forget_missing_refuses_retiring_role       -- the over-wide fix: the role whose own job holds the detach
 #                                                 refused too. Part C.
 #   dropped_retirements_count_undispatched     -- a mark never dispatched read as one a job may hold. Part E.
+#   forget_missing_retiring_role_null_unsafe   -- the vouch compared with a nulled retiring_by (two roles
+#                                                 dispatched) reads as no refusal. Part F.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's catalog and its
 # row security). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted

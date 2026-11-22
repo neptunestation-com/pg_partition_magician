@@ -19,18 +19,20 @@
 --   PART D  a mark older than #1451's record (no retiring_by, no record of the dispatch) is refused for a
 --           non-superuser, naming a superuser as the one who can run it.
 --   PART E  a mark this release made and never dispatched is held by no job: the non-superuser's call clears it.
+--   PART F  a retirement two roles dispatched (the dispatch recorded, retiring_by nulled, tests/194 part S) is
+--           refused for a non-superuser, naming a superuser: a null role is no role that can vouch.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in for cron.job
 -- (with pg_cron's username column and its row-security policy) and cron.alter_job, as tests/194 does. pgTAP's
 -- bookkeeping is this session's temp objects, which the role cannot touch, so what the role observes goes through
 -- set_config and is asserted after reset role.
 --
--- ASYMMETRIC FIXTURES. Each part's table holds a different id set (A 1-3, B 11-12, C 21-24, D 31, E 41-45), and the
+-- ASYMMETRIC FIXTURES. Each part's table holds a different id set (A 1-3, B 11-12, C 21-24, D 31, E 41-45, F 33-36), and the
 -- three jobs hold three different commands, so an assertion aimed at the wrong table or job cannot pass.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(33);
+select plan(39);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -232,6 +234,40 @@ end $$;
 reset role;
 select is(current_setting('t395.e'), :'e_oid', 'E: the owner''s forget_missing() is not refused and clears it');
 select ok(not exists (select 1 from pgpm.part where parent_table = :e_oid::regclass), 'E: with its rows');
+
+-- ==================== (F) a retirement two roles dispatched: only a superuser vouches ====================
+select pg_temp.mk('ff395', array[33, 34, 36]);
+call pgpm.transmute('public.ff395', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
+insert into public.ff395 values (75, 'frontier');
+create table public.ff395_ref (id bigint primary key, ff_id bigint references public.ff395 (id));
+insert into public.ff395_ref values (600, 75);
+select child_name as f_doomed from pgpm.part where parent_table = 'public.ff395'::regclass and lo = '30' \gset
+select is(pgpm.retire('public.ff395', :'f_doomed'), false, 'LIVENESS: (F) the administrator''s retire() takes the referenced path');
+select pg_temp.after_admin_dispatch();
+-- as another role's re-dispatch leaves it (#1459): the dispatch recorded, no one role
+update pgpm.part set retiring_by = null
+ where parent_table = 'public.ff395'::regclass and child_name = :'f_doomed';
+select is((select format('%s %s', coalesce(retiring_by::text, 'null'), detach_dispatched_oid is not null) from pgpm.part
+            where parent_table = 'public.ff395'::regclass and child_name = :'f_doomed'), 'null t',
+  'LIVENESS: (F) the mark records a dispatch and no one role');
+select is(pg_temp.cmd(3), format('alter table public.ff395 detach partition public.%I concurrently', :'f_doomed'),
+  'LIVENESS: (F) the administrator''s job holds the detach');
+select (select oid from pg_class where oid = 'public.ff395'::regclass) as f_oid \gset
+drop table public.ff395 cascade;
+set role pgpm_test395_owner;
+do $$
+begin
+  perform pgpm.forget_missing();
+  perform set_config('t395.f', 'not refused', false);
+exception when others then
+  perform set_config('t395.f', sqlstate || ' ' || sqlerrm, false);
+end $$;
+reset role;
+select ok(current_setting('t395.f') ~ ('^P0001 pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid '
+            || :f_oid || ' was retiring ' || :'f_doomed' || ', whose detach pgpm dispatched .*as a superuser\.$'),
+  'F: a retirement two roles dispatched is refused for the owner, naming a superuser');
+select ok(exists (select 1 from pgpm.config where parent_table = :f_oid::regclass), 'F: and nothing was cleared');
+select is((select array_agg(parent_oid) from pgpm.forget_missing()), array[:f_oid]::oid[], 'F: a superuser''s call clears it');
 
 alter table cron.job disable row level security;
 select * from finish();

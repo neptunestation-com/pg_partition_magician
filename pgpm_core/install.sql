@@ -16502,7 +16502,9 @@ begin
     select d.parent_table::oid as oid, d.child_name, d.retiring_by, d.dispatched into r
       from pgpm._dropped_retirements() d
      where exists (select 1 from pgpm.config c where c.parent_table = d.parent_table)
-       and not (v_read and d.dispatched and d.retiring_by = current_user)
+       -- coalesced: a retirement two roles dispatched keeps its record and nulls retiring_by (#1459), and a bare
+       -- comparison with that null read as no refusal; only a superuser vouches for it
+       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)
      order by 1, 2 limit 1;
     if found then
       raise exception 'pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid % was retiring %, whose detach pgpm % to a pgpm_detach cron job, and role % cannot read every job that may hold it (pg_cron shows a role only its own). Left armed, it detaches the same-named partition of a table re-created under that name. Run select * from pgpm.forget_missing(); as %.',

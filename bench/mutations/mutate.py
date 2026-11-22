@@ -18486,7 +18486,15 @@ MUTATIONS["forget_missing_refuses_retiring_role"] = (
     "Issue #1461, the over-wide fix: every non-superuser's forget_missing() is refused over a dispatched retirement, "
     "the one role whose own job alone holds the detach (retiring_by, #1451) too, though it sees and idles that job. "
     "tests/395 part C catches it.",
-    [("       and not (v_read and d.dispatched and d.retiring_by = current_user)\n", "", 1)],
+    [("       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)\n", "", 1)],
+)
+MUTATIONS["forget_missing_retiring_role_null_unsafe"] = (
+    "bench/forget_missing_vouches_detach.sh",
+    "Issue #1461, Codex's P1 on #1490: the vouch compares retiring_by bare, so a retirement two roles dispatched "
+    "(retiring_by nulled, the dispatch recorded, tests/194 part S) reads as no refusal and a non-superuser forgets it "
+    "while another role's job holds its detach. tests/395 part F catches it.",
+    [("       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)\n",
+      "       and not (v_read and d.dispatched and d.retiring_by = current_user)\n", 1)],
 )
 MUTATIONS["dropped_retirements_count_undispatched"] = (
     "bench/forget_missing_vouches_detach.sh",
