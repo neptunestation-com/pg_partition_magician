@@ -2912,6 +2912,7 @@ begin
           "  end;\n"
           "  if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;\n"
           "  if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707\n"
+          "  if exists (select 1 from pgpm._dropped_retirements() d where d.child_name = v_name) then return null; end if;\n"
           "  return v_name;\n",
           "  return null;\n", 1)],
     ),
@@ -7834,9 +7835,9 @@ select ok(
         "fail_obtain_name's method stops at 'is held by ', naming nothing. One site, the type branch of the "
         "holder clause switched off, which leaves exactly the pre-fix expression; tests/214's enum, domain "
         "and range-type methods (obtain's and extend_to's) catch it.",
-        [("                   case when v_held is null\n"
+        [("                        when v_held is null\n"
           "                        then coalesce(pgpm._type_squatter(p_nsp, v_name)",
-          "                   case when false\n"
+          "                        when false\n"
           "                        then coalesce(pgpm._type_squatter(p_nsp, v_name)", 1)],
     ),
     "orphan_type_guard_id_label_19_digits": (
@@ -8465,9 +8466,9 @@ select ok(
         "Issue #893, the over-wide fix: forget_missing() disarms whatever unowned command the job holds, not "
         "only a detach of a partition the forgotten parent was retiring, so another table's dispatch, armed "
         "after the drop, is clobbered. One site, the partition-name match. tests/246 part B catches it.",
-        [("                        and right(v_cmd, length(quote_ident(t.child_name)) + 14)\n"
-          "                          = '.' || quote_ident(t.child_name) || ' concurrently')   -- part-row-by-name: matches a detach command's text, resolves nothing\n",
-          "                        )\n", 1)],
+        [("                            and right(v_cmd, length(quote_ident(t.child_name)) + 14)\n"
+          "                              = '.' || quote_ident(t.child_name) || ' concurrently')   -- part-row-by-name: matches a detach command's text, resolves nothing\n",
+          "                            )\n", 1)],
     ),
     "forget_missing_disarm_owned": (
         "bench/forget_missing_disarms_detach.sh",
@@ -8475,10 +8476,10 @@ select ok(
         "whether a LIVE retirement owns it. A namesake re-created and already retiring the same-named partition "
         "holds a command of identical text, and it is clobbered (the #407 rule). One site, the live-owner "
         "check. tests/246 part C catches it.",
-        [("         and not exists (select 1 from pgpm.part p\n"
-          "                          where p.retiring_at is not null\n",
-          "         and not exists (select 1 from pgpm.part p\n"
-          "                          where false and p.retiring_at is not null\n", 1)],
+        [("             and not exists (select 1 from pgpm.part p\n"
+          "                              where p.retiring_at is not null\n",
+          "             and not exists (select 1 from pgpm.part p\n"
+          "                              where false and p.retiring_at is not null\n", 1)],
     ),
     "extend_to_edge_uncounted": (
         "bench/extend_to_edge_cell_count.sh",
@@ -18462,6 +18463,80 @@ MUTATIONS["autoregrain_picks_dropped"] = (
     "scan's _part_built clause put back as the pre-fix _part_detached_by_hand one. tests/394 catches it.",
     [("        || ' and pgpm._part_built(p.parent_table, p.child_oid, p.retiring_at)'   -- #705, #1478\n",
       "        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705\n", 1)],
+)
+
+MUTATIONS["forget_missing_reads_one_detach_job"] = (
+    "bench/forget_missing_vouches_detach.sh",
+    "Issue #1488's defect: forget_missing()'s #893 disarm reads one unordered row of cron.job and judges the disarm "
+    "from that command alone, so a superuser whose first row is another role's idle pgpm_detach job leaves the "
+    "administrator's job armed with the forgotten retirement's detach. One site, the read. tests/395 part A catches it.",
+    [("        execute 'select array_agg(distinct command) from cron.job where jobname = ''pgpm_detach'' and database = current_database()'\n",
+      "        execute 'select array_agg(command) from (select command from cron.job where jobname = ''pgpm_detach'' and database = current_database() limit 1) s'\n", 1)],
+)
+MUTATIONS["forget_missing_unvouched_disarm"] = (
+    "bench/forget_missing_vouches_detach.sh",
+    "Issue #1461's defect: forget_missing() run by a role that cannot read every pgpm_detach job (pg_cron's row "
+    "security) forgets a retirement whose dispatched detach another role's job holds, which nothing then disarms. The "
+    "refusal removed. tests/395 parts B and D catch it.",
+    [("    if found then\n      raise exception 'pg_partition_magician: forget_missing refused, nothing cleared:",
+      "    if false then\n      raise exception 'pg_partition_magician: forget_missing refused, nothing cleared:", 1)],
+)
+MUTATIONS["forget_missing_refuses_retiring_role"] = (
+    "bench/forget_missing_vouches_detach.sh",
+    "Issue #1461, the over-wide fix: every non-superuser's forget_missing() is refused over a dispatched retirement, "
+    "the one role whose own job alone holds the detach (retiring_by, #1451) too, though it sees and idles that job. "
+    "tests/395 part C catches it.",
+    [("       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)\n", "", 1)],
+)
+MUTATIONS["forget_missing_retiring_role_null_unsafe"] = (
+    "bench/forget_missing_vouches_detach.sh",
+    "Issue #1461, Codex's P1 on #1490: the vouch compares retiring_by bare, so a retirement two roles dispatched "
+    "(retiring_by nulled, the dispatch recorded, tests/194 part S) reads as no refusal and a non-superuser forgets it "
+    "while another role's job holds its detach. tests/395 part F catches it.",
+    [("       and not coalesce(v_read and d.dispatched and d.retiring_by = current_user, false)\n",
+      "       and not (v_read and d.dispatched and d.retiring_by = current_user)\n", 1)],
+)
+MUTATIONS["dropped_retirements_count_undispatched"] = (
+    "bench/forget_missing_vouches_detach.sh",
+    "Issues #1461 and #1487, the over-wide reading: a mark this release made and never dispatched (retiring_by set, "
+    "no record of a dispatch), which no job holds, is read as one a job may hold, so a non-superuser's forget_missing() "
+    "is refused over it. tests/395 part E catches it.",
+    [("   where p.retiring_at is not null and not (p.detach_dispatched_oid is null and p.retiring_by is not null)\n",
+      "   where p.retiring_at is not null\n", 1)],
+)
+MUTATIONS["transmute_builds_dropped_detach_name"] = (
+    "bench/build_refuses_dropped_detach_name.sh",
+    "Issue #1487's defect at transmute: a conversion whose monolith takes the name of a dropped table's retiring "
+    "partition, its detach still armed in a pgpm_detach job by name, goes through, and the job's next run detaches it. "
+    "The phase-1 refusal removed. tests/396 part A catches it.",
+    [("  perform pgpm._refuse_dropped_detach_name(v_monolith || v_created, 'transmute');\n", "", 1)],
+)
+MUTATIONS["obtain_builds_dropped_detach_name"] = (
+    "bench/build_refuses_dropped_detach_name.sh",
+    "Issue #1487's defect at obtain and extend_to: a forward cell is built under the name of a dropped table's "
+    "retiring partition, whose detach a pgpm_detach job still holds by name. _obtain_name's two checks removed. "
+    "tests/396 part B catches it.",
+    [("  if exists (select 1 from pgpm._dropped_retirements() d where d.child_name = v_name) then return null; end if;\n"
+      "  v_held := to_regclass(", "  v_held := to_regclass(", 1),
+     ("  if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707\n"
+      "  if exists (select 1 from pgpm._dropped_retirements() d where d.child_name = v_name) then return null; end if;\n",
+      "  if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707\n", 1)],
+)
+MUTATIONS["regrain_renames_to_dropped_detach_name"] = (
+    "bench/build_refuses_dropped_detach_name.sh",
+    "Issue #1487's defect at regrain's split: the source is renamed to the name of a dropped table's retiring "
+    "partition, whose detach a pgpm_detach job still holds by name. The refusal before the rename removed. tests/396 "
+    "part C catches it.",
+    [("    perform pgpm._refuse_dropped_detach_name(array[v_src_name], format('regrain_step(%s)', p_parent));   -- #1487\n",
+      "", 1)],
+)
+MUTATIONS["regrain_copies_to_dropped_detach_name"] = (
+    "bench/build_refuses_dropped_detach_name.sh",
+    "Issue #1487's defect at regrain's copy: a fine child is created under the name of a dropped table's retiring "
+    "partition, whose detach a pgpm_detach job still holds by name, and the swap attaches it. The refusal before the "
+    "create removed. tests/396 part D catches it.",
+    [("      perform pgpm._refuse_dropped_detach_name(array[v_sub_name], format('regrain_step(%s)', p_parent));   -- #1487\n",
+      "", 1)],
 )
 
 # ---------------------------------------------------------------------------------------- the invariant oracle (W5)
