@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **An armed `pgpm_detach` job no longer outlives a dropped table's retirement into a re-created namesake**
+  (#1461, #1487, #1488). A retirement's `DETACH PARTITION` names the partition, and a table dropped by hand
+  while the job held it, then re-created under the same name and grid, had its partition of that name
+  detached by the job's next run, rows out and nothing logged. `forget_missing` now judges every
+  `pgpm_detach` job it can see, not one unordered row (#1488); refuses, before clearing anything, when the
+  caller cannot read every job that may hold such a detach, naming the role that can (#1461, `retiring_by`,
+  #1451); and `transmute`, `obtain`, `extend_to` and `regrain` make no partition under a name a dropped
+  table's retirement still records, naming `forget_missing` (#1487; in the tick, `fail_obtain_name` and
+  `skip_regrain`). tests/395 and 396; `bench/forget_missing_vouches_detach.sh` and
+  `bench/build_refuses_dropped_detach_name.sh`, eight mutations. tests/246 part C now reaches its live
+  namesake through an adopted partition, the one way left to it.
 - **`from_hypertable` refuses an `infinity` newest value in its own words, before the copy and the swap** (#1328).
   TimescaleDB accepts an `infinity` row, and the frontier check died raw `cannot subtract infinite timestamps` on
   its own message's arithmetic; with `p_force_frontier` it skipped the read and the copy died raw `timestamp out of

@@ -122,11 +122,17 @@ select is(pgpm.retire('public.fc246', :'c_doomed'), false, 'LIVENESS: C''s first
 select (select oid from pg_class where oid = 'public.fc246'::regclass) as c_oid \gset
 drop table public.fc246 cascade;
 
--- the namesake, re-created and retiring the same-named cell BEFORE the operator runs forget_missing()
+-- the namesake, re-created and retiring the same-named cell BEFORE the operator runs forget_missing(). pgpm no longer
+-- makes a partition under a name the dropped incarnation's retirement records (#1487, tests/396), so the namesake's
+-- cell of that name is the operator's own, made by hand and recorded with adopt_partition(): the one way left for a
+-- live retirement to own the forgotten one's exact text.
 create table public.fc246 (id bigint primary key, payload text);
 insert into public.fc246 values (4, 'new-d');
 select pgpm_formal.baseline('public.fc246');
-call pgpm.transmute('public.fc246', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
+call pgpm.transmute('public.fc246', 'id', 10::bigint, p_obtain => 0, p_retain => 30::bigint, p_paused => false);
+select format('create table public.%I partition of public.fc246 for values from (10) to (20)', :'c_doomed') \gexec
+select pgpm.adopt_partition('public.fc246', format('public.%I', :'c_doomed')::regclass);
+select pgpm.extend_to('public.fc246', '57');
 insert into public.fc246 values (14, 'new-14'), (16, 'new-16'), (57, 'frontier');
 select pgpm_formal.wrote('public.fc246', 'id in (14, 16, 57)');
 create table public.fc246_ref2 (id bigint primary key, fc_id bigint references public.fc246 (id));

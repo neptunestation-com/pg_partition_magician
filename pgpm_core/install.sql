@@ -563,6 +563,9 @@ alter table pgpm.part add column if not exists detach_dispatched_oid oid;
 alter table pgpm.part add column if not exists retiring_by name;
 alter table pgpm.part add column if not exists recall_idle_xact xid8;
 alter table pgpm.part add column if not exists recall_idle_at timestamptz;
+-- #1487: every partition pgpm makes asks for the marks in flight under its name (_dropped_retirements), so that read
+-- finds a few rows by index rather than scanning the table once per cell an extend_to builds
+create index if not exists part_retiring_name_idx on pgpm.part (child_name) where retiring_at is not null;
 
 -- WHICH ANCHORS THIS UPGRADE ADOPTS (#1160). An oid adopted here is "whatever holds the name now", not the relation
 -- pgpm created, and the archive ledger's own upgrade far below (pgpm._backfill_chunk_oids) must not read it as
@@ -2321,6 +2324,8 @@ begin
     end;
     return null;
   end;
+  -- #1487: a name a dropped table's retirement records (_dropped_retirements) is a hole too, logged with the remedy
+  if exists (select 1 from pgpm._dropped_retirements() d where d.child_name = v_name) then return null; end if;
   v_held := to_regclass(format('%I.%I', p_nsp, v_name));
   if v_held is null then
     if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707
@@ -2345,6 +2350,7 @@ begin
   end;
   if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;
   if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707
+  if exists (select 1 from pgpm._dropped_retirements() d where d.child_name = v_name) then return null; end if;
   return v_name;
 end;
 $$;
@@ -2380,7 +2386,9 @@ begin
     values (p_parent, 'fail_obtain_name', p_lo, p_hi,
             format('left unbuilt, so writes into it are refused: its name %I.%I is held by %s',
                    p_nsp, v_name,
-                   case when v_held is null
+                   case when exists (select 1 from pgpm._dropped_retirements() d where d.child_name = v_name)
+                        then 'a dropped table''s pgpm state, which records a retirement of a partition of that name whose detach a pgpm_detach cron job may hold by name (#1487); run pgpm.forget_missing() and the next tick builds it'
+                        when v_held is null
                         then coalesce(pgpm._type_squatter(p_nsp, v_name) || format(' %I.%I', p_nsp, v_name)
                                         || ' (a partition''s row type takes its name, so no type may hold it)',
                                       'a relation or type that has since released it')
@@ -2421,6 +2429,35 @@ begin
      and exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
                   where n.nspname = 'cron' and c.relname = 'job')
      and not exists (select 1 from pg_roles where rolname = current_user and rolsuper);
+end;
+$$;
+
+-- _dropped_retirements (#1461, #1487): the pgpm.part rows of a DROPPED parent (no pg_class row) whose retirement's
+-- detach a pgpm_detach job may still hold: dispatched (detach_dispatched_oid), or a mark older than #1451's record
+-- (retiring_by null), which an older pgpm may have dispatched. Not one this release made and never dispatched. That
+-- command names the partition by NAME, and the parent it was for is gone, so nothing but forget_missing (#893)
+-- returns the job to idle, and a partition later made under that name is detached by the job's next run. Reads
+-- pgpm's own tables only, never cron.job, so no role's view of the jobs changes the answer.
+create or replace function pgpm._dropped_retirements()
+returns table (parent_table regclass, child_name name, retiring_by name, dispatched boolean) language sql stable as $$
+  select p.parent_table, p.child_name, p.retiring_by, p.detach_dispatched_oid is not null from pgpm.part p
+   where p.retiring_at is not null and not (p.detach_dispatched_oid is null and p.retiring_by is not null)
+     and not exists (select 1 from pg_class c where c.oid = p.parent_table);
+$$;
+
+-- _refuse_dropped_detach_name (#1487): refuse to make or name a partition under any of p_names that a dropped table's
+-- retirement records (_dropped_retirements). pgpm.part records no schema, so the match is by name alone and a
+-- namesake in another schema is refused too: the conservative side, as this only refuses. The remedy leads, so a
+-- tick's skip row (200 characters) keeps it.
+create or replace function pgpm._refuse_dropped_detach_name(p_names name[], p_what text)
+returns void language plpgsql stable as $$
+declare v name;
+begin
+  select d.child_name into v from pgpm._dropped_retirements() d where d.child_name = any (p_names) limit 1;
+  if v is not null then
+    raise exception 'pg_partition_magician: % refused to make partition %: run pgpm.forget_missing() first. A dropped table''s pgpm state records a retirement of a partition of that name whose detach a pgpm_detach cron job may hold by name, and its next run would detach this one.',
+      p_what, v;
+  end if;
 end;
 $$;
 
@@ -10028,6 +10065,7 @@ begin
       raise exception 'pg_partition_magician: cannot regrain % at target step % -- splitting it needs the transitional name %, which is already taken by another relation. Drop or rename that relation, then re-run.',
         v_child_name, v_step, v_src_name;
     end if;
+    perform pgpm._refuse_dropped_detach_name(array[v_src_name], format('regrain_step(%s)', p_parent));   -- #1487
     execute format('alter table %s rename to %I', v_child::text, v_src_name);
     -- #1335 b10: the RENAME waits for ACCESS EXCLUSIVE behind the source's writers; the source must carry the new name
     perform pgpm._effect_or_raise((select c.relname from pg_class c where c.oid = v_child) = v_src_name, v_child,
@@ -10383,6 +10421,7 @@ begin
       end if;
     end if;
     if to_regclass(format('%I.%I', v_sub_nsp, v_sub_name)) is null then   -- part-row-by-name: the name is free, so the create below mints it
+      perform pgpm._refuse_dropped_detach_name(array[v_sub_name], format('regrain_step(%s)', p_parent));   -- #1487
       -- #1075: in the parent's tablespace, where every other partition of it is minted. _create_partition's
       -- CREATE ... PARTITION OF takes the parent's; this standalone CREATE ... (LIKE) carries none, so without
       -- the clause every fine child, and every row the regrain moves into it, landed in the database default
@@ -13185,6 +13224,8 @@ begin
   end loop;
   perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, p_parent,
                                                v_created);
+  -- #1487: and no name a dropped table's retirement records, whose detach a cron job may still hold by name
+  perform pgpm._refuse_dropped_detach_name(v_monolith || v_created, 'transmute');
 
   -- #309: bound the wait for the ADD's ACCESS EXCLUSIVE. Re-applied per phase rather than set once,
   -- because `set local` does not survive a COMMIT -- the same caution maintain() records at its own
@@ -16443,8 +16484,32 @@ $$;
 create or replace function pgpm.forget_missing()
 returns table (parent_oid oid, partitions_forgotten int, orphan_tables text[])
 language plpgsql as $$
-declare r record; v_orphans text[]; v_parts int; v_retiring name[]; v_cmd text; v_chunks text;
+declare r record; v_orphans text[]; v_parts int; v_retiring name[]; v_cmd text; v_cmds text[]; v_chunks text; v_read boolean := false;
 begin
+  -- #1461: refused before anything is deleted when a pgpm_detach job this role cannot see may hold a forgotten
+  -- retirement's detach (_dropped_retirements). pg_cron shows a role only its own jobs, so with pg_cron only a
+  -- superuser, or the one non-superuser role whose job holds a dispatched detach (retiring_by, #1451), can return
+  -- every such job to idle below. Left armed, the job detached a re-created namesake's partition. Raised, not
+  -- skipped: this is the operator's command, and a skip would read as nothing to forget.
+  if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'cron' and c.relname = 'job')
+     and not exists (select 1 from pg_roles where rolname = current_user and rolsuper) then
+    begin
+      execute 'select true from cron.job limit 1';
+      v_read := true;
+    exception when others then
+      null;   -- cron.job unreadable: this role vouches for nothing
+    end;
+    select d.parent_table::oid as oid, d.child_name, d.retiring_by, d.dispatched into r
+      from pgpm._dropped_retirements() d
+     where exists (select 1 from pgpm.config c where c.parent_table = d.parent_table)
+       and not (v_read and d.dispatched and d.retiring_by = current_user)
+     order by 1, 2 limit 1;
+    if found then
+      raise exception 'pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid % was retiring %, whose detach pgpm % to a pgpm_detach cron job, and role % cannot read every job that may hold it (pg_cron shows a role only its own). Left armed, it detaches the same-named partition of a table re-created under that name. Run select * from pgpm.forget_missing(); as %.',
+        r.oid, r.child_name, case when r.dispatched then 'dispatched' else 'may have dispatched (a mark older than this release)' end,
+        current_user, case when r.dispatched and r.retiring_by is not null then format('role %s or a superuser', quote_ident(r.retiring_by)) else 'a superuser' end;
+    end if;
+  end if;
   for r in
     select c.parent_table, c.parent_table::oid as oid
       from pgpm.config c
@@ -16488,25 +16553,29 @@ begin
     delete from pgpm.config             where parent_table = r.parent_table;
 
     -- #893: after the deletes, so the forgotten rows cannot count as the live owner of their own command.
+    -- #1488: every job this role sees, each judged on its own command: pg_cron keeps one per role that ran
+    -- pgpm.schedule(), and one unordered row read another role's idle job and left the armed one.
     if v_retiring is not null then
       begin
-        execute 'select command from cron.job where jobname = ''pgpm_detach'' and database = current_database()'
-          into v_cmd;
+        execute 'select array_agg(distinct command) from cron.job where jobname = ''pgpm_detach'' and database = current_database()'
+          into v_cmds;
+        foreach v_cmd in array coalesce(v_cmds, '{}') loop
+          if starts_with(v_cmd, 'alter table ')
+             and exists (select 1 from unnest(v_retiring) as t(child_name)
+                          where position(' detach partition ' in v_cmd) > 0
+                            and right(v_cmd, length(quote_ident(t.child_name)) + 14)
+                              = '.' || quote_ident(t.child_name) || ' concurrently')   -- part-row-by-name: matches a detach command's text, resolves nothing
+             and not exists (select 1 from pgpm.part p
+                              where p.retiring_at is not null
+                                and pgpm._detach_cmd(p.parent_table, pgpm._child_nsp(p.parent_table, p.child_name),
+                                                     p.child_name) = v_cmd)
+          then
+            perform pgpm._idle_detach_job(v_cmd);
+          end if;
+        end loop;
       exception when others then
-        v_cmd := null;   -- no pg_cron, or no such job: nothing can be armed
+        null;   -- no pg_cron, or no such job: nothing can be armed
       end;
-      if starts_with(v_cmd, 'alter table ')
-         and exists (select 1 from unnest(v_retiring) as t(child_name)
-                      where position(' detach partition ' in v_cmd) > 0
-                        and right(v_cmd, length(quote_ident(t.child_name)) + 14)
-                          = '.' || quote_ident(t.child_name) || ' concurrently')   -- part-row-by-name: matches a detach command's text, resolves nothing
-         and not exists (select 1 from pgpm.part p
-                          where p.retiring_at is not null
-                            and pgpm._detach_cmd(p.parent_table, pgpm._child_nsp(p.parent_table, p.child_name),
-                                                 p.child_name) = v_cmd)
-      then
-        perform pgpm._idle_detach_job(v_cmd);
-      end if;
     end if;
 
     insert into pgpm.log (parent_table, action, rows, method)

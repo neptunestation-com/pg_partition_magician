@@ -3461,7 +3461,19 @@ CONCURRENTLY`, by name. Left armed past the retirement it belonged to, that comm
 same-named partition of a table later re-created under the same name and grid, since partition names follow
 from the table's name and grid alone. So when the job holds a detach of a partition the forgotten table was
 retiring, `forget_missing` puts it back to `select 1`, unless a live retirement owns that exact command (a
-re-created namesake already retiring its own partition of that name keeps it).
+re-created namesake already retiring its own partition of that name keeps it). pg_cron keeps one
+`pgpm_detach` job per role that ran [`schedule`](#schedule), and every job the caller can see is judged on
+its own command.
+
+**It refuses a disarm it cannot vouch for.** pg_cron shows a non-superuser only its own jobs. So when a
+forgotten table was retiring a partition whose detach pgpm dispatched (or, on a mark older than this release,
+may have), only a superuser, or the one non-superuser role whose own job holds that detach
+(`pgpm.part.retiring_by`), can return every job holding it to idle. Called by any other role,
+`forget_missing` raises before it clears anything, naming the partition and the role to run it as (or a
+superuser). Left armed, the job would detach the namesake's partition with no record of it anywhere.
+
+While that state stands, pgpm makes no partition under the recorded name (see
+[Partition naming](#partition-naming)), so the namesake waits for `forget_missing`, not the other way round.
 
 `orphan_tables` is **schema-qualified**, and deliberately so: `pgpm.part` records no namespace and the
 dropped parent's oid can no longer supply one, so the match is on the child's name alone and could in
@@ -4300,7 +4312,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `fail_retain_reattach` | a partition retention no longer reaches, which pgpm's dispatched detach had already taken out of the parent, was released to the operator rather than re-attached, since a pg_cron run may still carry the detach. The table and its rows are left whole; the `retain_disown` row logged with it gives the `ATTACH` that puts it back. Logged once. Counts in `status().retain_drop_failures` |
 | `fail_retain_recall` | a retirement retention no longer reaches was kept rather than cleared (or, its detach landed, rather than released), because the tick's role cannot read the `pgpm_detach` job that would hold its detach (pg_cron keeps a job per role that ran `pgpm.schedule()` and shows a role only its own): it is neither a superuser nor the one role whose job holds the detach (`retiring_by`), or the mark is older than this release, or more than one role dispatched it. `method` names the tick's role and the role to run as. Logged every such tick; counts in `status().retain_drop_failures`. Run maintenance as that role, or as a superuser |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
-| `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or its explicit-range stand-in is taken or over 63 bytes, or its own name is over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it, or for a name over 63 bytes gives the name, its length and the bytes to shorten the table name by. Repeats once per tick until the cell is built |
+| `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or by a dropped table's pgpm state that records a retirement of a partition of that name whose detach a `pgpm_detach` job may hold (run [`forget_missing`](#forget_missing)), or its explicit-range stand-in is taken or over 63 bytes, or its own name is over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it, or for a name over 63 bytes gives the name, its length and the bytes to shorten the table name by. Repeats once per tick until the cell is built |
 | `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, not a native value, or on an `id` grid not a value of the control column's type, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |
 
 ### `pgpm.dropped_fk`
@@ -4498,6 +4510,21 @@ grid's ordinary label (renamed after `transmute`, which refuses one up front) is
 `extend_to` raise, naming the first cell they could not name. Renaming the table to a name that fits frees it.
 Each time `obtain` or `extend_to` leaves a cell unbuilt this way it logs `fail_obtain_name` for the cell's
 range, naming what holds the name, so the hole shows in `pgpm.log` before a write into it is refused.
+
+**A name a dropped table's retirement still records is not used.** A referenced partition's retirement
+arms the `pgpm_detach` job with a `DETACH PARTITION` of the partition by name. When the table is dropped
+with a plain `DROP TABLE` before the job runs it, the command outlives the table until
+[`forget_missing`](#forget_missing) clears the table's state and returns the job to idle, and names are a
+pure function of the table's name and grid: a table re-created under the same name and grid would get a
+partition of exactly that name, and the job's next run would detach it, rows and all, with nothing logged.
+So while a `pgpm.part` row of a dropped table records a retirement of a partition of that name whose detach
+pgpm dispatched (or, on a mark older than this release, may have), `transmute` refuses a conversion whose
+monolith or forward cells take it (before anything is committed), `obtain` and `extend_to` leave that one
+cell unbuilt and log `fail_obtain_name` naming `forget_missing`, and `regrain` and auto-regrain refuse a fine
+child or a split's rename under it (auto-regrain logs `skip_regrain` each tick). `pgpm.part` records no
+schema, so the match is by name alone and a namesake in another schema is refused too: the cautious side,
+since this only ever refuses. The check reads pgpm's own tables, so it holds for every role, whatever pg_cron
+shows it.
 
 The name is a human-facing label; `pgpm.part` holds the authoritative bounds. The `_to_` form is also
 what keeps `transmute`'s orphan check from mistaking a monolith for a leftover of an interrupted regrain.

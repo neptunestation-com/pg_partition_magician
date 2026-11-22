@@ -728,6 +728,14 @@ one day believing it manages an unrelated table that lands on that oid.
    No argument, on purpose: it can only ever match rows whose relation is already gone, so it cannot touch a
    live managed table. It is a no-op if nothing is missing.
 
+   **Run it as a superuser** (or as the role named in its refusal). If the table was retiring a partition
+   whose detach pgpm had handed to a `pgpm_detach` cron job, `forget_missing` returns every job holding that
+   detach to idle. pg_cron shows any other role only its own jobs, so for any other role it raises,
+   clears nothing, and names the role that can run it. Do this **before** re-creating a table under the same
+   name: until then `transmute` refuses to make a partition under a name the dropped table was retiring,
+   and `obtain`, `extend_to` and `regrain` leave it unbuilt, each naming `forget_missing`, because the armed
+   job would detach it.
+
    If the table was archiving, its `pgpm.archive_ledger` rows go too, and the objects they named now hold the
    only copy of those rows. The `forget_missing` log row keeps the record: its `method` lists every chunk's
    range and object key, marking `retired` the ones whose partition `retire()` had dropped. Copy it somewhere
