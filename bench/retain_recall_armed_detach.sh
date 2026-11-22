@@ -12,7 +12,7 @@
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retire_detached_unreferenced.sh.
 #
-# THIRTY-FIVE mutations are required to fail against it (bench/mutations/mutate.py):
+# THIRTY-SIX mutations are required to fail against it (bench/mutations/mutate.py):
 #   retain_recall_never             -- nothing settles a retirement retention no longer reaches, the pre-#724
 #                                      shape. Parts A, B, C and F.
 #   retain_recall_ignores_horizon   -- every retirement is settled, reached or not, so a reached partition's
@@ -47,6 +47,8 @@
 #   recall_unseen_job_read_idle     -- #1451 path 2: a role that cannot read the job that holds the detach reads
 #                                      it idle. Parts L, O and P.
 #   recall_unreadable_job_read_idle -- the same for a role whose read of cron.job raises. Part L.
+#   recall_command_unread_vouched   -- a role that reads cron.job but not its command reads the job as idle
+#                                      (PR #1492, Codex P2). Part AA.
 #   recall_reads_another_roles_job  -- a non-superuser reads its own pgpm_detach job as the administrator's, which
 #                                      holds the detach (PR #1459 round 1, V-01). Part O.
 #   recall_unrecorded_mark_read     -- a non-superuser reads a mark older than this release as one nothing holds

@@ -18,6 +18,8 @@
 #   dropped_retirements_count_undispatched     -- a mark never dispatched read as one a job may hold. Part E.
 #   forget_missing_retiring_role_null_unsafe   -- the vouch compared with a nulled retiring_by (two roles
 #                                                 dispatched) reads as no refusal. Part F.
+#   vouch_probe_reads_table_not_command        -- the vouch's probe reads cron.job, not its command, so a role
+#                                                 that cannot read the command vouches (PR #1492). Part G.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's catalog and its
 # row security). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted

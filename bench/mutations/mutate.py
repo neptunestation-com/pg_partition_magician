@@ -5816,6 +5816,26 @@ $$;''',
         [("    return not p_dispatched and p_retiring_by is not null;\n",
           "    return true;\n", 1)],
     ),
+    "recall_command_unread_vouched": (
+        "bench/retain_recall_armed_detach.sh",
+        "PR #1492, Codex P2: a role granted cron.job's other columns but not its command passes a probe that reads the "
+        "table, and the recall's command read that then raises leaves the reading standing, so the owner's ticks wait "
+        "out the minute and clear its dispatched mark with its job still armed. Two sites, the probe and the handler. "
+        "tests/194 part AA catches it.",
+        [("    execute 'select command from cron.job limit 1';\n",
+          "    execute 'select 1 from cron.job limit 1';\n", 1),
+         ("        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;\n      end;\n",
+          "        null;\n      end;\n", 1)],
+    ),
+    "vouch_probe_reads_table_not_command": (
+        "bench/forget_missing_vouches_detach.sh",
+        "PR #1492, Codex P2, the probe alone: the vouch helper reads cron.job rather than its command, so a role "
+        "granted the other columns alone vouches for its own dispatched retirement, and forget_missing clears it while "
+        "its disarm, which reads the command, fails silently and leaves the job armed. One site, the probe. "
+        "tests/395 part G catches it.",
+        [("    execute 'select command from cron.job limit 1';\n",
+          "    execute 'select 1 from cron.job limit 1';\n", 1)],
+    ),
     "recall_reads_another_roles_job": (
         "bench/retain_recall_armed_detach.sh",
         "PR #1459 round 1 V-01: any non-superuser that sees a pgpm_detach job reads it as the job, but pg_cron keeps one "

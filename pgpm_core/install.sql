@@ -2423,7 +2423,8 @@ $$;
 -- job; a dispatched detach is held by the recorded role's job alone (retiring_by, nulled once two roles dispatched it,
 -- so a null vouches for nothing); a mark this release made and never dispatched (retiring_by set) by none; one older
 -- than the record (retiring_by null) an older pgpm may have dispatched, which only a superuser reads. A role that
--- cannot read cron.job vouches only for that never-dispatched mark.
+-- cannot read cron.job's command vouches only for that never-dispatched mark: the probe reads the command, the one
+-- column every caller's reading of the job rests on, since a role granted the other columns alone reads the table.
 create or replace function pgpm._detach_job_vouched(p_dispatched boolean, p_retiring_by name)
 returns boolean language plpgsql stable as $$
 begin
@@ -2432,7 +2433,7 @@ begin
     return true;
   end if;
   begin
-    execute 'select 1 from cron.job limit 1';
+    execute 'select command from cron.job limit 1';
   exception when others then
     return not p_dispatched and p_retiring_by is not null;
   end;
@@ -5310,7 +5311,8 @@ begin
              || ' where jobname = ''pgpm_detach'' and database = current_database()'
           into v_armed using v_cmd_q;
       exception when others then
-        null;   -- cron.job is there and this role cannot read it: read as not armed, and v_read says so
+        -- cron.job is there and this read of it raised: only a mark this release made and never dispatched is read
+        v_read := r.detach_dispatched_oid is null and r.retiring_by is not null;
       end;
     end if;
 
