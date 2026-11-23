@@ -4755,6 +4755,17 @@ begin
       v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);
       if v_rec is not null and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then
         if r.retiring_at is not null then
+          -- #1493: not by a role that cannot vouch no job it cannot see holds the detach (_detach_job_vouched): it keeps
+          -- the mark, as the completion below does. Released, the record was gone and another role's job stayed armed.
+          if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then
+            insert into pgpm.log (parent_table, action, lo, hi, method)
+              values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+                      format('%I.%I is out of the parent and renamed (oid %s), and role %s cannot read every pgpm_detach job that may still hold its detach (pg_cron shows a role only its own), so it could not return such a job to idle, whose next run would detach a partition later made under that name; its retirement mark is kept, not released. Run maintenance as %s, and its tick releases it to you',
+                             v_nsp, p_child, v_rec, current_user,
+                             case when r.detach_dispatched_oid is not null and r.retiring_by is not null
+                                  then format('role %s or a superuser', r.retiring_by) else 'a superuser' end));
+            return false;
+          end if;
           perform pgpm._disown_retirement(p_parent, p_child,
             format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
                    v_nsp, p_child,
@@ -5236,7 +5247,8 @@ $$;
 -- A name that no longer resolves to the relation either anchor recorded is not acted on beyond disarming
 -- its own command: logged fail_retain_identity, as retire() does for the same mismatch. Except one case (#1424):
 -- the recorded relation still stands, detached, under another name. The operator renamed a retirement that was
--- out of the parent, which makes it theirs: the mark is released (retain_disown), uncounted.
+-- out of the parent, which makes it theirs: the mark is released (retain_disown), uncounted, by a tick that can
+-- vouch for the job (#1493); any other keeps it, fail_retain_recall, counted.
 --
 -- p_reattach false is set_retain's call: it reads the states only. The tick that follows settles them.
 create or replace function pgpm._retain_recall(p_parent regclass, p_reattach boolean)
@@ -5281,6 +5293,19 @@ begin
       -- kept. A name taken by a squatter while the partition stays attached is still refused below (#778 part C).
       v_rec := pgpm._renamed_retirement(p_parent, r.child_name, r.retiring_oid, r.child_oid, v_now);
       if v_rec is not null then
+        -- #1493: not by a role that cannot vouch no job it cannot see holds the detach (_detach_job_vouched): it keeps
+        -- the mark, counted on the tick (set_retain's call only reads), for a tick that can, as the release below does.
+        if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then
+          continue when p_reattach is not true;
+          insert into pgpm.log (parent_table, action, lo, hi, method)
+            values (p_parent, 'fail_retain_recall', r.lo, r.hi,
+                    format('retention no longer reaches %I.%I, which is out of the parent and renamed (oid %s), but role %s cannot read every pgpm_detach job that may still hold its detach (pg_cron shows a role only its own), so it could not return such a job to idle, whose next run would detach a partition later made under that name; its retirement mark is kept, not released. Run maintenance as %s, and its tick releases it to you',
+                           v_nsp, r.child_name, v_rec, current_user,
+                           case when r.detach_dispatched_oid is not null and r.retiring_by is not null
+                                then format('role %s or a superuser', r.retiring_by) else 'a superuser' end));
+          v_n := v_n + 1;
+          continue;
+        end if;
         perform pgpm._disown_retirement(p_parent, r.child_name,
           format('retention no longer reaches %I.%I, which its retirement''s detach took out of the parent and which has since been renamed to %s (oid %s): a hand rename of a detached retirement makes it the operator''s table, so it is released rather than re-attached',
                  v_nsp, r.child_name,

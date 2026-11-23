@@ -524,7 +524,11 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
      drop), but maintenance ran as a role that can see only its own `pgpm_detach` job, and another role's
      may still hold the detach. The partition and its row are kept, counted, so that job is not left armed
      with a name a re-created table would reuse. Run maintenance as the role `method` names, or as a
-     superuser: that tick returns the job to idle and drops the partition.
+     superuser: that tick returns the job to idle and drops the partition. The same refusal saying the
+     partition `is out of the parent and renamed` is a detached retirement you renamed to keep: its mark is
+     kept rather than released, for the same reason, and that role's tick or a superuser's releases the
+     table to you (`retain_disown`). Once retention no longer reaches the range, the recall logs the same
+     refusal as `fail_retain_recall`.
    - `retain_detaching` non-zero for many ticks with none of these logged means the detach is
      dispatched but the `pgpm` job is not running: check `cron.job_run_details`.
 
