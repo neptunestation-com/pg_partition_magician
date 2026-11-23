@@ -752,6 +752,15 @@ with it. The refusal names every such partition: let a running detach finish, or
 [`_detach_reap`](#_detach_reap) do it), then re-run `untransmute`, which leaves the detached partition standing
 as a table of yours.
 
+It refuses, the same two ways, while a retirement of the managed table has a detach that a `pgpm_detach` cron
+job the caller cannot see may hold (`untransmute refused, nothing changed`). The reverse forgets every
+retirement of the table and returns to idle each job still holding one of their detaches, and pg_cron shows a
+role other than a superuser only its own job, so another role's job would be left re-running the detach on
+every run. The refusal names the partition, the caller and who can run it: the role whose own job alone holds
+a detach pgpm dispatched, or a superuser. A retirement whose detach was never dispatched (its `retire` found no
+job) is held by no job and refuses no one. The second asking, under the lock, reads a retirement a tick marked
+while `untransmute` waited.
+
 It refuses, the same two ways, while an object names the managed table by its oid: a view, materialized
 view, rule, `BEGIN ATOMIC` function or another table's policy created over the parent since the conversion,
 or a function, column or domain typed by the parent's row type. The reverse drops the parent, which would

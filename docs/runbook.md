@@ -780,5 +780,7 @@ The per-tick `skip_*` noise stops with the next maintenance run.
 
 **Prevent.** Use `pgpm.untransmute(parent)` to stop managing a table -- it reverses the conversion and
 deletes pgpm's rows for you. If you genuinely want the table gone, `untransmute` first, then `DROP TABLE`.
-Note `untransmute` only works while the conversion is still reversible (before any real partition beyond the
+While a retirement of the table is in flight, run `untransmute` as a superuser (or as the role named in its
+refusal): its detach may sit in another role's `pgpm_detach` job, and pg_cron shows a role other than a
+superuser only its own, so a role that cannot see every job that may hold it is refused, with nothing changed. Note `untransmute` only works while the conversion is still reversible (before any real partition beyond the
 monolith exists); past that, drop the table and run `pgpm.forget_missing()`.
