@@ -18566,6 +18566,39 @@ MUTATIONS["retire_completion_refuses_retiring_role"] = (
     [("  if r.retiring_at is not null and not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
       "  if r.retiring_at is not null and not pgpm._detach_job_vouched(false, null) then\n", 1)],
 )
+# retire()'s idle of a landed detach (#1498): pgpm._idle_landed_detach. Its scope and its exception, one bite each.
+IDLE_LANDED_SCOPE = "and ($1 is null or j.username = $1)'\n"
+MUTATIONS["retire_landed_idle_unscoped"] = (
+    "bench/retire_landed_idle_scoped.sh",
+    "Issue #1498's defect: retire()'s idle of a landed detach resets every pgpm_detach job the caller sees whoever "
+    "dispatched it, so a superuser's completion of a retirement a non-superuser dispatched resets every other role's "
+    "job too, whatever it holds. tests/400 part B catches it.",
+    [("    perform pgpm._idle_landed_detach(p_parent, p_child, case when r.detach_dispatched_oid is not null then r.retiring_by end);\n",
+      "    perform pgpm._idle_landed_detach(p_parent, p_child, null);\n", 1)],
+)
+MUTATIONS["retire_landed_idle_no_null_fallback"] = (
+    "bench/retire_landed_idle_scoped.sh",
+    "Issue #1498, the over-narrow fix: only the recorded role's job is reset, so none when retiring_by is null (two "
+    "roles dispatched it) or names a role that reads every job, and a job armed with the dropped partition's detach "
+    "stays armed (#407). tests/400 parts A and C catch it.",
+    [(IDLE_LANDED_SCOPE, "and j.username = $1'\n", 1)],
+)
+MUTATIONS["retire_landed_idle_superuser_own_job"] = (
+    "bench/retire_landed_idle_scoped.sh",
+    "Issue #1498, the fix on a wrong premise: a superuser's record scoped to the superuser's own job, though its "
+    "dispatch armed every role's, so another role's job keeps the dropped partition's detach (#407). tests/400 part A "
+    "catches it.",
+    [("    using (select rolname from pg_roles where rolname = p_by and not rolsuper and not rolbypassrls), p_parent, p_child;\n",
+      "    using p_by, p_parent, p_child;\n", 1)],
+)
+MUTATIONS["retire_landed_idle_clobbers_dispatch"] = (
+    "bench/retire_landed_idle_scoped.sh",
+    "Issue #1498, the half fix: scoped by role but with no exception for another mark's detach, so a superuser's "
+    "completion of its own dispatch still resets another role's job holding a different retirement's pending detach. "
+    "tests/400 part A catches it.",
+    [("       || ' and not exists (select 1 from pgpm.part p where p.retiring_at is not null'\n",
+      "       || ' and not exists (select 1 from pgpm.part p where false'\n", 1)],
+)
 MUTATIONS["retire_rename_release_unvouched"] = (
     "bench/rename_release_vouches_detach.sh",
     "Issue #1493's defect at retire(): its #1427 release of a detached retirement the operator renamed clears the mark "

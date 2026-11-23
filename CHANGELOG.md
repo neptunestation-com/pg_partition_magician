@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`retire` returns to idle only the `pgpm_detach` jobs that may hold the detach that landed** (#1498). Its
+  completion reset every job the caller could see, and pg_cron shows a superuser every role's, so a superuser's
+  tick completing one retirement also reset another role's job holding a different retirement's dispatched
+  detach, which waited a tick or more for a re-dispatch (and, re-dispatched by the superuser, lost its
+  `retiring_by` and could then be completed only by a superuser). The idle now reaches the job of the role
+  recorded as dispatching it (`retiring_by`), or every job when that role is a superuser, whose dispatch arms
+  every role's job, or none is recorded; a job holding another retirement's detach is left alone either way.
+  tests/400; `bench/retire_landed_idle_scoped.sh`, four mutations.
 - **`untransmute` refuses a retirement whose detach another role's `pgpm_detach` job may hold** (#1489). The
   reverse forgets every retirement of the table and returns to idle the jobs still holding one of their
   detaches (#954), and pg_cron shows a non-superuser only its own job, so the table's owner reversing a table

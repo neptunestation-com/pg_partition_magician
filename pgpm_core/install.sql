@@ -3864,9 +3864,10 @@ $$;
 --
 -- p_cmd null disarms whatever is there. Pass a command instead to disarm ONLY IF THAT IS STILL WHAT
 -- IS ARMED (issue #407). At most one detach is in flight, so the caller completing a retirement is
--- normally the owner of the armed command and null is right; but a retirement WEDGED on an identity
--- mismatch revisits this on every tick forever, and an unconditional disarm there would clobber some
--- other parent's freshly-dispatched detach every tick for as long as the wedge lasts. Build p_cmd
+-- normally the owner of the armed command (it idles through _idle_landed_detach, #1498); but a
+-- retirement WEDGED on an identity mismatch revisits this on every tick forever, and an
+-- unconditional disarm there would clobber some other parent's freshly-dispatched detach every
+-- tick for as long as the wedge lasts. Build p_cmd
 -- through pgpm._detach_cmd, the same function that armed it. A mismatch skips the disarm, which is
 -- the safe direction: the next successful dispatch overwrites the command anyway.
 create or replace function pgpm._idle_detach_job(p_cmd text)
@@ -3880,6 +3881,26 @@ begin
          || ' where jobname = ''pgpm_detach'' and database = current_database() and command = $1'
       using p_cmd;
   end if;
+exception when others then
+  null;   -- no pg_cron, or no such job: there is nothing to quiesce
+end;
+$$;
+
+-- _idle_landed_detach (#1498): retire()'s idle once p_child's detach has landed, unconditional on the command (#407),
+-- scoped to the jobs that can hold it. pg_cron keeps a pgpm_detach job per role that ran pgpm.schedule(), and a dispatch
+-- arms every job its role sees: its own, or every role's for a role that reads them all (a superuser). So p_by, the
+-- role pgpm recorded as the only one to dispatch it (retiring_by), names the job when it sees only its own, and every
+-- job is reset when it reads them all or is null. Spared, in any case, a job holding another mark's detach as
+-- forget_missing reads it: another dispatch, never clobbered (#407), which that mark's record idles in its turn.
+create or replace function pgpm._idle_landed_detach(p_parent regclass, p_child name, p_by name)
+returns void language plpgsql as $$
+begin
+  execute 'select cron.alter_job(j.jobid, command => ''select 1'') from cron.job j'
+       || ' where j.jobname = ''pgpm_detach'' and j.database = current_database() and ($1 is null or j.username = $1)'
+       || ' and not exists (select 1 from pgpm.part p where p.retiring_at is not null'
+       || ' and not (p.parent_table = $2 and p.child_name = $3)'
+       || ' and pgpm._detach_cmd(p.parent_table, pgpm._child_nsp(p.parent_table, p.child_name), p.child_name) = j.command)'
+    using (select rolname from pg_roles where rolname = p_by and not rolsuper and not rolbypassrls), p_parent, p_child;
 exception when others then
   null;   -- no pg_cron, or no such job: there is nothing to quiesce
 end;
@@ -5145,8 +5166,9 @@ begin
     -- subtransaction for the same reason -- a rolled-back drop must not roll back the disarming.
     -- Unconditional here, unlike the wedge above: this runs once per retirement rather than on every
     -- tick forever, and the identity check has just proved the name means what it meant, so the
-    -- detach that landed was this retirement's and the armed command is its own.
-    perform pgpm._idle_detach_job(null);
+    -- detach that landed was this retirement's. #1498: but only the jobs that may hold it, since a
+    -- superuser's idle reached every role's job and clobbered another role's pending dispatch.
+    perform pgpm._idle_landed_detach(p_parent, p_child, case when r.detach_dispatched_oid is not null then r.retiring_by end);
   elsif r.retiring_at is not null then
     -- A RETIREMENT THAT DISPATCHED A DETACH AND ENDS IN THE ONE-STEP DROP (issue #835). retiring_at says an
     -- earlier call took the referenced path and armed the job with this partition's detach; its incoming

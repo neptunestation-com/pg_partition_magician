@@ -1773,7 +1773,10 @@ The sequence, per partition:
    concurrent detach, in one transaction, logged `retain_detach`. With no such job, `fail_retain_detach`
    is logged instead.
 4. On a later call, with the partition detached, return the cron job to idle, `DROP` the partition, delete
-   the catalog row and log `retain_drop`. If the incoming FK has been dropped in the meantime, before the
+   the catalog row and log `retain_drop`. The idle reaches the jobs that may hold the detach: the job of the
+   one role recorded as dispatching it (`pgpm.part.retiring_by`), or every job when that role is a superuser
+   (whose dispatch arms every role's job) or none is recorded. A job holding another retirement's detach
+   is left alone. If the incoming FK has been dropped in the meantime, before the
    detach ran, the later call finishes the retirement with the one-step `DROP` of the still-attached
    partition instead; it returns the job to idle first too, provided the job still holds this
    partition's detach (another retirement's dispatch is left alone).
