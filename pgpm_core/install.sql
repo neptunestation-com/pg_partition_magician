@@ -2420,8 +2420,8 @@ $$;
 -- (p_retiring_by). The one rule for every site that acts on "no job holds it": the recall, the #705 disowns
 -- (_unrecorded_mark_unread), forget_missing, and retire()'s completion. With no cron.job nothing runs a detach. With
 -- one, pg_cron keeps a job per role that ran pgpm.schedule() and shows a role only its own: a superuser reads every
--- job; a dispatched detach is held by the recorded role's job alone (retiring_by, nulled once two roles dispatched it,
--- so a null vouches for nothing); a mark this release made and never dispatched (retiring_by set) by none; one older
+-- job; a dispatched detach is held by the recorded role's job alone (retiring_by, nulled once two roles dispatched it
+-- or a dispatch armed another role's job too, as a superuser's does, #1498; so a null vouches for nothing); a mark this release made and never dispatched (retiring_by set) by none; one older
 -- than the record (retiring_by null) an older pgpm may have dispatched, which only a superuser reads. A role that
 -- cannot read cron.job's command vouches only for that never-dispatched mark: the probe reads the command, the one
 -- column every caller's reading of the job rests on, since a role granted the other columns alone reads the table.
@@ -3859,6 +3859,41 @@ begin
 end;
 $$;
 
+-- _dispatch_reached_others (#1498): whether a dispatch this transaction just made armed another role's pgpm_detach job.
+-- It arms every job its role sees, and pg_cron shows a superuser, or a role exempt from row security, every role's.
+-- Read off the jobs at the dispatch, so the record (retiring_by) never rests on what the role's attributes are later:
+-- a superuser demoted since still armed them all. A read that fails says it did; a cron.job with no username column
+-- keeps no job per role, so there is none of another role's to arm.
+create or replace function pgpm._dispatch_reached_others()
+returns boolean language plpgsql stable as $$
+declare v boolean;
+begin
+  if not exists (select 1 from pg_attribute where attrelid = to_regclass('cron.job') and attname = 'username'
+                                              and not attisdropped) then
+    return false;
+  end if;
+  execute 'select exists (select 1 from cron.job where jobname = ''pgpm_detach'' and database = current_database()'
+       || ' and username <> current_user)' into v;
+  return v;
+exception when others then
+  return true;
+end;
+$$;
+
+-- _unrecord_wide_dispatchers (#1498), run by every install: a dispatched mark recorded before _dispatch_reached_others
+-- names its role even when that role read every job (a superuser, or one exempt from row security), and so armed every
+-- role's. What it saw then is gone; what it can do now is the best evidence left, so such a mark records no role, and
+-- only a superuser completes it, idling every job. Returns how many it cleared.
+create or replace function pgpm._unrecord_wide_dispatchers()
+returns int language sql as $$
+  with c as (update pgpm.part p set retiring_by = null
+              where p.detach_dispatched_oid is not null
+                and exists (select 1 from pg_roles r where r.rolname = p.retiring_by and (r.rolsuper or r.rolbypassrls))
+             returning 1)
+  select count(*)::int from c;
+$$;
+select pgpm._unrecord_wide_dispatchers();
+
 -- the reverse: put the standing job back to idle once a retirement completes, so it is not left
 -- re-running a detach that has already happened (which logs `is not a partition` every tick).
 --
@@ -3888,19 +3923,26 @@ $$;
 
 -- _idle_landed_detach (#1498): retire()'s idle once p_child's detach has landed, unconditional on the command (#407),
 -- scoped to the jobs that can hold it. pg_cron keeps a pgpm_detach job per role that ran pgpm.schedule(), and a dispatch
--- arms every job its role sees: its own, or every role's for a role that reads them all (a superuser). So p_by, the
--- role pgpm recorded as the only one to dispatch it (retiring_by), names the job when it sees only its own, and every
--- job is reset when it reads them all or is null. Spared, in any case, a job holding another mark's detach as
--- forget_missing reads it: another dispatch, never clobbered (#407), which that mark's record idles in its turn.
+-- arms every job its role sees. p_by is the role pgpm recorded as the only one to dispatch it (retiring_by), set only
+-- when every dispatch armed that role's own job alone (_dispatch_reached_others), so it names the one job; null resets
+-- every job, as does a cron.job with no username column. Spared, in any case, a job holding another mark's detach as forget_missing reads it: another dispatch,
+-- never clobbered (#407), which that mark's record idles in its turn.
 create or replace function pgpm._idle_landed_detach(p_parent regclass, p_child name, p_by name)
 returns void language plpgsql as $$
 begin
+  if not exists (select 1 from pg_attribute where attrelid = to_regclass('cron.job') and attname = 'username'
+                                              and not attisdropped) then
+    p_by := null;
+  end if;
+  -- by-name-ok: names pg_cron's own cron.job and pgpm.part, never an operator's relation, and moves no rows; the job's
+  --   command is compared as text, and cron.alter_job acts by jobid
   execute 'select cron.alter_job(j.jobid, command => ''select 1'') from cron.job j'
-       || ' where j.jobname = ''pgpm_detach'' and j.database = current_database() and ($1 is null or j.username = $1)'
+       || ' where j.jobname = ''pgpm_detach'' and j.database = current_database()'
+       || case when p_by is not null then ' and j.username = $1' else '' end
        || ' and not exists (select 1 from pgpm.part p where p.retiring_at is not null'
        || ' and not (p.parent_table = $2 and p.child_name = $3)'
        || ' and pgpm._detach_cmd(p.parent_table, pgpm._child_nsp(p.parent_table, p.child_name), p.child_name) = j.command)'
-    using (select rolname from pg_roles where rolname = p_by and not rolsuper and not rolbypassrls), p_parent, p_child;
+    using p_by, p_parent, p_child;
 exception when others then
   null;   -- no pg_cron, or no such job: there is nothing to quiesce
 end;
@@ -5113,10 +5155,12 @@ begin
       if v_reason is null then
         -- #705: the record that this mark stands for a detach pgpm issued, in the transaction that armed the job
         -- #1451: which role's job now holds it. This role's alone if the mark is this release's and nothing was
-        -- dispatched before, or this role dispatched before; another role's dispatch may still hold it otherwise
+        -- dispatched before, or this role dispatched before; another role's dispatch may still hold it otherwise.
+        -- #1498: and only if this dispatch armed no other role's job, read off the jobs now, never off the role later
         update pgpm.part set detach_dispatched_oid = v_child::oid,
                              retiring_by = case when retiring_by is not null
                                                  and (detach_dispatched_oid is null or retiring_by = current_user)
+                                                 and not pgpm._dispatch_reached_others()
                                                 then current_user end,
                              recall_idle_xact = null, recall_idle_at = null
          where parent_table = p_parent and child_name = p_child;

@@ -102,7 +102,7 @@ select is(pg_temp.cmd(2), format('alter table public.ra397 detach partition publ
 select pg_temp.cmd(2) \gexec
 select ok(not pg_temp.attached('public.ra397', :'a_doomed') and to_regclass(format('public.%I', :'a_doomed')) is not null,
   'LIVENESS: (A) the job''s run landed the detach');
-select is(pg_temp.mark('public.ra397', '0'), 't postgres t', 'LIVENESS: (A) the mark records the administrator''s dispatch');
+select is(pg_temp.mark('public.ra397', '0'), 't  t', 'LIVENESS: (A) the mark records the dispatch, and no role: the administrator''s armed every role''s job');
 set role pgpm_test397_owner;
 select set_config('t397.a_seen', (select string_agg(format('%s:%s', username, command), ',') from cron.job), false);
 select set_config('t397.a', pgpm.retire('public.ra397', :'a_doomed')::text, false);
@@ -113,7 +113,7 @@ select is(current_setting('t397.a_seen'),
 select is(current_setting('t397.a'), 'false', 'A: the owner''s retire() does not complete the retirement');
 select is(pg_temp.ids(:'a_doomed'), array[1, 2, 3]::bigint[],
   'A: the detached partition stands, with ids 1, 2, 3');
-select is(pg_temp.mark('public.ra397', '0'), 't postgres t', 'A: its row keeps the mark, the dispatch and its role');
+select is(pg_temp.mark('public.ra397', '0'), 't  t', 'A: its row keeps the mark and the dispatch');
 select is(pg_temp.cmd(2), format('alter table public.ra397 detach partition public.%I concurrently', :'a_doomed'),
   'A: the administrator''s job still holds the detach, for the tick that completes it');
 select is(pg_temp.cmd(1), 'alter table public.elsewhere397 detach partition public.elsewhere397_p1 concurrently',
@@ -121,7 +121,7 @@ select is(pg_temp.cmd(1), 'alter table public.elsewhere397 detach partition publ
 select is(pg_temp.actions('public.ra397', '0'), array['retain_detach', 'fail_retain_drop'],
   'A: logged fail_retain_drop, and no retain_drop');
 select ok((select method from pgpm.log where parent_table = 'public.ra397'::regclass and lo = '0' and action = 'fail_retain_drop')
-            ~ ('^public\.' || :'a_doomed' || ' is detached by its retirement, and role pgpm_test397_owner cannot read every pgpm_detach job that may still hold its detach .*kept, not dropped\. Run maintenance as role postgres or a superuser, and its tick drops it$'),
+            ~ ('^public\.' || :'a_doomed' || ' is detached by its retirement, and role pgpm_test397_owner cannot read every pgpm_detach job that may still hold its detach .*kept, not dropped\. Run maintenance as a superuser, and its tick drops it$'),
   'A: naming the role that cannot read the job and the role to run as');
 select ok((select retain_drop_failures from pgpm.status() where parent = 'public.ra397'::regclass) > 0, 'A: and status() counts it');
 select is(pgpm.retire('public.ra397', :'a_doomed'), true, 'A: a superuser''s retire() completes it');
@@ -179,7 +179,7 @@ exception when others then
 end $$;
 reset role;
 select ok(current_setting('t397.b_fm') ~ ('^P0001 pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid '
-            || :b_oid || ' was retiring ' || :'b_doomed' || ', whose detach pgpm dispatched .*Run select \* from pgpm\.forget_missing\(\); as role postgres or a superuser\.$'),
+            || :b_oid || ' was retiring ' || :'b_doomed' || ', whose detach pgpm dispatched .*Run select \* from pgpm\.forget_missing\(\); as a superuser\.$'),
   'B: the owner''s forget_missing() is refused, naming the role to run it as');
 select is(pg_temp.cmd(2), format('alter table public.rb397 detach partition public.%I concurrently', :'b_doomed'),
   'LIVENESS: (B) the administrator''s job still holds the detach of the recorded name');
@@ -215,11 +215,11 @@ reset role;
 select is(current_setting('t397.c'), 'false', 'C: the owner''s retire() does not complete it');
 select ok(pg_temp.attached('public.rc397', :'c_doomed') and pg_temp.ids(:'c_doomed') = array[21, 22, 23, 24]::bigint[],
   'C: the partition stays attached, with ids 21 to 24');
-select is(pg_temp.mark('public.rc397', '20'), 't postgres t', 'C: its row keeps the mark');
+select is(pg_temp.mark('public.rc397', '20'), 't  t', 'C: its row keeps the mark');
 select is(pg_temp.cmd(1), 'alter table public.elsewhere397 detach partition public.elsewhere397_p3 concurrently',
   'C: and the owner''s job keeps the other table''s detach');
 select ok((select method from pgpm.log where parent_table = 'public.rc397'::regclass and lo = '20' and action = 'fail_retain_drop')
-            ~ ('^public\.' || :'c_doomed' || ' ends its retirement in a one-step drop, and role pgpm_test397_owner cannot read every pgpm_detach job .*Run maintenance as role postgres or a superuser, and its tick drops it$'),
+            ~ ('^public\.' || :'c_doomed' || ' ends its retirement in a one-step drop, and role pgpm_test397_owner cannot read every pgpm_detach job .*Run maintenance as a superuser, and its tick drops it$'),
   'C: logged fail_retain_drop, naming the role to run as');
 select is(pgpm.retire('public.rc397', :'c_doomed'), true, 'C: a superuser''s retire() completes it');
 select is(pg_temp.cmd(2), 'select 1', 'C: returning the administrator''s job to idle');

@@ -11,9 +11,12 @@
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   retire_landed_idle_unscoped            -- every visible job reset whoever dispatched it. Part B.
 #   retire_landed_idle_no_null_fallback    -- only the recorded role's job, none when retiring_by is null. Parts A, C.
-#   retire_landed_idle_superuser_own_job   -- a superuser's record scoped to its own job, though its dispatch armed
-#                                             every role's. Part A.
+#   dispatch_records_role_that_armed_others -- the dispatch records its role though it armed other roles' jobs, so a
+#                                             demoted superuser completes it and idles its own job alone. Parts A, D.
+#   unrecord_wide_dispatchers_noop         -- an older release's record of a superuser's dispatch kept. Part E.
 #   retire_landed_idle_clobbers_dispatch   -- the job holding another mark's pending detach reset too. Part A.
+#   idle_landed_scope_assumes_username     -- scoped by a username column cron.job does not have: nothing idled.
+#                                             Part F.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's catalog and its
 # row security). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted

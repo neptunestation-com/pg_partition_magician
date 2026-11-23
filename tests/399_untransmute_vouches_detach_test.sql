@@ -108,7 +108,7 @@ select is(pgpm.retire('public.ta399', :'a_fwd'), false, 'LIVENESS: (A) the admin
 update cron.job set command = 'alter table public.elsewhere399 detach partition public.elsewhere399_p1 concurrently' where jobid = 1;
 select is(pg_temp.cmd(2), format('alter table public.ta399 detach partition public.%I concurrently', :'a_fwd'),
   'LIVENESS: (A) the administrator''s job holds the forward cell''s detach');
-select is(pg_temp.mark(:'a_fwd'), 't postgres t', 'LIVENESS: (A) the mark records the administrator''s dispatch');
+select is(pg_temp.mark(:'a_fwd'), 't  t', 'LIVENESS: (A) the mark records the dispatch, and no role: the administrator''s armed every role''s job');
 select pg_temp.state('public.ta399') as a_state \gset
 set role pgpm_test399_owner;
 select set_config('t399.a_seen', (select string_agg(format('%s:%s', username, command), ',') from cron.job), false);
@@ -125,12 +125,12 @@ select is(current_setting('t399.a_seen'),
   'LIVENESS: (A) the owner sees one job, its own, holding another table''s detach');
 select ok(current_setting('t399.a') ~ ('^P0001 pg_partition_magician: untransmute refused, nothing changed: (public\.)?ta399 is retiring '
             || :'a_fwd' || ', whose detach pgpm dispatched to a pgpm_detach cron job, and role pgpm_test399_owner cannot read every job that may hold it '
-            || '.*Run select pgpm\.untransmute\(''(public\.)?ta399''\); as role postgres or a superuser\.$'),
+            || '.*Run select pgpm\.untransmute\(''(public\.)?ta399''\); as a superuser\.$'),
   'A: the owner''s untransmute() is refused, naming the partition, the role and the role to run it as');
 select is((select relkind::text from pg_class where oid = 'public.ta399'::regclass), 'p', 'A: the table is still partitioned');
 select is(pg_temp.payloads('public.ta399'), array['a', 'b', 'c'], 'A: with rows a, b, c');
 select is(pg_temp.state('public.ta399'), :'a_state', 'A: its config and part rows are as they were');
-select is(pg_temp.mark(:'a_fwd'), 't postgres t', 'A: the forward cell keeps the mark, the dispatch and its role');
+select is(pg_temp.mark(:'a_fwd'), 't  t', 'A: the forward cell keeps the mark and the dispatch');
 select is(pg_temp.cmd(2), format('alter table public.ta399 detach partition public.%I concurrently', :'a_fwd'),
   'A: the administrator''s job still holds the detach');
 select is(pg_temp.cmd(1), 'alter table public.elsewhere399 detach partition public.elsewhere399_p1 concurrently',

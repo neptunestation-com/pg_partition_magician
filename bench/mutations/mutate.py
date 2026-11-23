@@ -18567,7 +18567,7 @@ MUTATIONS["retire_completion_refuses_retiring_role"] = (
       "  if r.retiring_at is not null and not pgpm._detach_job_vouched(false, null) then\n", 1)],
 )
 # retire()'s idle of a landed detach (#1498): pgpm._idle_landed_detach. Its scope and its exception, one bite each.
-IDLE_LANDED_SCOPE = "and ($1 is null or j.username = $1)'\n"
+IDLE_LANDED_SCOPE = "       || case when p_by is not null then ' and j.username = $1' else '' end\n"
 MUTATIONS["retire_landed_idle_unscoped"] = (
     "bench/retire_landed_idle_scoped.sh",
     "Issue #1498's defect: retire()'s idle of a landed detach resets every pgpm_detach job the caller sees whoever "
@@ -18581,15 +18581,30 @@ MUTATIONS["retire_landed_idle_no_null_fallback"] = (
     "Issue #1498, the over-narrow fix: only the recorded role's job is reset, so none when retiring_by is null (two "
     "roles dispatched it) or names a role that reads every job, and a job armed with the dropped partition's detach "
     "stays armed (#407). tests/400 parts A and C catch it.",
-    [(IDLE_LANDED_SCOPE, "and j.username = $1'\n", 1)],
+    [(IDLE_LANDED_SCOPE, "       || ' and j.username = $1'\n", 1)],
 )
-MUTATIONS["retire_landed_idle_superuser_own_job"] = (
+MUTATIONS["dispatch_records_role_that_armed_others"] = (
     "bench/retire_landed_idle_scoped.sh",
-    "Issue #1498, the fix on a wrong premise: a superuser's record scoped to the superuser's own job, though its "
-    "dispatch armed every role's, so another role's job keeps the dropped partition's detach (#407). tests/400 part A "
-    "catches it.",
-    [("    using (select rolname from pg_roles where rolname = p_by and not rolsuper and not rolbypassrls), p_parent, p_child;\n",
-      "    using p_by, p_parent, p_child;\n", 1)],
+    "Issue #1498, Codex's P2 on #1499: the dispatch records its role (retiring_by) though it armed other roles' jobs "
+    "too, as a superuser's does, so the scope is read later off the role, and a superuser demoted since vouches for its "
+    "own completion and idles its own job alone, and another superuser's completion resets that job alone: every "
+    "other role's job keeps the dropped partition's detach (#407). tests/400 parts A and D catch it.",
+    [("                                                 and not pgpm._dispatch_reached_others()\n", "", 1)],
+)
+MUTATIONS["unrecord_wide_dispatchers_noop"] = (
+    "bench/retire_landed_idle_scoped.sh",
+    "Issue #1498, the upgrade half: a dispatched mark an older release recorded for a superuser keeps its role, so "
+    "the scoped idle reaches that role's job alone though its dispatch armed every role's. tests/400 part E catches it.",
+    [("                and exists (select 1 from pg_roles r where r.rolname = p.retiring_by and (r.rolsuper or r.rolbypassrls))\n",
+      "                and false\n", 1)],
+)
+MUTATIONS["idle_landed_scope_assumes_username"] = (
+    "bench/retire_landed_idle_scoped.sh",
+    "Issue #1498, the scope read off a column that may not be there: a cron.job with no username column keeps no job "
+    "per role, so the dispatch records its role, and an idle that scopes by username anyway errors, is swallowed, and "
+    "leaves every job armed with the dropped partition's detach (#407). tests/400 part F catches it.",
+    [("                                              and not attisdropped) then\n    p_by := null;\n  end if;\n",
+      "                                              and not attisdropped) then\n    null;\n  end if;\n", 1)],
 )
 MUTATIONS["retire_landed_idle_clobbers_dispatch"] = (
     "bench/retire_landed_idle_scoped.sh",

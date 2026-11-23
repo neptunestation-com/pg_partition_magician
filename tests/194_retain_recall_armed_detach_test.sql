@@ -760,8 +760,8 @@ select is(pgpm_test194.mark('public.rr194o', '0'), format('retiring_at set, disp
 select is(pgpm_test194.idle_at('public.rr194o', '0'), 'null', 'O: and read no idle: its own job is not the one');
 select ok((select count(*) from pgpm.log where parent_table = 'public.rr194o'::regclass and lo = '0' and action = 'fail_retain_recall') = 2
           and (select method from pgpm.log where parent_table = 'public.rr194o'::regclass and lo = '0' and action = 'fail_retain_recall'
-                order by id desc limit 1) ~ 'Run maintenance as role postgres',
-  'O: each tick logs fail_retain_recall, naming the role that dispatched');
+                order by id desc limit 1) ~ 'Run maintenance as a superuser',
+  'O: each tick logs fail_retain_recall, naming a superuser to run as: the administrator''s dispatch armed the owner''s job too');
 select ok(pgpm_test194.cron_run(:'o_cmd') <> 'ERROR' and not pgpm_test194.attached('public.rr194o', :'o_doomed'),
   'LIVENESS: (O) the administrator''s job lands the detach');
 call pgpm.maintain('public.rr194o');

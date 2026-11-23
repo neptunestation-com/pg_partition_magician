@@ -129,7 +129,7 @@ select format('alter table public.%I rename to ra398_kept', :'a_doomed') \gexec
 reset role;
 select ok(pg_temp.renamed('public.ra398', '0', :'a_doomed', 'ra398_kept'),
   'LIVENESS: (A) the owner renamed the detached retirement: the rename release''s state');
-select is(pg_temp.mark('public.ra398', '0'), 't postgres t', 'LIVENESS: (A) the mark records the administrator''s dispatch');
+select is(pg_temp.mark('public.ra398', '0'), 't  t', 'LIVENESS: (A) the mark records the dispatch, and no role: the administrator''s armed every role''s job');
 set role pgpm_test398_owner;
 select set_config('t398.a_seen', (select string_agg(format('%s:%s', username, command), ',') from cron.job), false);
 select set_config('t398.a', pgpm.retire('public.ra398', :'a_doomed')::text, false);
@@ -138,7 +138,7 @@ select is(current_setting('t398.a_seen'),
   'pgpm_test398_owner:alter table public.elsewhere398 detach partition public.elsewhere398_p1 concurrently',
   'LIVENESS: (A) the owner sees one job, its own, holding another table''s detach');
 select is(current_setting('t398.a'), 'false', 'A: the owner''s retire() returns false');
-select is(pg_temp.mark('public.ra398', '0'), 't postgres t', 'A: the row keeps the mark, the dispatch and its role');
+select is(pg_temp.mark('public.ra398', '0'), 't  t', 'A: the row keeps the mark and the dispatch');
 select is(pg_temp.ids('ra398_kept'), array[1, 2, 3]::bigint[], 'A: the renamed table stands, with ids 1, 2, 3');
 select is(pg_temp.cmd(2), pg_temp.detach('ra398', :'a_doomed'),
   'A: the administrator''s job still holds the detach, for the tick that releases it');
@@ -148,7 +148,7 @@ select is(pg_temp.actions('public.ra398', '0'), array['retain_detach', 'fail_ret
   'A: logged fail_retain_drop, and no retain_disown');
 select ok(pg_temp.method('public.ra398', '0', 'fail_retain_drop')
             ~ ('^public\.' || :'a_doomed' || ' is out of the parent and renamed \(oid ' || 'public.ra398_kept'::regclass::oid
-               || '\), and role pgpm_test398_owner cannot read every pgpm_detach job that may still hold its detach .*its retirement mark is kept, not released\. Run maintenance as role postgres or a superuser, and its tick releases it to you$'),
+               || '\), and role pgpm_test398_owner cannot read every pgpm_detach job that may still hold its detach .*its retirement mark is kept, not released\. Run maintenance as a superuser, and its tick releases it to you$'),
   'A: naming the renamed table, the role that cannot read the job and the role to run as');
 select ok((select retain_drop_failures from pgpm.status() where parent = 'public.ra398'::regclass) > 0, 'A: and status() counts it');
 select is(pgpm.retire('public.ra398', :'a_doomed'), false, 'A: a superuser''s retire() releases it, and drops nothing');
@@ -204,7 +204,7 @@ exception when others then
 end $$;
 reset role;
 select ok(current_setting('t398.b_fm') ~ ('^P0001 pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid '
-            || :b_oid || ' was retiring ' || :'b_doomed' || ', whose detach pgpm dispatched .*as role postgres or a superuser\.$'),
+            || :b_oid || ' was retiring ' || :'b_doomed' || ', whose detach pgpm dispatched .*as a superuser\.$'),
   'B: the owner''s forget_missing() is refused, naming the role to run it as');
 select is(pg_temp.cmd(2), pg_temp.detach('rb398', :'b_doomed'),
   'LIVENESS: (B) the administrator''s job still holds the detach of the recorded name');
@@ -234,13 +234,13 @@ set role pgpm_test398_owner;
 select pgpm.set_retain('public.rc398', '1000');
 reset role;
 select is(pg_temp.actions('public.rc398', '20'), array['retain_detach'], 'C: the owner''s set_retain reads only: nothing logged');
-select is(pg_temp.mark('public.rc398', '20'), 't postgres t', 'C: and the mark is kept');
+select is(pg_temp.mark('public.rc398', '20'), 't  t', 'C: and the mark is kept');
 set role pgpm_test398_owner;
 select pgpm.retain('public.rc398');
 reset role;
 select ok(pg_temp.actions('public.rc398', '20') && array['fail_retain_recall', 'retain_disown'],
   'LIVENESS: (C) the owner''s calls reached the release of the renamed retirement');
-select is(pg_temp.mark('public.rc398', '20'), 't postgres t', 'C: the owner''s tick keeps the mark, the dispatch and its role');
+select is(pg_temp.mark('public.rc398', '20'), 't  t', 'C: the owner''s tick keeps the mark and the dispatch');
 select is(pg_temp.cmd(2), pg_temp.detach('rc398', :'c_doomed'), 'C: the administrator''s job still holds the detach');
 select is(pg_temp.cmd(1), 'alter table public.elsewhere398 detach partition public.elsewhere398_p3 concurrently',
   'C: and the owner''s job keeps the other table''s detach');
@@ -248,7 +248,7 @@ select is(pg_temp.actions('public.rc398', '20'), array['retain_detach', 'fail_re
   'C: logged fail_retain_recall, and no retain_disown');
 select ok(pg_temp.method('public.rc398', '20', 'fail_retain_recall')
             ~ ('^retention no longer reaches public\.' || :'c_doomed' || ', which is out of the parent and renamed \(oid ' || 'public.rc398_kept'::regclass::oid
-               || '\), but role pgpm_test398_owner cannot read every pgpm_detach job .*its retirement mark is kept, not released\. Run maintenance as role postgres or a superuser, and its tick releases it to you$'),
+               || '\), but role pgpm_test398_owner cannot read every pgpm_detach job .*its retirement mark is kept, not released\. Run maintenance as a superuser, and its tick releases it to you$'),
   'C: naming the renamed table, the role that cannot read the job and the role to run as');
 select ok((select retain_drop_failures from pgpm.status() where parent = 'public.rc398'::regclass) > 0, 'C: and status() counts it');
 select pgpm.retain('public.rc398');
@@ -274,7 +274,7 @@ set role pgpm_test398_owner;
 select pgpm.set_retain('public.rd398', '1000');
 select pgpm.retain('public.rd398');
 reset role;
-select is(pg_temp.mark('public.rd398', '40'), 't postgres t', 'D: the owner''s tick keeps the mark');
+select is(pg_temp.mark('public.rd398', '40'), 't  t', 'D: the owner''s tick keeps the mark');
 drop table public.rd398_ref;
 drop table public.rd398;
 create table public.rd398 (id bigint primary key, payload text);

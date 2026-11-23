@@ -140,7 +140,7 @@ for _ in $(seq 1 300); do kill -0 "$owner_pid" 2>/dev/null || break; sleep 0.1; 
 wait
 
 check "LIVENESS: the administrator's retire() committed, no error" "$(grep -c ERROR "$work/admin.out")/$(grep -cx f "$work/admin.out")" "0/1"
-refused=$(grep -c "^ERROR:  pg_partition_magician: untransmute refused, nothing changed: rr is retiring $fwd, whose detach pgpm dispatched to a pgpm_detach cron job, and role $OWNER cannot read every job that may hold it .*Run select pgpm.untransmute('rr'); as role postgres or a superuser\.$" "$work/owner.out")
+refused=$(grep -c "^ERROR:  pg_partition_magician: untransmute refused, nothing changed: rr is retiring $fwd, whose detach pgpm dispatched to a pgpm_detach cron job, and role $OWNER cannot read every job that may hold it .*Run select pgpm.untransmute('rr'); as a superuser\.$" "$work/owner.out")
 check "the owner's untransmute was refused under the lock" "$refused" "1"
 [ "$refused" = 1 ] || sed 's/^/      /' "$work/owner.out" | head -5
 check "the table is still partitioned, with rows a, b, c" \

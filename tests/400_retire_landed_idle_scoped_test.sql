@@ -15,17 +15,24 @@
 --   PART B  a non-superuser alone dispatched it (retiring_by): a superuser's completion resets that role's job and
 --           leaves every other role's job as it was, whatever it holds.
 --   PART C  two roles dispatched it (retiring_by null): every job is reset, one holding no mark's detach included.
+--   PART D  the scope is recorded at the dispatch, never read off the role later: a superuser's dispatch records no
+--           role, so once that role is demoted its own tick is deferred (it sees only its own job), and another
+--           superuser's completion resets every job.
+--   PART F  a cron.job with no username column keeps no job per role: the dispatch records its role, and the idle
+--           still reaches every job (it scopes by a column that is not there to read).
+--   PART E  every install clears the role of a dispatched mark an older release recorded for a role that reads every
+--           job (pgpm._unrecord_wide_dispatchers), and only that.
 --
 -- pg_cron exists only in the `postgres` database on the harness images, so this file brings a stand-in for cron.job
 -- (with pg_cron's username column and its row-security policy) and cron.alter_job, as tests/397 does, and runs a
 -- job's command with \gexec at the top level, as pg_cron does. What a non-superuser observes goes through set_config.
 --
--- ASYMMETRIC FIXTURES. Each table's retiring partition holds a different id set (ra 1-2, rb 3-5, rd 6-9), and the
--- three jobs hold different commands, so an assertion aimed at the wrong job or table cannot pass.
+-- ASYMMETRIC FIXTURES. Each table's retiring partition holds a different id set (ra 1-2, rb 3-5, rd 6-9, re 0 and 9, rf 1-2, rg 4-5),
+-- and the jobs hold different commands, so an assertion aimed at the wrong job or table cannot pass.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(30);
+select plan(49);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -106,7 +113,8 @@ select pg_temp.finish_mk('rb400', null) as rb \gset
 select is(pgpm.retire('public.rb400', :'rb'), false, 'LIVENESS: (A) the administrator''s retire() dispatches rb400''s detach');
 select is(array[pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3)], array_fill(pg_temp.det('rb400', :'rb'), array[3]),
   'LIVENESS: (A) the superuser''s dispatch armed every role''s job');
-select is(pg_temp.mark('public.rb400'), 't postgres t', 'LIVENESS: (A) the mark records the administrator''s dispatch');
+select is(pg_temp.mark('public.rb400'), 't  t',
+  'A: the mark records the dispatch and no role: the superuser''s armed every role''s job (_dispatch_reached_others)');
 select pg_temp.cmd(2) \gexec
 select ok(not pg_temp.attached('public.rb400', :'rb'), 'LIVENESS: (A) the administrator''s job landed rb400''s detach');
 set role pgpm_test400_owner;
@@ -166,5 +174,89 @@ select is(array[pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3)], array['select 1
   'C: every job is idle, the one holding a detach no mark records included');
 select is((select array_agg(id order by id) from public.rd400), array[55]::bigint[],
   'C: and rd400 keeps only its frontier row, ids 6 to 9 retired with the partition');
+
+
+-- ==================== (D) a superuser dispatches, is demoted, and another superuser completes ====================
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'pgpm_test400_admin') then
+    create role pgpm_test400_admin superuser nobypassrls;
+  end if;
+end $$;
+alter role pgpm_test400_admin superuser nobypassrls;   -- a re-run finds it demoted
+grant usage on schema pgpm to pgpm_test400_admin;
+grant all on all tables in schema pgpm to pgpm_test400_admin;
+grant all on all sequences in schema pgpm to pgpm_test400_admin;
+grant usage on schema cron to pgpm_test400_admin;
+grant select, update on cron.job to pgpm_test400_admin;
+insert into cron.job values (4, 'pgpm_detach', current_database(), 'select 1', 'pgpm_test400_admin');
+update cron.job set command = 'alter table public.elsewhere400 detach partition public.elsewhere400_p5 concurrently' where jobid = 3;
+select pg_temp.mk('re400', array[0, 9]);
+call pgpm.transmute('public.re400', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
+select pg_temp.finish_mk('re400', 'pgpm_test400_admin') as re \gset
+set role pgpm_test400_admin;
+select set_config('t400.d', pgpm.retire('public.re400', :'re')::text, false);
+reset role;
+select is(current_setting('t400.d'), 'false', 'LIVENESS: (D) the admin''s retire(), a superuser''s, dispatches re400''s detach');
+select is(array[pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3), pg_temp.cmd(4)], array_fill(pg_temp.det('re400', :'re'), array[4]),
+  'LIVENESS: (D) and its dispatch armed all four roles'' jobs');
+select is(pg_temp.mark('public.re400'), 't  t', 'D: the mark records the dispatch and no role');
+alter role pgpm_test400_admin nosuperuser;
+select ok(not rolsuper and not rolbypassrls, 'LIVENESS: (D) the admin is demoted') from pg_roles where rolname = 'pgpm_test400_admin';
+select pg_temp.cmd(4) \gexec
+select ok(not pg_temp.attached('public.re400', :'re'), 'LIVENESS: (D) the admin''s job landed re400''s detach');
+set role pgpm_test400_admin;
+select set_config('t400.d2', pgpm.retire('public.re400', :'re')::text, false);
+reset role;
+select is(current_setting('t400.d2'), 'false', 'D: the demoted admin''s tick does not complete it');
+select ok((select method from pgpm.log where parent_table = 'public.re400'::regclass and lo = '0' and action = 'fail_retain_drop')
+            ~ ('^public\.' || :'re' || ' is detached by its retirement, and role pgpm_test400_admin cannot read every pgpm_detach job .*Run maintenance as a superuser, and its tick drops it$'),
+  'D: it logs fail_retain_drop naming a superuser to run as');
+select is(array[pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3)], array_fill(pg_temp.det('re400', :'re'), array[3]),
+  'D: and the other roles'' jobs still hold re400''s detach, for the tick that completes it');
+select is(pgpm.retire('public.re400', :'re'), true, 'LIVENESS: (D) another superuser''s retire() completes re400');
+select ok(pg_temp.dropped('public.re400', :'re'), 'LIVENESS: (D) dropping its partition, retain_drop logged');
+select is(array[pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3), pg_temp.cmd(4)], array['select 1', 'select 1', 'select 1', 'select 1'],
+  'D: every role''s job is idle, the demoted admin''s and the three it armed as a superuser');
+
+-- ==================== (F) a cron.job with no username column: every job ====================
+drop policy pgpm_test400_own on cron.job;
+alter table cron.job disable row level security;
+alter table cron.job drop column username;
+update cron.job set command = 'alter table public.elsewhere400 detach partition public.elsewhere400_p6 concurrently' where jobid = 3;
+select pg_temp.mk('rg400', array[4, 5]);
+call pgpm.transmute('public.rg400', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
+select pg_temp.finish_mk('rg400', null) as rg \gset
+select is(pgpm.retire('public.rg400', :'rg'), false, 'LIVENESS: (F) the administrator''s retire() dispatches rg400''s detach');
+select is(pg_temp.mark('public.rg400'), 't postgres t', 'F: with no job per role, the dispatch records its role');
+update cron.job set command = 'alter table public.elsewhere400 detach partition public.elsewhere400_p6 concurrently' where jobid = 3;
+select pg_temp.cmd(2) \gexec
+select ok(not pg_temp.attached('public.rg400', :'rg'), 'LIVENESS: (F) the job landed rg400''s detach');
+select is(pgpm.retire('public.rg400', :'rg'), true, 'LIVENESS: (F) the administrator''s retire() completes rg400');
+select is(array[pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3), pg_temp.cmd(4)], array['select 1', 'select 1', 'select 1', 'select 1'],
+  'F: and every job is idle: there is no username to scope by');
+
+-- ==================== (E) the install clears a role an older release recorded for a wide dispatch ====================
+select pg_temp.mk('rf400', array[1, 2]);
+call pgpm.transmute('public.rf400', 'id', 10::bigint, p_obtain => 6, p_paused => true);
+-- three rows, the lowest three cells: a superuser's dispatched mark, a non-superuser's, and a superuser's undispatched one
+create temp table rf400_rows as
+  select child_name, row_number() over (order by lo::bigint) as k from pgpm.part where parent_table = 'public.rf400'::regclass;
+update pgpm.part p set retiring_at = now(),
+                       detach_dispatched_oid = case when f.k < 3 then p.child_oid end,
+                       retiring_by = case f.k when 2 then 'pgpm_test400_owner' else 'postgres' end
+  from rf400_rows f where p.parent_table = 'public.rf400'::regclass and p.child_name = f.child_name and f.k <= 3;
+select is((select count(*) from pgpm.part p join rf400_rows f using (child_name)
+            where p.parent_table = 'public.rf400'::regclass and f.k <= 3 and p.retiring_at is not null), 3::bigint,
+  'LIVENESS: (E) three marks, as an older release left them');
+select is(pgpm._unrecord_wide_dispatchers(), 1, 'E: the backfill clears one mark');
+select is((select array_agg(format('%s:%s:%s', f.k, p.retiring_by, p.detach_dispatched_oid is not null) order by f.k)
+             from pgpm.part p join rf400_rows f using (child_name)
+            where p.parent_table = 'public.rf400'::regclass and f.k <= 3),
+          array['1::t', '2:pgpm_test400_owner:t', '3:postgres:f'],
+  'E: the superuser''s dispatched mark, and neither a non-superuser''s nor a never-dispatched one');
+-- the hand-made marks go, so nothing is left marked with no job holding it
+update pgpm.part set retiring_at = null, retiring_by = null, detach_dispatched_oid = null
+ where parent_table = 'public.rf400'::regclass;
 
 select * from finish();
