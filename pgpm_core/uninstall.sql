@@ -5,7 +5,10 @@
 -- Removed:
 --   * schema pgpm and everything in it: config, part, log, the registry tables, every
 --     function and view, the version record
---   * every pg_cron job pgpm scheduled (matched by the pgpm prefix)
+--   * this database's pg_cron jobs pgpm scheduled (matched by the pgpm prefix, removed by jobid), once schema pgpm
+--     is gone. pg_cron shows a role that is not a superuser only its own jobs, so such a caller removes only those,
+--     and a WARNING gives the query a superuser runs to find any other role's (a role that ran pgpm.schedule() keeps
+--     its pgpm, pgpm_obtain and pgpm_detach jobs, which fail on every run once pgpm is gone)
 --   * the pgpm_write_block triggers on frozen children (their function lives in pgpm,
 --     so the schema drop takes them)
 --   * regrain's change capture, which lives in the PARENT's schema and so is out of the
@@ -39,6 +42,10 @@
 --     that is still NOT VALID, since nothing will validate it once pgpm is gone.
 --
 -- Refused, dropping nothing:
+--   * while a retirement's detach may sit in a pgpm_detach job this role cannot see: one another role's tick
+--     dispatched (pg_cron shows a role only its own jobs). Removing pgpm would leave that job armed, and its next run
+--     would take the partition out of the table with nothing logged. The error names each partition and who can run
+--     the uninstall (that role, or a superuser). A superuser reads every role's job and is never refused here.
 --   * while anything outside schema pgpm depends on an object in it: a view of the operator's over
 --     pgpm.status() or pgpm.log, a function of theirs taking or returning a pgpm type, a column of one, a
 --     default, constraint or policy calling a pgpm function. The schema drop's CASCADE would take each
@@ -59,20 +66,6 @@
 -- `select pgpm.transmute_abort('schema.table')` for any such table BEFORE this script.
 --
 -- Run with: psql --single-transaction -f pgpm_core/uninstall.sql
-
--- Unschedule every pgpm cron job (matched by prefix so this stays correct as the
--- cron surface evolves). Best-effort and tolerant of missing pg_cron / privileges.
-do $$
-begin
-  if exists (select 1 from pg_extension where extname = 'pg_cron') then
-    perform cron.unschedule(jobname) from cron.job where jobname like 'pgpm%';
-  end if;
-exception
-  when undefined_table then null;
-  when undefined_function then null;
-  when insufficient_privilege then null;
-end;
-$$;
 
 -- Every table and function the blocks below drop because pgpm's records name it (regrain's change capture,
 -- from_hypertable's scratch) is dropped through this, by its oid (#1357). A name rendered before a wait is whatever
@@ -136,8 +129,44 @@ declare
   r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
   v_nsp name; v_delta name; v_fnsp name; v_copies_q text; v_delta_oid oid; v_fn_oid oid;
   v_dependants_q text;   -- #1040: what outside pgpm the schema drop would take with it, named for the refusal
+  v_retiring_q text; v_who_q text;   -- #1496: the retirements a job this role cannot see may hold, and who can
 begin
-  if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
+  <<uninstall>>   -- the removal; the jobs are unscheduled after it, below, and on a re-run too
+  begin
+  if to_regnamespace('pgpm') is null then exit uninstall; end if;   -- a re-run: only jobs can be left
+
+  -- #1496: REFUSED, AHEAD OF EVERYTHING, while a retirement's detach may sit in a pgpm_detach job this role cannot
+  -- see. pg_cron keeps a job per role that ran pgpm.schedule() and shows a role only its own, so the table owner's
+  -- uninstall removed pgpm and the record of a detach the administrator's tick had dispatched, left that job armed,
+  -- and its next run took the partition out of the table, nothing logged. Who can vouch is _detach_job_vouched's rule,
+  -- as for untransmute (#1489) and forget_missing (#1461). Under SHARE on pgpm.part, which retire()'s mark and
+  -- dispatch (one transaction, a row write) wait out, so under --single-transaction the answer holds to the drop: a
+  -- dispatch committed while this waited is read here, and one still waiting fails (on the dropped schema, or as a
+  -- deadlock's victim, whichever side that is), its arming rolled back with it. An install older than the helper
+  -- refuses on every mark for anyone but a superuser.
+  if to_regclass('pgpm.part') is not null then
+    lock table pgpm.part in share mode;
+    if to_regprocedure('pgpm._detach_job_vouched(boolean,name)') is not null then
+      select string_agg(format('%s retiring %I', p.parent_table, p.child_name), ', ' order by p.parent_table::text, p.child_name),
+             case when bool_and(p.detach_dispatched_oid is not null and p.retiring_by is not null)
+                   and count(distinct p.retiring_by) = 1
+                  then format('role %I or a superuser', min(p.retiring_by)) end
+        into v_retiring_q, v_who_q
+        from pgpm.part p
+       where p.retiring_at is not null
+         and not pgpm._detach_job_vouched(p.detach_dispatched_oid is not null, p.retiring_by);
+    elsif exists (select 1 from pg_attribute where attrelid = 'pgpm.part'::regclass and attname = 'retiring_at' and not attisdropped)
+      and exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'cron' and c.relname = 'job')
+      and not exists (select 1 from pg_roles where rolname = current_user and rolsuper) then
+      select string_agg(format('%s retiring %I', p.parent_table, p.child_name), ', ' order by p.parent_table::text, p.child_name)
+        into v_retiring_q
+        from pgpm.part p where p.retiring_at is not null;
+    end if;
+    if v_retiring_q is not null then
+      raise exception 'pg_partition_magician: uninstall refused, nothing changed: %, whose detach pgpm dispatched, or may have, to a pgpm_detach cron job, and role % cannot read every job that may hold it (pg_cron shows a role only its own). The uninstall removes pgpm and its record of the retirement, and a job left armed re-runs that detach on every run, with nothing left to stop it. Run this script as %.',
+        v_retiring_q, current_user, coalesce(v_who_q, 'a superuser');
+    end if;
+  end if;
 
   -- #1040: `drop schema pgpm cascade` takes everything that depends on an object in pgpm, wherever it lives: a view
   -- of the operator's over pgpm.status() or pgpm.log in their own schema, a function of theirs taking or returning a
@@ -426,5 +455,26 @@ begin
   end loop;
 
   drop schema if exists pgpm cascade;
+  end uninstall;
+
+  -- Unschedule pgpm's cron jobs (matched by the pgpm prefix, so this stays correct as the cron surface evolves), in
+  -- this block, after the schema drop: a refusal above, or a failure, leaves every job as it was, whatever the client
+  -- does after it. By jobid (#1500): cron.unschedule(name) looks the name up among the CALLER's jobs alone, so a
+  -- superuser reaching a second role's 'pgpm' raised "could not find valid entry" and the script rolled back. Only
+  -- this database's: pgpm.schedule() schedules each one in current_database(), and another database's pgpm keeps its
+  -- own. pg_cron shows a role that is not a superuser only its own jobs, so such a caller removes only those, and
+  -- another role's idle jobs fail on every run from then on: the WARNING gives the query that finds them (#1496; an
+  -- armed one is refused above). Tolerant of a missing pg_cron and of missing privileges on it.
+  if exists (select 1 from pg_extension where extname = 'pg_cron') then
+    begin
+      perform cron.unschedule(jobid) from cron.job where jobname like 'pgpm%' and database = current_database();
+    exception
+      when undefined_table or undefined_function or insufficient_privilege then null;
+    end;
+    if not exists (select 1 from pg_roles where rolname = current_user and rolsuper) then
+      raise warning 'pg_partition_magician: role % is not a superuser, and pg_cron shows such a role only its own jobs, so this removed only role %''s pgpm jobs. Any other role that ran pgpm.schedule() in this database keeps its pgpm, pgpm_obtain and pgpm_detach jobs, which fail on every run now that pgpm is gone. As a superuser, find them (select jobid, username, jobname from cron.job where jobname like ''pgpm%%'' and database = current_database();) and remove each (select cron.unschedule(jobid);).',
+        current_user, current_user;
+    end if;
+  end if;
 end;
 $$;

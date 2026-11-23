@@ -202,6 +202,19 @@ at the table's current name when you add the key yourself. A key you add counts 
 the same table, under the same name, against the managed table. One that merely takes the name, against
 another table, does not, and uninstall goes on refusing.
 
+Uninstall also **refuses**, removing nothing, while a partition's retirement may be held by a `pgpm_detach` cron
+job the role running it cannot see. pg_cron keeps a job per role that ran `pgpm.schedule()` and shows a role
+other than a superuser only its own, so when another role's maintenance tick (an administrator's, say) handed a
+partition's detach to its job, removing pgpm would leave that job armed, and its next run would take the
+partition out of your table with nothing logged. The error names each partition and who can run the uninstall:
+that role, or a superuser. A superuser sees every role's job and is not refused for this.
+
+The cron jobs go only once the `pgpm` schema is gone, so a refusal leaves them all as they were. They are removed
+by job id, and only this database's: a superuser removes every role's. Any other role removes only its own (a
+complete uninstall when that role alone ran `pgpm.schedule()`, so no superuser is needed then), and a `WARNING`
+says so and gives the query that finds another role's: such a job (`pgpm`, `pgpm_obtain`, `pgpm_detach`) fails on
+every run once pgpm is gone, until a superuser removes it with `cron.unschedule(jobid)`.
+
 ```bash
 psql "$DATABASE_URL" --single-transaction -f pgpm_core/uninstall.sql
 ```
