@@ -145,7 +145,7 @@ check "the owner's untransmute was refused under the lock" "$refused" "1"
 [ "$refused" = 1 ] || sed 's/^/      /' "$work/owner.out" | head -5
 check "the table is still partitioned, with rows a, b, c" \
   "$(v "select relkind from pg_class where oid = 'public.rr'::regclass")/$(v "select string_agg(payload, ',' order by ts) from public.rr")" "p/a,b,c"
-check "the forward cell keeps the administrator's mark" "$(mark)" "t postgres t"
+check "the forward cell keeps the mark and the dispatch (no role: the administrator's dispatch armed the owner's job too)" "$(mark)" "t  t"
 check "the administrator's job still holds the detach" "$(v "select command from cron.job where jobid = 2")" "$detach"
 check "a superuser's untransmute then reverses it" "$(v "select pgpm.untransmute('public.rr')")" "rr"
 check "and idles the administrator's job" "$(v "select command from cron.job where jobid = 2")" "select 1"

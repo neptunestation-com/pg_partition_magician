@@ -17,6 +17,8 @@
 #   retire_landed_idle_clobbers_dispatch   -- the job holding another mark's pending detach reset too. Part A.
 #   idle_landed_scope_assumes_username     -- scoped by a username column cron.job does not have: nothing idled.
 #                                             Part F.
+#   retiring_by_kept_on_other_roles_dispatch -- a second non-superuser's re-dispatch keeps the first role's name
+#                                             (#1459's mutation; tests/194 no longer reaches it). Part G.
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's catalog and its
 # row security). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted

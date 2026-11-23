@@ -5888,10 +5888,11 @@ $$;''',
           "      ;\n", 1)],
     ),
     "retiring_by_kept_on_other_roles_dispatch": (
-        "bench/retain_recall_armed_detach.sh",
-        "PR #1459 round 2: a re-dispatch by another role keeps the first role's name, but a superuser's dispatch arms "
-        "every role's job, so the owner, reading its own job idle, clears the mark a minute on with the "
-        "administrator's job still holding the detach. One site, the dispatch's record. tests/194 part S catches it.",
+        "bench/retire_landed_idle_scoped.sh",
+        "PR #1459 round 2: a re-dispatch by another role keeps the first role's name, though the first role's job still "
+        "holds the detach, so the second role vouches for the retirement and idles its own job alone. Since #1498 a "
+        "superuser's dispatch records no role whatever this clause says (tests/194 part S, which caught it first, no "
+        "longer reaches it), so two non-superusers' dispatches carry it: tests/400 part G catches it.",
         [("                                                 and (detach_dispatched_oid is null or retiring_by = current_user)\n",
           "                                                 and true\n", 1)],
     ),

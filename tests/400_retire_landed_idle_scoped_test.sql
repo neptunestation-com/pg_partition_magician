@@ -18,6 +18,8 @@
 --   PART D  the scope is recorded at the dispatch, never read off the role later: a superuser's dispatch records no
 --           role, so once that role is demoted its own tick is deferred (it sees only its own job), and another
 --           superuser's completion resets every job.
+--   PART G  two non-superusers dispatched it, each arming its own job: the record names neither, so neither's tick
+--           completes it (each idles only its own job), and a superuser's idles both.
 --   PART F  a cron.job with no username column keeps no job per role: the dispatch records its role, and the idle
 --           still reaches every job (it scopes by a column that is not there to read).
 --   PART E  every install clears the role of a dispatched mark an older release recorded for a role that reads every
@@ -27,12 +29,12 @@
 -- (with pg_cron's username column and its row-security policy) and cron.alter_job, as tests/397 does, and runs a
 -- job's command with \gexec at the top level, as pg_cron does. What a non-superuser observes goes through set_config.
 --
--- ASYMMETRIC FIXTURES. Each table's retiring partition holds a different id set (ra 1-2, rb 3-5, rd 6-9, re 0 and 9, rf 1-2, rg 4-5),
+-- ASYMMETRIC FIXTURES. Each table's retiring partition holds a different id set (ra 1-2, rb 3-5, rd 6-9, re 0 and 9, rf 1-2, rg 4-5, rh 7-8),
 -- and the jobs hold different commands, so an assertion aimed at the wrong job or table cannot pass.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(49);
+select plan(55);
 
 create schema cron;
 create table cron.job (jobid bigint primary key, jobname text, database text, command text,
@@ -218,6 +220,37 @@ select is(pgpm.retire('public.re400', :'re'), true, 'LIVENESS: (D) another super
 select ok(pg_temp.dropped('public.re400', :'re'), 'LIVENESS: (D) dropping its partition, retain_drop logged');
 select is(array[pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3), pg_temp.cmd(4)], array['select 1', 'select 1', 'select 1', 'select 1'],
   'D: every role''s job is idle, the demoted admin''s and the three it armed as a superuser');
+
+-- ==================== (G) two non-superusers dispatched it ====================
+grant pgpm_test400_owner to pgpm_test400_other;   -- the other role acts on the owner's table; row security still shows it its own job
+grant usage on schema pgpm to pgpm_test400_other;
+grant all on all tables in schema pgpm to pgpm_test400_other;
+grant all on all sequences in schema pgpm to pgpm_test400_other;
+grant usage on schema cron to pgpm_test400_other;
+grant select, update on cron.job to pgpm_test400_other;
+update cron.job set command = 'select 1';
+select pg_temp.mk('rh400', array[7, 8]);
+call pgpm.transmute('public.rh400', 'id', 10::bigint, p_obtain => 6, p_retain => 30::bigint, p_paused => false);
+select pg_temp.finish_mk('rh400', 'pgpm_test400_owner') as rh \gset
+set role pgpm_test400_owner;
+select set_config('t400.g1', pgpm.retire('public.rh400', :'rh')::text, false);
+reset role;
+set role pgpm_test400_other;
+select set_config('t400.g2', pgpm.retire('public.rh400', :'rh')::text, false);
+reset role;
+select is(array[current_setting('t400.g1'), current_setting('t400.g2'), pg_temp.cmd(1), pg_temp.cmd(2), pg_temp.cmd(3)],
+          array['false', 'false', pg_temp.det('rh400', :'rh'), 'select 1', pg_temp.det('rh400', :'rh')],
+  'LIVENESS: (G) the owner''s and the other role''s retire() each armed its own job, and only its own');
+select is(pg_temp.mark('public.rh400'), 't  t', 'G: the mark records the dispatch and no role');
+select pg_temp.cmd(3) \gexec
+select ok(not pg_temp.attached('public.rh400', :'rh'), 'LIVENESS: (G) the other role''s job landed rh400''s detach');
+set role pgpm_test400_other;
+select set_config('t400.g3', pgpm.retire('public.rh400', :'rh')::text, false);
+reset role;
+select is(current_setting('t400.g3') || ' ' || pg_temp.cmd(1), 'false ' || pg_temp.det('rh400', :'rh'),
+  'G: the other role''s tick does not complete it, and the owner''s job still holds the detach');
+select is(pgpm.retire('public.rh400', :'rh'), true, 'LIVENESS: (G) a superuser''s retire() completes rh400');
+select is(array[pg_temp.cmd(1), pg_temp.cmd(3)], array['select 1', 'select 1'], 'G: and idles both roles'' jobs');
 
 -- ==================== (F) a cron.job with no username column: every job ====================
 drop policy pgpm_test400_own on cron.job;
