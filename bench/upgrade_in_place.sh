@@ -105,6 +105,8 @@ set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
 FRESH="${DB}_fresh"
 fail=0
+# #1034: scratch files in a directory of this run's own, not fixed /tmp paths two concurrent runs share
+TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 
 q()  { docker exec "$C" psql -U postgres -d "$1" -qtA -c "$2"; }
 run() { docker exec -e PGOPTIONS='-c client_min_messages=warning' "$C" \
@@ -196,20 +198,20 @@ routines() { q "$1" "$ROUTINES_SQL" | LC_ALL=C sort; }
 # ---------------------------------------------------------------------------- fresh oracle
 docker exec "$C" psql -U postgres -q -c "drop database if exists $FRESH" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $FRESH" >/dev/null 2>&1
-if ! install_into "$FRESH" >/tmp/up_fresh.log 2>&1; then
-  echo "FAIL  fixture: the fresh oracle install did not complete"; sed 's/^/      /' /tmp/up_fresh.log; exit 1
+if ! install_into "$FRESH" >"$TMPD/up_fresh.log" 2>&1; then
+  echo "FAIL  fixture: the fresh oracle install did not complete"; sed 's/^/      /' "$TMPD/up_fresh.log"; exit 1
 fi
-catalog "$FRESH" > /tmp/up_fresh_catalog.txt
+catalog "$FRESH" > "$TMPD/up_fresh_catalog.txt"
 # The catalog oracle must have read columns AND constraints, and some NOT NULL column among them, or the
 # comparison below is empty-equals-empty in the half that went unread.
-N_CATALOG=$(grep -c . /tmp/up_fresh_catalog.txt)
-if ! grep -q '^column .* nullable=NO ' /tmp/up_fresh_catalog.txt || ! grep -q '^constraint ' /tmp/up_fresh_catalog.txt; then
+N_CATALOG=$(grep -c . "$TMPD/up_fresh_catalog.txt")
+if ! grep -q '^column .* nullable=NO ' "$TMPD/up_fresh_catalog.txt" || ! grep -q '^constraint ' "$TMPD/up_fresh_catalog.txt"; then
   echo "FAIL  GUARD: the fresh catalog oracle read no NOT NULL column or no constraint: the catalog comparison would compare nothing"
-  sed 's/^/      /' /tmp/up_fresh_catalog.txt | head -5; exit 1
+  sed 's/^/      /' "$TMPD/up_fresh_catalog.txt" | head -5; exit 1
 fi
-routines "$FRESH" > /tmp/up_fresh_routines.txt
+routines "$FRESH" > "$TMPD/up_fresh_routines.txt"
 # The routine oracle must have read SOMETHING, or the identity comparison below is empty-equals-empty.
-N_ROUTINES=$(grep -c . /tmp/up_fresh_routines.txt)
+N_ROUTINES=$(grep -c . "$TMPD/up_fresh_routines.txt")
 if [ "$N_ROUTINES" -lt 1 ]; then
   echo "FAIL  GUARD: the fresh oracle lists no routines at all: the routine comparison would compare nothing"; exit 1
 fi
@@ -283,10 +285,10 @@ if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$ORIGIN_TAG^{commit}" >/dev
     printf '%s\n' "$out" | sed 's/^/      /'; exit 1
   fi
 fi
-if ! git -C "$ROOT" show "$ORIGIN_TAG:pgpm_core/install.sql" > "$ORIGIN_SQL" 2>/tmp/up_inflight_show.err \
+if ! git -C "$ROOT" show "$ORIGIN_TAG:pgpm_core/install.sql" > "$ORIGIN_SQL" 2>"$TMPD/up_inflight_show.err" \
    || [ ! -s "$ORIGIN_SQL" ]; then
   echo "FAIL  fixture: git show $ORIGIN_TAG:pgpm_core/install.sql produced nothing; the release origin verifies nothing"
-  sed 's/^/      /' /tmp/up_inflight_show.err; exit 1
+  sed 's/^/      /' "$TMPD/up_inflight_show.err"; exit 1
 fi
 
 # PRECONDITION, the column with NO backfill line (#1383). The check above derives the columns that must be
@@ -306,19 +308,19 @@ TABLE_COLS_SQL="select n.nspname||'.'||c.relname||':'||a.attname from pg_attribu
 docker exec "$C" psql -U postgres -q -c "drop database if exists $REL" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $REL" >/dev/null 2>&1
 if ! docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" \
-       psql -U postgres -q -d "$REL" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >/tmp/up_release.log 2>&1; then
-  echo "FAIL  fixture: the release install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/up_release.log; exit 1
+       psql -U postgres -q -d "$REL" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >"$TMPD/up_release.log" 2>&1; then
+  echo "FAIL  fixture: the release install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' "$TMPD/up_release.log"; exit 1
 fi
-q "$REL" "$TABLE_COLS_SQL" | LC_ALL=C sort > /tmp/up_release_cols.txt
+q "$REL" "$TABLE_COLS_SQL" | LC_ALL=C sort > "$TMPD/up_release_cols.txt"
 docker exec "$C" psql -U postgres -q -c "drop database if exists $REL" >/dev/null 2>&1
-q "$FRESH" "$TABLE_COLS_SQL" | LC_ALL=C sort > /tmp/up_fresh_cols.txt
-cut -d: -f1 /tmp/up_release_cols.txt | sort -u > /tmp/up_release_tables.txt
-since_release=$(LC_ALL=C comm -13 /tmp/up_release_cols.txt /tmp/up_fresh_cols.txt \
-  | while IFS=: read -r t c; do grep -qxF "$t" /tmp/up_release_tables.txt && echo "$t:$c"; done)
+q "$FRESH" "$TABLE_COLS_SQL" | LC_ALL=C sort > "$TMPD/up_fresh_cols.txt"
+cut -d: -f1 "$TMPD/up_release_cols.txt" | sort -u > "$TMPD/up_release_tables.txt"
+since_release=$(LC_ALL=C comm -13 "$TMPD/up_release_cols.txt" "$TMPD/up_fresh_cols.txt" \
+  | while IFS=: read -r t c; do grep -qxF "$t" "$TMPD/up_release_tables.txt" && echo "$t:$c"; done)
 # LIVENESS: both catalogs were read, and the comparison sees the columns added since the release (it already
 # has a dozen, regrain_source_mark among them), or "none unlisted" would be a comparison of nothing.
 check "LIVENESS: the $ORIGIN_TAG catalog read, columns added since it seen" \
-  "$([ "$(grep -c : /tmp/up_release_cols.txt)" -gt 20 ] && grep -qxF pgpm.config:regrain_source_mark <<<"$since_release" && echo yes)" "yes"
+  "$([ "$(grep -c : "$TMPD/up_release_cols.txt")" -gt 20 ] && grep -qxF pgpm.config:regrain_source_mark <<<"$since_release" && echo yes)" "yes"
 unlisted=$(printf '%s\n' "$since_release" | grep ':' | while read -r col; do
   printf '%s\n' "$DEGRADE_COLS" | grep -qxF "$col" || printf '%s ' "$col"
 done)
@@ -332,15 +334,15 @@ fi
 # The backfilled columns a fresh install declares NOT NULL, read from the fresh oracle (#1003). The
 # upgrade must leave a value in each on every row that predates it, as the constraint would have.
 NOTNULL_COLS=$(echo "$DEGRADE_COLS" | grep ':' | while IFS=: read -r t c; do
-  grep -qE "^column ${t#pgpm.}\\.$c .* nullable=NO default=" /tmp/up_fresh_catalog.txt && echo "$t:$c"
+  grep -qE "^column ${t#pgpm.}\\.$c .* nullable=NO default=" "$TMPD/up_fresh_catalog.txt" && echo "$t:$c"
 done | tr '\n' ' ')
 NOTNULL_COLS="${NOTNULL_COLS% }"
 
 # ---------------------------------------------------------------------------- an older install, with state
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
-if ! install_into "$DB" >/tmp/up_old.log 2>&1; then
-  echo "FAIL  fixture: the initial install did not complete"; sed 's/^/      /' /tmp/up_old.log; exit 1
+if ! install_into "$DB" >"$TMPD/up_old.log" 2>&1; then
+  echo "FAIL  fixture: the initial install did not complete"; sed 's/^/      /' "$TMPD/up_old.log"; exit 1
 fi
 
 # A managed table with real rows, created BEFORE the upgrade. Asymmetric: 3 in, 1 out, so a lost
@@ -406,8 +408,8 @@ ns_setup() {
              create function public.up_ns_pgpm_regrain_capture() returns trigger language plpgsql
                as 'begin insert into public.up_ns_audit values (1); return null; end'"
 }
-if ! ns_setup >/tmp/up_ns_setup.log 2>&1; then
-  echo "FAIL  fixture: the up_ns namesake fixture did not load"; sed 's/^/      /' /tmp/up_ns_setup.log; exit 1
+if ! ns_setup >"$TMPD/up_ns_setup.log" 2>&1; then
+  echo "FAIL  fixture: the up_ns namesake fixture did not load"; sed 's/^/      /' "$TMPD/up_ns_setup.log"; exit 1
 fi
 NS_DELTA=$(q "$DB" "select 'public.up_ns_pgpm_regrain_delta'::regclass::oid")
 NS_FN=$(q "$DB" "select 'public.up_ns_pgpm_regrain_capture()'::regprocedure::oid")
@@ -443,17 +445,17 @@ done | grep -c 1)
 check "LIVENESS: the degrade really removed all $N_DEGRADE columns" "$still" "0"
 
 # ---------------------------------------------------------------------------- the upgrade
-if ! install_into "$DB" >/tmp/up_upgrade.log 2>&1; then
-  echo "FAIL  the in-place upgrade did not complete"; sed 's/^/      /' /tmp/up_upgrade.log; fail=1
+if ! install_into "$DB" >"$TMPD/up_upgrade.log" 2>&1; then
+  echo "FAIL  the in-place upgrade did not complete"; sed 's/^/      /' "$TMPD/up_upgrade.log"; fail=1
 fi
 
-catalog "$DB" > /tmp/up_catalog.txt
-if cmp -s /tmp/up_fresh_catalog.txt /tmp/up_catalog.txt; then
+catalog "$DB" > "$TMPD/up_catalog.txt"
+if cmp -s "$TMPD/up_fresh_catalog.txt" "$TMPD/up_catalog.txt"; then
   printf 'PASS  %-58s %s\n' "the pgpm catalog matches a fresh install exactly" "$N_CATALOG columns and constraints"
 else
   printf 'FAIL  %-58s\n' "the pgpm catalog differs from a fresh install"
-  comm -23 /tmp/up_fresh_catalog.txt /tmp/up_catalog.txt | sed 's/^/      only in fresh:      /'
-  comm -13 /tmp/up_fresh_catalog.txt /tmp/up_catalog.txt | sed 's/^/      only after upgrade: /'
+  comm -23 "$TMPD/up_fresh_catalog.txt" "$TMPD/up_catalog.txt" | sed 's/^/      only in fresh:      /'
+  comm -13 "$TMPD/up_fresh_catalog.txt" "$TMPD/up_catalog.txt" | sed 's/^/      only after upgrade: /'
   fail=1
 fi
 
@@ -480,13 +482,13 @@ check "no existing row left NULL in a NOT NULL backfilled column" "${nn_null:-no
 
 # ASSERTION 2, the routine half (#441). Named differences, not a hash: `only after upgrade` is what a
 # stale overload looks like, `only in fresh` what a routine the upgrade failed to create looks like.
-routines "$DB" > /tmp/up_routines.txt
-if cmp -s /tmp/up_fresh_routines.txt /tmp/up_routines.txt; then
+routines "$DB" > "$TMPD/up_routines.txt"
+if cmp -s "$TMPD/up_fresh_routines.txt" "$TMPD/up_routines.txt"; then
   printf 'PASS  %-58s %s\n' "the pgpm routines match a fresh install exactly" "$N_ROUTINES routines"
 else
   printf 'FAIL  %-58s\n' "the pgpm routines differ from a fresh install"
-  comm -23 /tmp/up_fresh_routines.txt /tmp/up_routines.txt | sed 's/^/      only in fresh:      /'
-  comm -13 /tmp/up_fresh_routines.txt /tmp/up_routines.txt | sed 's/^/      only after upgrade: /'
+  comm -23 "$TMPD/up_fresh_routines.txt" "$TMPD/up_routines.txt" | sed 's/^/      only in fresh:      /'
+  comm -13 "$TMPD/up_fresh_routines.txt" "$TMPD/up_routines.txt" | sed 's/^/      only after upgrade: /'
   fail=1
 fi
 
@@ -561,8 +563,8 @@ IDB="${DB}_inflight"
 docker exec "$C" psql -U postgres -q -c "drop database if exists $IDB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $IDB" >/dev/null 2>&1
 if ! docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" \
-       psql -U postgres -q -d "$IDB" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >/tmp/up_inflight_origin.log 2>&1; then
-  echo "FAIL  fixture: the origin install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/up_inflight_origin.log; exit 1
+       psql -U postgres -q -d "$IDB" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >"$TMPD/up_inflight_origin.log" 2>&1; then
+  echo "FAIL  fixture: the origin install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' "$TMPD/up_inflight_origin.log"; exit 1
 fi
 check "LIVENESS: the $ORIGIN_TAG origin has no regrain_source_mark" \
   "$(q "$IDB" "select count(*) from information_schema.columns
@@ -604,8 +606,8 @@ check "LIVENESS: the $ORIGIN_TAG origin minted up_r's capture trigger origin-onl
   "$(q "$IDB" "select string_agg(tgenabled::text, ',') from pg_trigger
                 where tgname = 'pgpm_regrain_capture' and tgrelid = 'public.$(src_name up_r)'::regclass")" "O"
 
-if ! install_into "$IDB" >/tmp/up_inflight_upgrade.log 2>&1; then
-  echo "FAIL  the upgrade over the in-flight regrain did not complete"; sed 's/^/      /' /tmp/up_inflight_upgrade.log; fail=1
+if ! install_into "$IDB" >"$TMPD/up_inflight_upgrade.log" 2>&1; then
+  echo "FAIL  the upgrade over the in-flight regrain did not complete"; sed 's/^/      /' "$TMPD/up_inflight_upgrade.log"; fail=1
 fi
 # #969: the upgrade anchored both runs' capture, which v0.6.0 minted, on the proof that pgpm minted it (the
 # witness that the proof assertion 3e leans on still takes what pgpm did make).

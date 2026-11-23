@@ -298,7 +298,8 @@ takes the original's name (`t_id_seq`, or whatever the original was renamed to),
 and it ends with exactly the original sequence's grants, carried the way the table's are (below): reset, then
 replayed under their grantors, so a role you granted `USAGE` keeps it and one you revoked does not get it back
 from the converting role's default privileges. They are read in the cutover the statement before the
-original is dropped; a `GRANT` or `REVOKE` on it committed in the instant between is not carried, and one
+original is dropped; a `GRANT` or `REVOKE` on it committed between that read and the drop is not carried
+(neither takes a lock, and the drop can wait for the sequence's lock, so the gap is not always brief), and one
 still open at the drop fails the cutover, so make privilege changes before or after it. It
 is set from three values read under
 the cutover's lock: the original sequence's own next value, and the column's largest and smallest ids. The
@@ -1106,7 +1107,7 @@ source under the lock just before it is dropped; every trigger of yours is carri
 called, and only this module's own change capture is left out, known by its record and never by its
 function's name; the copy is born with the migrating role's
 `ALTER DEFAULT PRIVILEGES`, so its ACL is reset before the source's grants are replayed and it holds exactly
-those), then hand off to `transmute`, which carries them onto the parent the same way. A `GRANT` or `REVOKE` takes no lock on the table, so one committed in the instant between that read
+those), then hand off to `transmute`, which carries them onto the parent the same way. A `GRANT` or `REVOKE` takes no lock on the table, so one committed between that read
 and the drop is not carried; make privilege changes before or after the cutover. Because
 the index builds happen before the lock, the blocking window is the catch-up, one `count(*)` over the source,
 and metadata: the count is the only step in it that reads the whole table, and it is a read, not a rebuild.

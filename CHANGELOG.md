@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **docs/reference.md no longer calls the grant-carry gap "the instant between"** (#1144 bullet 3). A `GRANT` or
+  `REVOKE` committed between the cutover's read of a table's or an identity sequence's grants and the drop is not
+  carried, and for the identity sequences that gap includes any wait for the sequence's lock, so it is not always
+  brief. The behaviour is unchanged; only the description of the window.
+- **bench/upgrade_in_place.sh keeps its scratch files in a directory of its own run** (#1034 bullet 1), not at fixed
+  `/tmp/up_*` paths that two concurrent runs on one host overwrote for each other.
+
 - **`uninstall.sql` removes every role's pgpm jobs for a superuser, and refuses a retirement another role's
   `pgpm_detach` job may hold** (#1500, #1496). It unscheduled by name, and `cron.unschedule(name)` looks the name
   up among the caller's own jobs alone, so once two roles had run `pgpm.schedule()` a superuser's uninstall raised
