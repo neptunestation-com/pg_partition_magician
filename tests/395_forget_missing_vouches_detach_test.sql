@@ -120,8 +120,8 @@ select pg_temp.after_admin_dispatch();
 select is(pg_temp.cmd(3), format('alter table public.fb395 detach partition public.%I concurrently', :'b_doomed'),
   'LIVENESS: (B) the administrator''s job holds the detach');
 select is((select format('%s %s', retiring_by, detach_dispatched_oid is not null) from pgpm.part
-            where parent_table = 'public.fb395'::regclass and child_name = :'b_doomed'), 'postgres t',
-  'LIVENESS: (B) the mark records the administrator''s dispatch');
+            where parent_table = 'public.fb395'::regclass and child_name = :'b_doomed'), ' t',
+  'LIVENESS: (B) the mark records the dispatch, and no role: the administrator''s armed every role''s job');
 select (select oid from pg_class where oid = 'public.fb395'::regclass) as b_oid,
        (select oid from pg_class where oid = 'public.fbx395'::regclass) as bx_oid \gset
 drop table public.fb395 cascade;
@@ -138,7 +138,7 @@ end $$;
 reset role;
 select is(current_setting('t395.b_seen'), 'pgpm_test395_owner:select 1', 'LIVENESS: (B) the owner sees one job, its own, idle');
 select ok(current_setting('t395.b') ~ ('^P0001 pg_partition_magician: forget_missing refused, nothing cleared: the dropped table with oid '
-            || :b_oid || ' was retiring ' || :'b_doomed' || ', whose detach pgpm dispatched .*role pgpm_test395_owner cannot read every job .*Run select \* from pgpm\.forget_missing\(\); as role postgres or a superuser\.$'),
+            || :b_oid || ' was retiring ' || :'b_doomed' || ', whose detach pgpm dispatched .*role pgpm_test395_owner cannot read every job .*Run select \* from pgpm\.forget_missing\(\); as a superuser\.$'),
   'B: the owner''s forget_missing() is refused, naming the retirement and who can run it');
 select is((select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config
             where parent_table::oid in (:b_oid, :bx_oid)), array[:bx_oid, :b_oid]::oid[],
