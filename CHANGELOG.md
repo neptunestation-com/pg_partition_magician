@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A detached retirement the operator renamed is released only by a role that can vouch that no other role's
+  `pgpm_detach` job still holds its detach** (#1493). `retire` (#1427) and the recall (#1424) release such a
+  table to the operator, and both cleared the mark after returning to idle only the jobs the caller could see.
+  pg_cron shows a non-superuser only its own job, so the table's owner releasing a retirement the administrator
+  dispatched left the administrator's job armed with the old name and nothing recording it; once the table was
+  dropped and re-created on the same grid, or a table attached under the old name, the job's next run detached
+  that partition, nothing logged. Any other role's tick now keeps the mark and the renamed table as they are and
+  logs `fail_retain_drop` (`retire`) or `fail_retain_recall` (the recall), counted, naming the role to run as;
+  that role's tick or a superuser's releases it as before, and the kept mark is what `forget_missing` and the
+  build refusals read if the table is dropped meanwhile. tests/398; `bench/rename_release_vouches_detach.sh`,
+  four mutations.
 - **`retire` completes a retirement only when its role can vouch that no other role's `pgpm_detach` job still
   holds the detach** (#1491). The completion returned the jobs it could see to idle and dropped the partition and
   its `pgpm.part` row, and pg_cron shows a non-superuser only its own job, so the table's owner completing a

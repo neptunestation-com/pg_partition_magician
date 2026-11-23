@@ -983,6 +983,8 @@ Four things follow, and none of them are optional:
   return every role's job to idle; any other role's tick keeps it, counted. The same holds for the drop that
   completes a retirement: a tick that cannot see every job that may hold the detach keeps the partition and
   logs `fail_retain_drop`, counted, naming the role to run as, and that role's tick or a superuser's drops it.
+  So does the release of a detached retirement you renamed to keep (`fail_retain_drop`, or `fail_retain_recall`
+  once retention no longer reaches it): the mark stays until such a tick releases the table to you.
 - **Writes to the *referencing* table are blocked while the detach runs**, once per retirement, for a
   duration set by that table's size. Reads of it, and your managed table entirely, are unaffected. This is
   irreducible: it is PostgreSQL proving the foreign key still holds. An index on the referencing column is

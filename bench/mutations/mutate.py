@@ -68,6 +68,17 @@ RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not
       v_rec := pgpm._renamed_retirement(p_parent, p_child, r.retiring_oid, r.child_oid, v_now);
       if v_rec is not null and not exists (select 1 from pg_inherits i where i.inhrelid = v_rec) then
         if r.retiring_at is not null then
+          -- #1493: not by a role that cannot vouch no job it cannot see holds the detach (_detach_job_vouched): it keeps
+          -- the mark, as the completion below does. Released, the record was gone and another role's job stayed armed.
+          if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then
+            insert into pgpm.log (parent_table, action, lo, hi, method)
+              values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+                      format('%I.%I is out of the parent and renamed (oid %s), and role %s cannot read every pgpm_detach job that may still hold its detach (pg_cron shows a role only its own), so it could not return such a job to idle, whose next run would detach a partition later made under that name; its retirement mark is kept, not released. Run maintenance as %s, and its tick releases it to you',
+                             v_nsp, p_child, v_rec, current_user,
+                             case when r.detach_dispatched_oid is not null and r.retiring_by is not null
+                                  then format('role %s or a superuser', r.retiring_by) else 'a superuser' end));
+            return false;
+          end if;
           perform pgpm._disown_retirement(p_parent, p_child,
             format('retire() found %I.%I, which retention reaches, detached from the parent and renamed to %s (oid %s): a hand rename of a detached partition makes it the operator''s table, so its retirement is released rather than dropped',
                    v_nsp, p_child,
@@ -17539,11 +17550,9 @@ MUTATIONS["retire_release_keeps_mark"] = (
     "bench/retire_renamed_detached.sh",
     "Issue #1427, the refusal without the release: the row is refused as detached by hand, but the mark stays on a "
     "table the operator took, no retain_disown is logged and no remedy spelled. One site. tests/363 parts A, B and "
-    "E catch it.",
-    [("        if r.retiring_at is not null then\n          perform pgpm._disown_retirement(p_parent, p_child,\n"
-      "            format('retire() found %I.%I, which retention reaches,",
-      "        if false then\n          perform pgpm._disown_retirement(p_parent, p_child,\n"
-      "            format('retire() found %I.%I, which retention reaches,", 1)],
+    "E catch it. Since #1493 the block it skips holds the release's vouch too.",
+    [("        if r.retiring_at is not null then\n          -- #1493: not by a role that cannot vouch",
+      "        if false then\n          -- #1493: not by a role that cannot vouch", 1)],
 )
 MUTATIONS["retire_release_marked_only"] = (
     "bench/retire_renamed_detached.sh",
@@ -18556,6 +18565,37 @@ MUTATIONS["retire_completion_refuses_retiring_role"] = (
     "detach (retiring_by, #1451) too, though its disarm reaches that job. tests/397 part D catches it.",
     [("  if r.retiring_at is not null and not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
       "  if r.retiring_at is not null and not pgpm._detach_job_vouched(false, null) then\n", 1)],
+)
+MUTATIONS["retire_rename_release_unvouched"] = (
+    "bench/rename_release_vouches_detach.sh",
+    "Issue #1493's defect at retire(): its #1427 release of a detached retirement the operator renamed clears the mark "
+    "after idling only the pgpm_detach jobs the caller sees, so the table's non-superuser owner leaves the "
+    "administrator's armed with the old name and nothing recording it, and its next run detaches a re-created "
+    "namesake's partition. The deferral removed. tests/398 parts A and B catch it.",
+    [("\n          if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
+      "\n          if false then\n", 1)],
+)
+MUTATIONS["recall_rename_release_unvouched"] = (
+    "bench/rename_release_vouches_detach.sh",
+    "Issue #1493's defect at the recall: its #1424 release of a detached retirement the operator renamed, retention no "
+    "longer reaching it, clears the mark after idling only the jobs the caller sees. The deferral removed. tests/398 "
+    "parts C and D catch it.",
+    [("\n        if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
+      "\n        if false then\n", 1)],
+)
+MUTATIONS["retire_rename_release_refuses_retiring_role"] = (
+    "bench/rename_release_vouches_detach.sh",
+    "Issue #1493, the over-wide fix at retire(): every non-superuser's rename release is kept, the role whose own job "
+    "alone holds the detach (retiring_by, #1451) too, though its idle reaches that job. tests/398 part E catches it.",
+    [("\n          if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
+      "\n          if not pgpm._detach_job_vouched(false, null) then\n", 1)],
+)
+MUTATIONS["recall_rename_release_refuses_retiring_role"] = (
+    "bench/rename_release_vouches_detach.sh",
+    "Issue #1493, the over-wide fix at the recall: every non-superuser's rename release is kept, the role whose own "
+    "job alone holds the detach too. tests/398 part F catches it.",
+    [("\n        if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
+      "\n        if not pgpm._detach_job_vouched(false, null) then\n", 1)],
 )
 MUTATIONS["transmute_builds_dropped_detach_name"] = (
     "bench/build_refuses_dropped_detach_name.sh",
