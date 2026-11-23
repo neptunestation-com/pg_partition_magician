@@ -18597,6 +18597,41 @@ MUTATIONS["recall_rename_release_refuses_retiring_role"] = (
     [("\n        if not pgpm._detach_job_vouched(r.detach_dispatched_oid is not null, r.retiring_by) then\n",
       "\n        if not pgpm._detach_job_vouched(false, null) then\n", 1)],
 )
+MUTATIONS["untransmute_unvouched"] = (
+    "bench/untransmute_vouches_detach.sh",
+    "Issue #1489's defect: untransmute forgets every retirement of the parent after idling only the pgpm_detach jobs "
+    "the caller sees (#954), so the table's non-superuser owner leaves the administrator's job armed with a dispatched "
+    "detach, re-running it every run, with nothing recording it. The refusal removed, at both askings. tests/399 part "
+    "A catches it.",
+    [("  if found then\n    raise exception 'pg_partition_magician: untransmute refused, nothing changed:",
+      "  if false then\n    raise exception 'pg_partition_magician: untransmute refused, nothing changed:", 1)],
+)
+MUTATIONS["untransmute_refuses_retiring_role"] = (
+    "bench/untransmute_vouches_detach.sh",
+    "Issue #1489, the over-wide fix: a dispatched retirement refuses every non-superuser's untransmute, the role whose "
+    "own job alone holds the detach (retiring_by, #1451) too, though the #954 disarm reaches that job. tests/399 part "
+    "C catches it.",
+    [("     and not pgpm._detach_job_vouched(p.detach_dispatched_oid is not null, p.retiring_by)\n   order by p.child_name",
+      "     and not pgpm._detach_job_vouched(p.detach_dispatched_oid is not null,\n"
+      "                                      case when p.detach_dispatched_oid is null then p.retiring_by end)\n"
+      "   order by p.child_name", 1)],
+)
+MUTATIONS["untransmute_refuses_undispatched"] = (
+    "bench/untransmute_vouches_detach.sh",
+    "Issue #1489, the over-wide fix the other way: a mark this release made and never dispatched is read as "
+    "dispatched by the role that made it, so the owner is refused a retirement no job holds. tests/399 part B "
+    "catches it.",
+    [("     and not pgpm._detach_job_vouched(p.detach_dispatched_oid is not null, p.retiring_by)\n   order by p.child_name",
+      "     and not pgpm._detach_job_vouched(true, p.retiring_by)\n   order by p.child_name", 1)],
+)
+MUTATIONS["untransmute_unvouched_under_lock"] = (
+    "bench/untransmute_vouch_race.sh",
+    "Issue #1489, the refusal asked only before the lock: a retirement the administrator's tick marks and dispatches "
+    "while the owner's untransmute waits for its ACCESS EXCLUSIVE is read by nothing, and the reverse forgets it "
+    "with the administrator's job left armed. The second asking removed.",
+    [("  perform pgpm._refuse_unvouched_retirements(p_parent);   -- #1489, final: a mark a tick committed while this waited\n",
+      "", 1)],
+)
 MUTATIONS["transmute_builds_dropped_detach_name"] = (
     "bench/build_refuses_dropped_detach_name.sh",
     "Issue #1487's defect at transmute: a conversion whose monolith takes the name of a dropped table's retiring "

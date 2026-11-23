@@ -14623,6 +14623,32 @@ begin
 end;
 $$;
 
+-- A retirement of p_parent whose detach a pgpm_detach job this role cannot see may hold, refused (#1489).
+-- untransmute deletes every pgpm.part row of the parent and returns to idle the jobs still holding one of their
+-- detaches (#954), but pg_cron shows a role only its own job, so the table's owner reversing a table the
+-- administrator's tick had dispatched a retirement of left that job armed, re-running the detach every run, with
+-- nothing recording it any more. Who can vouch is _detach_job_vouched's rule, as for forget_missing (#1461).
+-- Raised, not skipped: the reverse is the operator's command. untransmute asks this after its first lock, before
+-- anything is read for the reverse, and again under its ACCESS EXCLUSIVE: retire() marks under a lock on the
+-- partition, which that lock waits out, so a mark a tick committed in between is read there.
+create or replace function pgpm._refuse_unvouched_retirements(p_parent regclass)
+returns void language plpgsql as $$
+declare r record;
+begin
+  select p.child_name, p.retiring_by, p.detach_dispatched_oid is not null as dispatched into r
+    from pgpm.part p
+   where p.parent_table = p_parent and p.retiring_at is not null
+     and not pgpm._detach_job_vouched(p.detach_dispatched_oid is not null, p.retiring_by)
+   order by p.child_name limit 1;
+  if found then
+    raise exception 'pg_partition_magician: untransmute refused, nothing changed: % is retiring %, whose detach pgpm % to a pgpm_detach cron job, and role % cannot read every job that may hold it (pg_cron shows a role only its own). The reverse forgets the retirement, and a job left armed re-runs that detach on every run. Run select pgpm.untransmute(%); as %.',
+      p_parent, r.child_name, case when r.dispatched then 'dispatched' else 'may have dispatched (a mark older than this release)' end,
+      current_user, quote_literal(p_parent::text),
+      case when r.dispatched and r.retiring_by is not null then format('role %s or a superuser', quote_ident(r.retiring_by)) else 'a superuser' end;
+  end if;
+end;
+$$;
+
 -- A partition of p_parent pending a concurrent detach (pg_inherits.inhdetachpending), refused (#1157). DETACH
 -- PARTITION ... CONCURRENTLY sets the flag in a first transaction that commits before it waits out the parent's
 -- older lockers, and from then on the partition's rows are invisible through the parent; a detacher whose
@@ -14752,6 +14778,9 @@ begin
   -- and run twice; its first run was the first lock, by name, and a table that took the name while that waited is
   -- what both runs read. Held to the end, this pins the name every later statement renders.
   perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'untransmute');
+  -- #1489: a retirement whose detach another role's pgpm_detach job may hold, which the #954 disarm below cannot
+  -- reach, refused before anything is read for the reverse; asked again under the ACCESS EXCLUSIVE
+  perform pgpm._refuse_unvouched_retirements(p_parent);
 
   select n.nspname, c.relname, n.oid into v_nsp, v_rel, v_nspoid
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -14874,6 +14903,7 @@ begin
   -- #1335 b10: by oid; and the gate asked again through the parent's name rendered under the lock, which it then
   -- waits for nothing of (the ACCESS SHARE above pins the parent's own name, never its schema's)
   perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', false, 'untransmute');
+  perform pgpm._refuse_unvouched_retirements(p_parent);   -- #1489, final: a mark a tick committed while this waited
   perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited
   execute format('select exists (select 1 from %s where %s)', p_parent::text, v_gate_q) into v_outside;
   if v_outside then

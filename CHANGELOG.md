@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`untransmute` refuses a retirement whose detach another role's `pgpm_detach` job may hold** (#1489). The
+  reverse forgets every retirement of the table and returns to idle the jobs still holding one of their
+  detaches (#954), and pg_cron shows a non-superuser only its own job, so the table's owner reversing a table
+  whose retirement the administrator's tick had dispatched left the administrator's job armed, failing every
+  run with nothing recording why. Such a call now raises `untransmute refused, nothing changed`, naming the
+  partition and the role to run it as (`role <retiring_by> or a superuser`, or `a superuser`), as
+  `forget_missing` does since #1461; it is asked after the first lock and again under the `ACCESS EXCLUSIVE`,
+  so a retirement a tick marks while the call waits is read too. A role that can vouch reverses the table as
+  before. tests/399; `bench/untransmute_vouches_detach.sh` and `bench/untransmute_vouch_race.sh`, four
+  mutations.
 - **A detached retirement the operator renamed is released only by a role that can vouch that no other role's
   `pgpm_detach` job still holds its detach** (#1493). `retire` (#1427) and the recall (#1424) release such a
   table to the operator, and both cleared the mark after returning to idle only the jobs the caller could see.
