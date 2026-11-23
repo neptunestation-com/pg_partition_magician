@@ -782,5 +782,9 @@ The per-tick `skip_*` noise stops with the next maintenance run.
 deletes pgpm's rows for you. If you genuinely want the table gone, `untransmute` first, then `DROP TABLE`.
 While a retirement of the table is in flight, run `untransmute` as a superuser (or as the role named in its
 refusal): its detach may sit in another role's `pgpm_detach` job, and pg_cron shows a role other than a
-superuser only its own, so a role that cannot see every job that may hold it is refused, with nothing changed. Note `untransmute` only works while the conversion is still reversible (before any real partition beyond the
+superuser only its own, so a role that cannot see every job that may hold it is refused, with nothing changed. `pgpm_core/uninstall.sql`
+refuses the same way, naming each partition whose retirement another role's job may hold, so run it as a superuser
+when more than one role ran `pgpm.schedule()`; run by any other role it removes only that role's jobs and a
+`WARNING` gives the query (`select jobid, username, jobname from cron.job where jobname like 'pgpm%' and database =
+current_database()`) that finds the rest. Note `untransmute` only works while the conversion is still reversible (before any real partition beyond the
 monolith exists); past that, drop the table and run `pgpm.forget_missing()`.

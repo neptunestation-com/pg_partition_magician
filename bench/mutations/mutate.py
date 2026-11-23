@@ -16868,12 +16868,15 @@ MUTATIONS["uninstall_regrain_sweep_own_block"] = (
   begin
     select coalesce(max(id), 0) into v_mark from pgpm.log;
 """, """  end loop;
+  end uninstall;
 end;
 $$;
 do $$
 declare
   r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
 begin
+  <<uninstall>>
+  begin
   begin
     select coalesce(max(id), 0) into v_mark from pgpm.log;
 """, 1)],
@@ -18715,6 +18718,68 @@ MUTATIONS["regrain_copies_to_dropped_detach_name"] = (
     [("      perform pgpm._refuse_dropped_detach_name(array[v_sub_name], format('regrain_step(%s)', p_parent));   -- #1487\n",
       "", 1)],
 )
+
+# Issues #1500 and #1496: uninstall.sql unschedules pgpm's jobs by jobid, in this database, after the schema drop, and
+# refuses (under SHARE on pgpm.part, ahead of everything) while a retirement's detach may sit in a pgpm_detach job the
+# caller cannot see. bench/uninstall_cron_jobs.sh, on real pg_cron with two roles.
+_UNSCHEDULE = "      perform cron.unschedule(jobid) from cron.job where jobname like 'pgpm%' and database = current_database();\n"
+MUTATIONS["uninstall_unschedules_by_name"] = (
+    "bench/uninstall_cron_jobs.sh",
+    "Issue #1500's defect: uninstall.sql unschedules by name, and cron.unschedule(name) looks the name up among the "
+    "caller's own jobs alone, so a superuser's uninstall reaching a second role's 'pgpm' raises \"could not find valid "
+    "entry for job\" and rolls back, schema and jobs kept. Part A's superuser uninstall fails.",
+    [(_UNSCHEDULE, _UNSCHEDULE.replace("cron.unschedule(jobid)", "cron.unschedule(jobname)"), 1)],
+)
+MUTATIONS["uninstall_unschedules_every_database"] = (
+    "bench/uninstall_cron_jobs.sh",
+    "Issue #1500's fix without its database scope: the uninstall in one database unschedules another database's pgpm "
+    "jobs (pgpm.schedule() schedules in current_database()). Part A's job of another database is gone.",
+    [(_UNSCHEDULE, _UNSCHEDULE.replace(" and database = current_database()", ""), 1)],
+)
+MUTATIONS["uninstall_unvouched_unrefused"] = (
+    "bench/uninstall_cron_jobs.sh",
+    "Issue #1496's defect: the table owner's uninstall removes pgpm and its record of a retirement whose detach the "
+    "administrator's pgpm_detach job holds, a job pg_cron does not show the owner, so the job stays armed and its next "
+    "run takes the partition out of the table, nothing logged. The refusal removed (the lock kept). Part A.",
+    [("    if v_retiring_q is not null then\n      raise exception 'pg_partition_magician: uninstall refused,",
+      "    if false then\n      raise exception 'pg_partition_magician: uninstall refused,", 1)],
+)
+MUTATIONS["uninstall_vouch_unlocked"] = (
+    "bench/uninstall_cron_jobs.sh",
+    "Issue #1496's refusal read without SHARE on pgpm.part: a dispatch the administrator's tick commits while the "
+    "owner's uninstall runs is read by nothing, and the schema drop, which waits for that tick, goes ahead with the job "
+    "armed. Part A's wait and refusal fail.",
+    [("    lock table pgpm.part in share mode;\n", "", 1)],
+)
+MUTATIONS["uninstall_unschedules_before_refusal"] = (
+    "bench/uninstall_cron_jobs.sh",
+    "The pre-#1496 order: the jobs are unscheduled in a block of their own ahead of every refusal, so a refused "
+    "uninstall run without --single-transaction (psql carrying on past the error) has already removed the caller's "
+    "jobs, and the refusal's \"nothing changed\" is false. Part A's second refusal fails.",
+    [("-- Every table and function the blocks below drop because pgpm's records name it",
+      "do $$\nbegin\n  if exists (select 1 from pg_extension where extname = 'pg_cron') then\n"
+      "    perform cron.unschedule(jobid) from cron.job where jobname like 'pgpm%' and database = current_database();\n"
+      "  end if;\nexception\n  when undefined_table or undefined_function or insufficient_privilege then null;\nend;\n$$;\n\n"
+      "-- Every table and function the blocks below drop because pgpm's records name it", 1)],
+)
+MUTATIONS["uninstall_refuses_own_retirement"] = (
+    "bench/uninstall_cron_jobs.sh",
+    "Issue #1496, the over-wide fix: every retirement refuses a non-superuser's uninstall, the one the role's own job "
+    "alone holds (retiring_by) too, though its unschedule reaches that job. Part C fails.",
+    [("         and not pgpm._detach_job_vouched(p.detach_dispatched_oid is not null, p.retiring_by);\n",
+      "         and not pgpm._detach_job_vouched(p.detach_dispatched_oid is not null, null);\n", 1)],
+)
+MUTATIONS["uninstall_unwarned_foreign_jobs"] = (
+    "bench/uninstall_cron_jobs.sh",
+    "Issue #1496's warning removed: a non-superuser's uninstall removes only its own pgpm jobs and says nothing of "
+    "another role's, which fail on every run once pgpm is gone. Part B fails.",
+    [("    if not exists (select 1 from pg_roles where rolname = current_user and rolsuper) then\n      raise warning",
+      "    if false then\n      raise warning", 1)],
+)
+for _name in ("uninstall_unschedules_by_name", "uninstall_unschedules_every_database", "uninstall_unvouched_unrefused",
+              "uninstall_vouch_unlocked", "uninstall_unschedules_before_refusal", "uninstall_refuses_own_retirement",
+              "uninstall_unwarned_foreign_jobs"):
+    MUTATION_SRC[_name] = "pgpm_core/uninstall.sql"
 
 # ---------------------------------------------------------------------------------------- the invariant oracle (W5)
 # Formal methods Phase 3 W5 (docs/formal/phase3-design.md, "Guards on the oracle"). The oracle is a guard, so each of its

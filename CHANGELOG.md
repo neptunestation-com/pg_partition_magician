@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`uninstall.sql` removes every role's pgpm jobs for a superuser, and refuses a retirement another role's
+  `pgpm_detach` job may hold** (#1500, #1496). It unscheduled by name, and `cron.unschedule(name)` looks the name
+  up among the caller's own jobs alone, so once two roles had run `pgpm.schedule()` a superuser's uninstall raised
+  `could not find valid entry for job 'pgpm'` and rolled back. And pg_cron shows a non-superuser only its own jobs,
+  so the table owner's uninstall removed pgpm while the administrator's job held a dispatched detach, and that
+  job's next run took the partition out of the table, nothing logged. The script now raises `uninstall refused,
+  nothing changed`, naming each such partition and who can run it (`role <retiring_by> or a superuser`, or `a
+  superuser`), under `SHARE` on `pgpm.part` so a dispatch committed while it waits is read; an install older than
+  `_detach_job_vouched` is refused on every retirement for anyone but a superuser. The jobs are unscheduled by
+  jobid, only this database's, in the schema drop's block after the drop, so any refusal leaves them all with or
+  without `--single-transaction`; a non-superuser's run removes its own and a `WARNING` gives the query that finds
+  another role's. `bench/uninstall_cron_jobs.sh` (real pg_cron, two roles), seven mutations.
 - **`retire` returns to idle only the `pgpm_detach` jobs that may hold the detach that landed** (#1498). Its
   completion reset every job the caller could see, and pg_cron shows a superuser every role's, so a superuser's
   tick completing one retirement also reset another role's job holding a different retirement's dispatched
