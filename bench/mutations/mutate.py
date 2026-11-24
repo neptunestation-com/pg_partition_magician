@@ -9918,6 +9918,34 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         [("l.parent_table = p_parent and l.child_name = v_rel and l.retired_at is null returning 1)",
           "l.parent_table = p_parent and l.child_name = v_rel and l.retired_at is null and false returning 1)", 1)],
     ),
+    # Issue #632: the write frontier is read in pruned windows, each rolled back once read.
+    "frontier_reads_parent_whole": (
+        "bench/frontier_read_windows.sh",
+        "Pre-#632 _frontier_native: max(control) read with one ORDER BY ... LIMIT 1 over the whole parent, which "
+        "locks every partition and its index until the caller's transaction ends (two lock-table slots each), "
+        "so a tick of a 5,727-partition grid failed with out of shared memory at the default lock settings. "
+        "The first window made unbounded on both sides and kept, not rolled back, so it reads everything "
+        "and holds every lock it took, exactly the one read it replaced. tests/401 part A catches it.",
+        [("                     case when v_lo_lit is null then 'true'\n",
+          "                     case when true then 'true'\n", 1),
+         ("      raise sqlstate 'PGPMF';\n", "", 1)],
+    ),
+    "frontier_window_keeps_locks": (
+        "bench/frontier_read_windows.sh",
+        "Issue #632, the plausible-but-wrong fix: the frontier is read in pruned windows but not inside a "
+        "subtransaction rolled back once read, so each window's partition locks are kept to the end of the "
+        "caller's transaction and a deep frontier, read through every window, holds them all again. One "
+        "clause, the raise that rolls the window back. tests/401 part A catches it.",
+        [("      raise sqlstate 'PGPMF';\n", "", 1)],
+    ),
+    "frontier_window_excludes_cut": (
+        "bench/frontier_read_windows.sh",
+        "Issue #632: a window's lower cut read as exclusive, so a maximum exactly on a cut is below the window "
+        "above it and not below the window under it, and the frontier falls to whatever lies lower (the "
+        "bottom row, or the clock on a uuidv7 grid). One operator. tests/401 parts B and C catch it.",
+        [("                          else format('t.%I >= %L::%s', cfg.control_column, v_lo_lit, v_coltype) end,\n",
+          "                          else format('t.%I > %L::%s', cfg.control_column, v_lo_lit, v_coltype) end,\n", 1)],
+    ),
     # Issue #1162: obtain's and extend_to's walks read the attached rows once, not once per cell.
     "obtain_walk_scans_per_cell": (
         "bench/obtain_walk_reads_rows_once.sh",

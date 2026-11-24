@@ -1504,6 +1504,7 @@ run_perf() {
     "bench/month_grid_anchor_time.sh pgpm_perf384"
     "bench/transmute_child_names_under_lock.sh pgpm_perf337"
     "bench/obtain_walk_reads_rows_once.sh pgpm_perf332"
+    "bench/frontier_read_windows.sh pgpm_perf487"
     "bench/ci_runs_lint_jobs.sh pgpm_perf351"
     "bench/summary_gates_every_job.sh pgpm_perf432"
     "bench/throws_pinned_sites.sh pgpm_perf350"

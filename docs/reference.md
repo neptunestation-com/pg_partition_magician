@@ -1456,8 +1456,10 @@ and every partition it creates holds its locks (the table, its indexes, its TOAS
 transaction ends; the call measures what its first two partitions cost and builds only as many as fit, a few
 hundred on stock settings for a table with a primary key and a TOASTable column. The rest of the lookahead
 is left to the next call, which carries on from where this one stopped, so a lookahead larger than that is
-reached over several ticks rather than failing on every one. The frontier read's locks on the partitions
-that already exist are not counted against this budget. Nothing is logged for the stop either: it is not a
+reached over several ticks rather than failing on every one. The frontier read holds nothing against this
+budget: it reads the control column in windows of 128 recorded partitions from the top down and releases each
+window's locks before the next, so a table with thousands of partitions costs it no more lock-table room than
+one with a few hundred. Nothing is logged for the stop either: it is not a
 failure, and the cells it built are logged as usual.
 
 This is the only thing standing between the workload and a write with nowhere to go, since a row outside
