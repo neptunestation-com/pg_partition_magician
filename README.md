@@ -190,12 +190,14 @@ for manual, one-off archiving instead of the automatic `archive_fn` path.
 ./test.sh        # full matrix: PG 15-18 x all install channels
 ./test.sh 15     # one version, all channels
 ./test.sh ci     # every test track CI runs, and every job of lint.yml's Lint summary
+./test.sh down   # stop a run and remove its containers
 ```
 
 pgTAP on Docker. `./test.sh` covers the four PostgreSQL versions but skips the `timescale`, `observe`,
 `archive`, `perf` and `discriminate` tracks, which need their own image or service, so it does not by
-itself predict a green CI. Use `./test.sh ci` before pushing anything that touches
-`pgpm_core/install.sql`. See [ONBOARDING.md](ONBOARDING.md) for the dev loop.
+itself predict a green CI. A change to `pgpm_core/install.sql` needs every track, and the PR's own
+jobs run them in parallel, so prove the track your change touches and push; `./test.sh ci` runs them all
+here, serially, when you need that. See [ONBOARDING.md](ONBOARDING.md) for the dev loop.
 
 ## License
 
