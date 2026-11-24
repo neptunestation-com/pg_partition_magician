@@ -1563,7 +1563,11 @@ The sanctioned single-partition drop: `retain()`'s per-partition body, public an
 external assistant (e.g. an archive-then-drop scanner) -- or several cooperating ones -- to drive
 retirement directly. It claims the `pgpm.part` row, ensures the child is write-blocked
 (`pgpm._install_write_block`, idempotent), checks `pgpm._archive_fully_covered`, and only then `DROP`s, deletes the catalog row, and logs `retain_drop`. Returns `true`
-iff this call dropped the partition. In the transaction of the `DROP` it marks the partition's chunks in
+iff this call dropped the partition. The retention horizon is judged twice: on entry, and again once the call holds
+`SHARE UPDATE EXCLUSIVE` on the partition, which can wait on any reader of it. A [`set_retain`](#set_retain) that
+stopped reaching the partition and committed during that wait leaves it as it is, and the call returns `false`. A
+caller in `REPEATABLE READ`, whose snapshot predates such a change, gets a serialization failure there instead,
+with nothing done. In the transaction of the `DROP` it marks the partition's chunks in
 `pgpm.archive_ledger` retired (`retired_at`): their objects are now the only copy of its rows, and the rows
 stay in the ledger as the record of where those rows went (see [the ledger](#pgpmarchive_ledger)).
 
@@ -3751,7 +3755,10 @@ Loosening does **not** take back a referenced partition's retirement once `retir
 `pgpm_detach` job at its concurrent detach: the detach lands, and the next tick releases the
 detached table to you with its rows, logged `retain_disown` with the `ATTACH` that puts it back and
 `fail_retain_reattach`, counted in `status().retain_drop_failures` (see [`retire`](#retire)). A retirement
-not yet handed to pg_cron is cleared and its partition stays. A retirement whose mark carries no record of pgpm's own
+not yet handed to pg_cron is cleared and its partition stays. That includes a `retire` still waiting for the
+partition's lock when the change commits: it reads the policy again once it holds the lock, and leaves the
+partition be, detach and `DROP` alike. A `set_retain` that starts after such a `retire` has read the policy
+again waits for it to commit, so the hand-off comes first and is judged as above. A retirement whose mark carries no record of pgpm's own
 dispatch (its dispatch failed, and the operator detached the partition) is not re-attached but disowned, logged
 `retain_disown` with the one remedy that keeps the rows the lengthened policy keeps: attach the table back on its
 bounds, the statement spelled in `method`, never a `DROP` (see [`retire`](#retire)).

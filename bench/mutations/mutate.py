@@ -6312,7 +6312,9 @@ $$;''',
         "does not). It judges committed pgpm.part around another session's uncommitted cells and accepts a "
         "zone change that leaves the grid's top off the new lattice, and an extension already past its read "
         "builds on the old one. One site. tests/195's four sections all catch it.",
-        [("  select * into cfg from pgpm.config where parent_table = p_parent for update;\n",
+        [("  -- cell they built; and while this holds it, they wait and then compute in the zone it committed.\n"
+          "  select * into cfg from pgpm.config where parent_table = p_parent for update;\n",
+          "  -- cell they built; and while this holds it, they wait and then compute in the zone it committed.\n"
           "  select * into cfg from pgpm.config where parent_table = p_parent;\n", 1)],
     ),
     "extend_to_config_unlocked": (
@@ -9945,6 +9947,37 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         "bottom row, or the clock on a uuidv7 grid). One operator. tests/401 parts B and C catch it.",
         [("                          else format('t.%I >= %L::%s', cfg.control_column, v_lo_lit, v_coltype) end,\n",
           "                          else format('t.%I > %L::%s', cfg.control_column, v_lo_lit, v_coltype) end,\n", 1)],
+    ),
+    # Issue #1454: retire() judges the retention policy again under the partition's lock.
+    "retire_policy_read_once": (
+        "bench/retire_policy_as_of_lock.sh",
+        "Pre-#1454 retire(): the retention horizon is judged only on the config read at the start, before the "
+        "wait for SHARE UPDATE EXCLUSIVE on the partition, so a set_retain loosening committed in that wait is "
+        "never seen: a referenced partition's detach is dispatched and an unreferenced one is dropped, rows the "
+        "policy in force keeps. The re-reading under the lock removed. Parts A, B and E catch it.",
+        [('  select * into cfg from pgpm.config where parent_table = p_parent for key share;\n  cfg := pgpm._control_followed(cfg);\n  if cfg.retain is null then return false; end if;\n  v_boundary := pgpm._retain_boundary(cfg);\n  if pgpm._native_gt(cfg.control_kind, r.hi, v_boundary) then return false; end if;\n', "", 1)],
+    ),
+    "retire_policy_recheck_unlocked": (
+        "bench/retire_policy_as_of_lock.sh",
+        "Issue #1454, the plausible-but-wrong fix: retire() reads the policy again under the partition's lock but "
+        "takes no row lock on it, so a set_retain begun after that read does not wait for the hand-off and can "
+        "commit a loosening before the dispatch does, the same race narrowed. Part E catches it.",
+        [("  select * into cfg from pgpm.config where parent_table = p_parent for key share;\n"
+          "  cfg := pgpm._control_followed(cfg);\n"
+          "  if cfg.retain is null then return false; end if;\n",
+          "  select * into cfg from pgpm.config where parent_table = p_parent;\n"
+          "  cfg := pgpm._control_followed(cfg);\n"
+          "  if cfg.retain is null then return false; end if;\n", 1)],
+    ),
+    "set_retain_policy_unlocked": (
+        "bench/retire_policy_as_of_lock.sh",
+        "Issue #1454 from set_retain's side: its read of the config row takes no lock, so it never waits for a "
+        "retire() that has judged the policy under the partition's lock and not yet committed its hand-off. "
+        "Part E catches it.",
+        [("  -- partition's lock, so a change here and a retirement's hand-off are ordered, one after the other. See retire().\n"
+          "  select * into cfg from pgpm.config where parent_table = p_parent for update;\n",
+          "  -- partition's lock, so a change here and a retirement's hand-off are ordered, one after the other. See retire().\n"
+          "  select * into cfg from pgpm.config where parent_table = p_parent;\n", 1)],
     ),
     # Issue #1162: obtain's and extend_to's walks read the attached rows once, not once per cell.
     "obtain_walk_scans_per_cell": (

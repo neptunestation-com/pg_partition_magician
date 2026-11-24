@@ -4941,6 +4941,22 @@ begin
                      v_nsp, p_child, v_rel::oid));
     return false;
   end if;
+  -- AND THE POLICY AS OF THE LOCK (#1454). The horizon above was judged on the config read at the start, and
+  -- the lock can wait as long as a reader of the partition likes: a set_retain that loosened retention past
+  -- the partition and committed in that wait was never seen, so a referenced partition's detach was
+  -- dispatched (and, since #1438, lands) and an unreferenced one was DROPPED, its rows gone though the policy
+  -- in force kept them. set_retain's recall cannot save it either: the mark it would clear is this call's,
+  -- not committed. So the policy is read again here, and a partition it no longer reaches is left as it is,
+  -- nothing written (every write above returns). FOR KEY SHARE, held to this transaction's end, against
+  -- set_retain's FOR UPDATE: a loosening still in flight is waited for and read, and one begun after this
+  -- read waits for this retirement to commit, so it finds the mark (the hand-off came first, and the recall
+  -- judges it as it does any other). KEY SHARE, not SHARE, so the plain UPDATEs of other config setters and
+  -- of a sweep's _config_try_lock never wait on it (the #725 pair obtain and set_partition_tz make).
+  select * into cfg from pgpm.config where parent_table = p_parent for key share;
+  cfg := pgpm._control_followed(cfg);
+  if cfg.retain is null then return false; end if;
+  v_boundary := pgpm._retain_boundary(cfg);
+  if pgpm._native_gt(cfg.control_kind, r.hi, v_boundary) then return false; end if;
   v_attached := v_rel is not null
     and exists (select 1 from pg_partition_ancestors(v_rel) a where a.relid = p_parent::oid);
   v_pending := not v_attached and v_rel is not null
@@ -15785,7 +15801,9 @@ declare
 begin
   -- #951: refused before anything is read or committed; p_retain (null keeps everything) is not
   perform pgpm._refuse_null_arguments('set_retain', json_build_object('p_parent', p_parent));
-  select * into cfg from pgpm.config where parent_table = p_parent;
+  -- FOR UPDATE (#1454): conflicts with the FOR KEY SHARE retire() reads the policy under once it holds the
+  -- partition's lock, so a change here and a retirement's hand-off are ordered, one after the other. See retire().
+  select * into cfg from pgpm.config where parent_table = p_parent for update;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
