@@ -2747,6 +2747,7 @@ $$;
 create or replace function pgpm._frontier_native(p_parent regclass)
 returns text language plpgsql as $$
 declare cfg pgpm.config; v_max text; v_decoded text;
+  v_coltype text; v_cuts text[]; v_lo_lit text; v_hi_lit text; i int;
 begin
   -- The relation can be gone: pgpm.config.parent_table is a regclass, and DROP TABLE on a managed parent
   -- leaves the row pointing at an oid with no pg_class entry (only untransmute clears pgpm state). A dead
@@ -2772,10 +2773,53 @@ begin
   -- schema and table committed in its place, was what it read: the namesake's maximum became the frontier, and an id
   -- grid's retention horizon (frontier minus retain) moved with it. Locked by oid, the read waits for nothing of it.
   perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'reading the write frontier');
+  -- #632: read top-down in WINDOWS of the control column, each in a subtransaction rolled back once read.
+  -- One read over the whole parent locked every partition and its index (two lock-table slots each) until
+  -- the caller's transaction ended, and obtain's lock budget (#786) is zeroed after it, so a tick held twice
+  -- the partition count plus what the budget allows: at the default max_locks_per_transaction (64) and
+  -- max_connections (100) every tick of a 5,727-partition grid failed with `out of shared memory`, the grid
+  -- stopped growing, and every write past it would be refused. Past about 7,000 the read alone overflowed.
+  -- Each window's bounds are literals, so planning prunes it to the partitions it can reach and locks only
+  -- those; the rollback releases them (the value is in a variable, which a rollback does not touch), and the
+  -- parent's own lock, taken above in this transaction, stays. So a read holds at most one window's
+  -- partitions at a time, whatever the partition count. The cuts are every 128th recorded lo from the top,
+  -- encoded exactly as the partition bounds were; the windows tile the whole column, the top one unbounded
+  -- above and the last unbounded below, so a partition pgpm does not record (attached by hand, #1119) and
+  -- the monolith are read in whichever window their range meets. The first window holding a row holds the
+  -- maximum, the steady state being the first window or the one below it, since the frontier sits the
+  -- lookahead under the top of the grid.
   -- ORDER BY ... LIMIT 1 (not max()) so it works for uuid too; uses the index.
   -- Qualify with an alias so ORDER BY binds to the (typed) column, not the ::text projection.
-  execute format('select t.%I::text from %s t order by t.%I desc limit 1',
-                 cfg.control_column, p_parent::text, cfg.control_column) into v_max;
+  select format_type(a.atttypid, a.atttypmod) into v_coltype
+    from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;
+  select coalesce(array_agg(pgpm._encode(cfg.control_kind, c.lo,
+                    cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
+                    cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz)
+                  order by c.o desc), '{}')
+    into v_cuts
+    from (select d.lo, d.o, row_number() over (order by d.o desc) as rn
+            from (select distinct p.lo,
+                         case when cfg.control_kind = 'id' then p.lo::numeric
+                              else extract(epoch from p.lo::timestamptz) end as o
+                    from pgpm.part p where p.parent_table = p_parent and p.attached) d) c
+   where c.rn % 128 = 0;
+  for i in 1 .. cardinality(v_cuts) + 1 loop
+    v_lo_lit := v_cuts[i];   -- null past the last cut: the window is unbounded below
+    begin
+      execute format('select t.%I::text from %s t where %s and %s order by t.%I desc limit 1',
+                     cfg.control_column, p_parent::text,
+                     case when v_lo_lit is null then 'true'
+                          else format('t.%I >= %L::%s', cfg.control_column, v_lo_lit, v_coltype) end,
+                     case when v_hi_lit is null then 'true'
+                          else format('t.%I < %L::%s', cfg.control_column, v_hi_lit, v_coltype) end,
+                     cfg.control_column) into v_max;
+      raise sqlstate 'PGPMF';
+    exception when sqlstate 'PGPMF' then
+      null;
+    end;
+    exit when v_max is not null;
+    v_hi_lit := v_lo_lit;
+  end loop;
   if v_max is null then
     return case when cfg.control_kind = 'id' then cfg.partition_anchor else pgpm._ts_text(now()) end;
   end if;
@@ -3322,9 +3366,10 @@ begin
 
   v_frontier := pgpm._frontier_native(p_parent);
   v_lo       := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, v_frontier, cfg.partition_tz);
-  -- the budget's zero (#786): after the frontier read, so the locks it holds on every existing partition
-  -- are not charged to the cells this call builds, and before the walk, so everything the walk itself
-  -- takes is (the first partition's cost includes the walk's own reads up to it)
+  -- the budget's zero (#786): after the frontier read, which holds only the parent's lock once it returns
+  -- (#632: it read every existing partition under one lock each and held them, uncharged, to the end of
+  -- the tick), and before the walk, so everything the walk itself takes is (the first partition's cost
+  -- includes the walk's own reads up to it)
   select count(*) into v_locks0 from pg_locks where pid = pg_backend_pid() and not fastpath;
   -- #1162: the attached rows the walk can meet, read once (after the budget's zero, where the first cell's
   -- _cell_attached used to read them), so a tick costs the lookahead plus the partitions, not their product
@@ -3450,8 +3495,8 @@ $$;
 -- (max_connections + max_prepared_transactions), leaving the other half to every other session. Measured
 -- rather than estimated from the catalog, because the cost depends on the table (~8 slots a partition for
 -- a primary key and a TOASTable column, one more per index). Counted from the first CREATE, not from the
--- call's start: the frontier read above locks every existing partition of the parent, and a table that
--- simply has many partitions must still be extendable by a few. The refusal raises, so the two partitions
+-- call's start: the frontier read above once locked every existing partition of the parent (it holds only
+-- the parent's lock now, #632), and a table that simply has many partitions must still be extendable by a few. The refusal raises, so the two partitions
 -- that paid for the measurement roll back with the rest: a refused call creates nothing, as p_max's does.
 create or replace function pgpm.extend_to(p_parent regclass, p_value text, p_max int default 10000)
 returns int language plpgsql as $$

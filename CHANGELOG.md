@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **The write frontier is read without locking every partition** (#632, #818 bullet 2). `_frontier_native`, which
+  every `obtain` tick, `extend_to`, retention on an `id` grid and regrain dispatch call, read `max(control)` with one
+  `ORDER BY ... LIMIT 1` over the parent. That read locked every partition and its index (two lock-table slots
+  each) until the caller's transaction ended, and `obtain`'s lock budget (#786) never counted them. At the default
+  `max_locks_per_transaction` (64) and `max_connections` (100), a lookahead-12,000 `id` grid grown by
+  `maintain_obtain` wedged at 5,727 partitions: every tick logged `skip_obtain` `out of shared memory`, the grid
+  stopped growing, and every write past it would have been refused. Past about 7,000 partitions the read alone
+  overflowed. The read now goes top-down in windows of 128 recorded partitions, each bounded by literal cuts
+  encoded as the partition bounds were (so planning prunes it), and each in a subtransaction rolled back once read,
+  which releases its locks. The top window is unbounded above and the last unbounded below, so a partition attached
+  by hand and the monolith are still read. At 1,001 partitions the read leaves 24 locks held, against 2,024 before.
+  Test `tests/401`; guard `bench/frontier_read_windows.sh`, mutations `frontier_reads_parent_whole`,
+  `frontier_window_keeps_locks`, `frontier_window_excludes_cut`.
 - **docs/reference.md no longer calls the grant-carry gap "the instant between"** (#1144 bullet 3). A `GRANT` or
   `REVOKE` committed between the cutover's read of a table's or an identity sequence's grants and the drop is not
   carried, and for the identity sequences that gap includes any wait for the sequence's lock, so it is not always
