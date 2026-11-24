@@ -29,13 +29,15 @@ and no em dash anywhere (house style), since the text is posted. An issue with a
 reported and gets no comment; the exit is 1.
 
 Output: one line per issue (its action, the counts, and the reader's action where it disagrees), and with
---out, <out>/<issue>.md (the comment) and <out>/actions.json ({"<issue>": "close|trim|keep"}).
+--out, <out>/<issue>.md (the comment) and <out>/actions.json ({"<issue>": "close|trim|keep"}). A rerun into
+the same <out> removes the draft of an issue that has since become INVALID.
 """
 import argparse
 import json
 import os
 import re
 import sys
+import tempfile
 
 STATUSES = ("fixed", "present", "obsolete", "unclear")
 GONE = ("fixed", "obsolete")
@@ -100,6 +102,9 @@ def run(issues, sha, out_dir=None, say=print):
         if errs:
             bad += 1
             say(f"#{n} INVALID: " + "; ".join(errs))
+            # a draft an earlier run wrote for it would otherwise still sit there, ready to post
+            if out_dir and os.path.exists(os.path.join(out_dir, f"{n}.md")):
+                os.remove(os.path.join(out_dir, f"{n}.md"))
             continue
         act = action(bs)
         actions[str(n)] = act
@@ -155,6 +160,16 @@ def selftest():
     ok = "Gone:" in c and "Remaining:" in c and c.count("\n- ") == 7 and "\u2014" not in c
     fails += not ok
     print(("ok    " if ok else "FAIL  ") + "the #1034 comment lists 4 gone and 3 remaining")
+    # a rerun into the same --out after the evidence got worse: the earlier "closing" draft must not survive
+    with tempfile.TemporaryDirectory() as d:
+        good = {"issue": 12, "bullets": [B("b1", "fixed", "PR #754; install.sql:13696")]}
+        run([good], "abc1234", d, say=lambda _: None)
+        had = os.path.exists(os.path.join(d, "12.md"))
+        good["bullets"][0]["evidence"] = "looks fixed"
+        run([good], "abc1234", d, say=lambda _: None)
+        ok = had and not os.path.exists(os.path.join(d, "12.md")) and json.load(open(os.path.join(d, "actions.json"))) == {}
+    fails += not ok
+    print(("ok    " if ok else "FAIL  ") + "a rerun removes the draft of an issue that became INVALID")
     print("selftest: " + ("PASS" if not fails else f"FAIL ({fails})"))
     return 1 if fails else 0
 
