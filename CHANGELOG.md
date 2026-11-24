@@ -8,6 +8,16 @@
   brief. The behaviour is unchanged; only the description of the window.
 - **bench/upgrade_in_place.sh keeps its scratch files in a directory of its own run** (#1034 bullet 1), not at fixed
   `/tmp/up_*` paths that two concurrent runs on one host overwrote for each other.
+- **A tick inside an obtain back-off costs the lookahead, not the lookahead times the partitions** (#1220).
+  `maintain_obtain`'s back-off walk, which decides whether the coverage left ahead of the frontier still lets
+  the tick sit out an armed back-off, asked `_cell_attached` of each of its ceil(obtain / 2) + 1 steps, and each
+  ask scanned every attached `pgpm.part` row of the parent through `_native_gt`: 40,904 calls at lookahead 200
+  and 643,604 at 800, on every tick inside the 30 s after a lost lock race, which is to say under exactly the
+  sustained contention that keeps re-arming it. The walk now takes the one read and the steps `obtain`'s walk
+  took in #1162 (`_cell_walk_rows`, `_cell_walk_step`), and asks `_cell_attached` only of a step the read does
+  not show built or a dead row overlaps, so a hand-dropped or hand-detached cell still bypasses the back-off
+  as before (704 and 2,804 calls). Test `tests/316` part F; guard `bench/obtain_walk_reads_rows_once.sh`,
+  mutation `obtain_backoff_walk_scans_per_step`.
 
 - **`uninstall.sql` removes every role's pgpm jobs for a superuser, and refuses a retirement another role's
   `pgpm_detach` job may hold** (#1500, #1496). It unscheduled by name, and `cron.unschedule(name)` looks the name

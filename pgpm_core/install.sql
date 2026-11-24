@@ -2679,7 +2679,7 @@ end;
 $$;
 
 -- _cell_walk_rows and _cell_walk_step (#1162): a walk over ascending grid cells (obtain's lookahead,
--- extend_to's walk) reads the parent's attached rows ONCE and judges every cell against what it read,
+-- extend_to's walk, maintain_obtain's back-off walk) reads the parent's attached rows ONCE and judges every cell against what it read,
 -- instead of asking _cell_attached of each cell. _cell_attached scans every attached row of the parent
 -- (pgpm.part's only index is (parent_table, child_name), and the bounds are native text compared through
 -- _native_gt), so a walk that asked it per cell did lookahead x partitions comparisons: 81,204 _native_gt
@@ -2704,7 +2704,7 @@ $$;
 -- built is not in the read and cannot mislead it: the walk's later cells start at or past its hi.
 -- One-directional: true comes only from a built row the read saw, since a wrong true skips a cell that
 -- needs building, while a false costs only the per-cell ask it replaced. maintain_obtain's back-off walk
--- (at most ceil(obtain / 2) + 1 steps, and only while a back-off is armed) still asks per step.
+-- takes the same read and steps (#1220).
 create or replace function pgpm._cell_walk_rows(p_parent regclass, p_kind text, p_from text,
                                                   out los text[], out his text[], out built boolean[])
 language sql stable as $$
@@ -16359,6 +16359,9 @@ declare
   v_top text;
   v_nsp name;
   v_rel name;
+  -- the back-off walk's one read of the attached rows, and its state (#1220, see _cell_walk_step)
+  v_los text[]; v_his text[]; v_built boolean[];
+  v_at int := 1; v_reach text; v_dead_reach text; v_covered boolean;
 begin
   -- #951: refused before anything is read or committed; p_status (INOUT: the status it returns) is not
   perform pgpm._refuse_null_arguments('maintain_obtain', json_build_object('p_parent', p_parent));
@@ -16408,7 +16411,11 @@ begin
   -- again, and the bypass would buy one more ACCESS EXCLUSIVE queued behind the contention for nothing. The
   -- back-off still holds while that many steps obtain would not build remain, which is what it exists to
   -- protect (an ACCESS EXCLUSIVE queued behind sustained contention every tick). The walk stops at the
-  -- threshold, so it costs at most ceil(obtain / 2) + 1 grid steps. Counted only while a back-off is active, so a healthy tick pays nothing
+  -- threshold, so it costs at most ceil(obtain / 2) + 1 grid steps, judged against ONE read of the attached
+  -- rows the way obtain's walk is (#1220, see _cell_walk_step): asked of _cell_attached per step, each step
+  -- scanned every attached row, so a backed-off tick cost ceil(obtain / 2) x partitions comparisons (643,604
+  -- _native_gt calls at lookahead 800), quadratic in the lookahead under exactly the sustained contention
+  -- that keeps re-arming the back-off. Counted only while a back-off is active, so a healthy tick pays nothing
   -- extra, and guarded so a failure to count (a dropped parent, say) falls back to the back-off rather than
   -- aborting the sweep.
   v_try := coalesce(cfg.obtain_retry_after, '-infinity'::timestamptz) <= clock_timestamp();
@@ -16421,15 +16428,21 @@ begin
                                  pgpm._frontier_native(p_parent), cfg.partition_tz);
       execute format('select %s from pgpm.part where parent_table = %L::regclass and attached',
                      pgpm._max_hi_native(cfg.control_kind), p_parent::text) into v_top;
+      select r.los, r.his, r.built into v_los, v_his, v_built
+        from pgpm._cell_walk_rows(p_parent, cfg.control_kind, v_cell) r;
       -- the frontier's own cell is walked but not counted, so it starts the count one below zero
       v_ahead := -1;
       loop
         v_next := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);
         exit when v_ahead >= ceil(cfg.obtain / 2.0) or v_top is null
                or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top));
+        select w.p_at, w.p_reach, w.p_dead_reach, w.p_covered into v_at, v_reach, v_dead_reach, v_covered
+          from pgpm._cell_walk_step(cfg.control_kind, v_cell, v_next, v_los, v_his, v_built,
+                                    v_at, v_reach, v_dead_reach) w;
         -- in obtain's order, as separate statements: _cell_attached forgets a detached cell's row first, and
-        -- until it has, _obtain_name reads the detached table holding the cell's name as a stranger's
-        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then
+        -- until it has, _obtain_name reads the detached table holding the cell's name as a stranger's. A step
+        -- the one read shows built, with no dead row over it, is coverage without asking again
+        if not (v_covered or pgpm._cell_attached(p_parent, cfg, v_cell, v_next)) then
           exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;
         end if;
         v_ahead := v_ahead + 1;
