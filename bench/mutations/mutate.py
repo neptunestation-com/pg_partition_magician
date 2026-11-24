@@ -2591,15 +2591,21 @@ begin
           "                                 pgpm._frontier_native(p_parent), cfg.partition_tz);\n"
           "      execute format('select %s from pgpm.part where parent_table = %L::regclass and attached',\n"
           "                     pgpm._max_hi_native(cfg.control_kind), p_parent::text) into v_top;\n"
+          "      select r.los, r.his, r.built into v_los, v_his, v_built\n"
+          "        from pgpm._cell_walk_rows(p_parent, cfg.control_kind, v_cell) r;\n"
           "      -- the frontier's own cell is walked but not counted, so it starts the count one below zero\n"
           "      v_ahead := -1;\n"
           "      loop\n"
           "        v_next := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);\n"
           "        exit when v_ahead >= ceil(cfg.obtain / 2.0) or v_top is null\n"
           "               or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top));\n"
+          "        select w.p_at, w.p_reach, w.p_dead_reach, w.p_covered into v_at, v_reach, v_dead_reach, v_covered\n"
+          "          from pgpm._cell_walk_step(cfg.control_kind, v_cell, v_next, v_los, v_his, v_built,\n"
+          "                                    v_at, v_reach, v_dead_reach) w;\n"
           "        -- in obtain's order, as separate statements: _cell_attached forgets a detached cell's row first, and\n"
-          "        -- until it has, _obtain_name reads the detached table holding the cell's name as a stranger's\n"
-          "        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then\n"
+          "        -- until it has, _obtain_name reads the detached table holding the cell's name as a stranger's. A step\n"
+          "        -- the one read shows built, with no dead row over it, is coverage without asking again\n"
+          "        if not (v_covered or pgpm._cell_attached(p_parent, cfg, v_cell, v_next)) then\n"
           "          exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;\n"
           "        end if;\n"
           "        v_ahead := v_ahead + 1;\n"
@@ -2652,7 +2658,7 @@ begin
         "by hand inside the frontier's cell or the ceil(obtain / 2) steps past it keeps the back-off "
         "honoured while every write into the hole is refused. One clause, the walk's _cell_attached read "
         "as the bare row overlap. tests/298 parts A, C and D catch it.",
-        [("        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then\n",
+        [("        if not (v_covered or pgpm._cell_attached(p_parent, cfg, v_cell, v_next)) then\n",
           "        if not exists (select 1 from pgpm.part p\n"
           "                        where p.parent_table = p_parent and p.attached\n"
           "                          and pgpm._native_gt(cfg.control_kind, p.hi, v_cell)\n"
@@ -9929,6 +9935,16 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         "verdict from its one read. tests/316 part C catches it.",
         [("    if not (v_covered or pgpm._cell_attached(p_parent, cfg, v_lo, v_hi)) then\n",
           "    if not pgpm._cell_attached(p_parent, cfg, v_lo, v_hi) then\n", 1)],
+    ),
+    # Issue #1220: maintain_obtain's back-off walk reads the rows once too.
+    "obtain_backoff_walk_scans_per_step": (
+        "bench/obtain_walk_reads_rows_once.sh",
+        "Pre-#1220 maintain_obtain: every step of the back-off walk is asked of _cell_attached, which scans "
+        "every attached pgpm.part row of the parent through _native_gt, so a tick that honours an armed "
+        "back-off does ceil(obtain / 2) x partitions comparisons (about 16x the calls at 4x the lookahead). "
+        "One clause, the walk's verdict from its one read. tests/316 part F catches it.",
+        [("        if not (v_covered or pgpm._cell_attached(p_parent, cfg, v_cell, v_next)) then\n",
+          "        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then\n", 1)],
     ),
     "cell_walk_trusts_built_over_dead_row": (
         "bench/obtain_walk_reads_rows_once.sh",

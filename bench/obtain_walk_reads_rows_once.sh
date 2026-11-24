@@ -5,18 +5,21 @@
 # that bench/discriminate.sh can show the file catches the defects its mutations put back (issue #1162):
 # obtain's lookahead walk and extend_to's walk asked _cell_attached of every cell, and each ask scanned
 # every attached pgpm.part row of the parent through _native_gt, so a tick that built nothing did lookahead
-# x partitions comparisons (1,284,804 _native_gt calls at lookahead 800). The walks now read the rows once.
-# The file is the acceptance test, counting the calls from pg_stat_xact_user_functions inside one
-# transaction; this wrapper exists so the mutations have a guard the discriminate track can run against
+# x partitions comparisons (1,284,804 _native_gt calls at lookahead 800). maintain_obtain's back-off walk did
+# the same over its ceil(obtain / 2) + 1 steps (issue #1220). The walks now read the rows once. The file is the
+# acceptance test, counting the calls from pg_stat_xact_user_functions inside one transaction (part F, around
+# the committing maintain_obtain, from the cumulative view flushed by force); this wrapper exists so the mutations have a guard the discriminate track can run against
 # the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# THREE mutations are required to fail against it (bench/mutations/mutate.py):
+# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
 #   obtain_walk_scans_per_cell            -- obtain asks _cell_attached of every cell, the pre-fix shape.
 #                                            Part A.
 #   extend_to_walk_scans_per_cell         -- extend_to's walk does the same. Part C.
 #   cell_walk_trusts_built_over_dead_row  -- the plausible-but-wrong fix: a cell a built row overlaps is
 #                                            skipped though a dead row overlaps it too, so the dead row is
 #                                            never forgotten. Parts B and D.
+#   obtain_backoff_walk_scans_per_step    -- maintain_obtain's back-off walk asks _cell_attached of every
+#                                            step, the pre-#1220 shape. Part F.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test
 # file's path inside the container, for a worktree mounted somewhere other than /repo.

@@ -22,6 +22,12 @@
 --   PART C  the same contract for extend_to's walk over a built range (it builds nothing and returns 0).
 --   PART D  extend_to's walk forgets and rebuilds too: [60, 70) dropped by hand and a dead row over the
 --           built [20, 30); extend_to past the grid rebuilds the one hole and builds the two new cells.
+--   PART F  the same contract for maintain_obtain's back-off walk (#1220): a tick that honours an armed
+--           back-off at 4x the lookahead does under 8x the comparisons. It walks ceil(obtain / 2) + 1 steps,
+--           and asked per step it cost about 16x. maintain_obtain commits, so the calls are counted from the
+--           cumulative pg_stat_user_functions, flushed by force in the statement before each read, every
+--           statement its own transaction. The back-off is armed by hand, as tests/100 arms it: the walk
+--           reads only obtain_retry_after, and the lock race that sets it for real is not what is measured.
 -- The fixtures are asymmetric on purpose: three holes and four dead rows in B against one hole and two
 -- dead rows in D, and in each a dead row over a BUILT cell, so a walk that trusted the read's "built" over
 -- a dead row (skipping the forget) or never trusted it (a rebuild of a live cell) cannot pass.
@@ -29,7 +35,7 @@ create extension if not exists pgtap;
 set client_min_messages = warning;
 set track_functions = 'pl';
 
-select plan(32);
+select plan(36);
 
 -- ==================== (A) a no-op obtain is linear in the lookahead ====================
 create table public.wa316 (id bigint primary key);
@@ -88,6 +94,44 @@ select cmp_ok((select calls from calls316 where step = 'extend_to' and tab = 'b'
 select diag(format('no-op _native_gt calls: obtain %s / %s, extend_to %s / %s (lookahead 100 / 400)',
   (select calls from calls316 where step = 'obtain' and tab = 'a'), (select calls from calls316 where step = 'obtain' and tab = 'b'),
   (select calls from calls316 where step = 'extend_to' and tab = 'a'), (select calls from calls316 where step = 'extend_to' and tab = 'b')));
+
+-- ==================== (F) a backed-off maintain_obtain walks linearly too (#1220) ====================
+-- the A grids, built and unchanged, with obtain's job unpaused and a back-off armed an hour out
+update pgpm.config set paused = false, obtain_retry_after = clock_timestamp() + interval '1 hour'
+ where parent_table in ('public.wa316'::regclass, 'public.wb316'::regclass);
+create temporary table backoff316 (tab text, at text, calls bigint, status text);
+select pg_stat_force_next_flush();
+insert into backoff316 select 'a', 'before', coalesce(sum(calls), 0), null from pg_stat_user_functions
+ where schemaname = 'pgpm' and funcname = '_native_gt';
+do $$ declare s text; begin call pgpm.maintain_obtain('public.wa316', s); insert into backoff316 values ('a', 'tick', null, s); end $$;
+select pg_stat_force_next_flush();
+insert into backoff316 select 'a', 'after', coalesce(sum(calls), 0), null from pg_stat_user_functions
+ where schemaname = 'pgpm' and funcname = '_native_gt';
+select pg_stat_force_next_flush();
+insert into backoff316 select 'b', 'before', coalesce(sum(calls), 0), null from pg_stat_user_functions
+ where schemaname = 'pgpm' and funcname = '_native_gt';
+do $$ declare s text; begin call pgpm.maintain_obtain('public.wb316', s); insert into backoff316 values ('b', 'tick', null, s); end $$;
+select pg_stat_force_next_flush();
+insert into backoff316 select 'b', 'after', coalesce(sum(calls), 0), null from pg_stat_user_functions
+ where schemaname = 'pgpm' and funcname = '_native_gt';
+create temporary table walk316 as
+  select tab, (select calls from backoff316 x where x.tab = t.tab and at = 'after')
+              - (select calls from backoff316 x where x.tab = t.tab and at = 'before') as calls
+    from (values ('a'), ('b')) t(tab);
+
+select is((select array_agg(status order by tab) from backoff316 where at = 'tick'),
+  array['obtained=0 obtain_backoff', 'obtained=0 obtain_backoff'],
+  'LIVENESS: both ticks honoured the back-off (walked the coverage, built nothing, did not bypass)');
+select ok((select bool_and(obtain_retry_after > clock_timestamp()) from pgpm.config
+            where parent_table in ('public.wa316'::regclass, 'public.wb316'::regclass)),
+  'LIVENESS: both back-offs are still armed after the ticks');
+select ok((select calls from walk316 where tab = 'a') >= 51,
+  'LIVENESS: the counter sees the walk''s comparisons (at least one per step of the small walk, ceil(100 / 2) + 1)');
+select cmp_ok((select calls from walk316 where tab = 'b')::numeric / (select calls from walk316 where tab = 'a'),
+  '<', 8::numeric,
+  'F: a backed-off tick at 4x the lookahead does under 8x the comparisons (linear is about 4x, per-step scans about 16x)');
+select diag(format('backed-off tick _native_gt calls: %s / %s (lookahead 100 / 400)',
+  (select calls from walk316 where tab = 'a'), (select calls from walk316 where tab = 'b')));
 
 -- ==================== (B) obtain forgets and rebuilds what the one read shows is not built ====================
 create table public.hb316 (id bigint primary key, payload text);
