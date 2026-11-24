@@ -94,12 +94,30 @@ returns void language sql as $$
 $$;
 insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
 
--- ============================ PART A: the namesake listed first ============================
--- earlier pg_inherits tuples, freed below, so the operator's later ATTACH takes a lower heap slot than pgpm's cell
-create table public.ra355_dummy (id int) partition by range (id);
-create table public.ra355_d1 partition of public.ra355_dummy for values from (0) to (10);
-create table public.ra355_d2 partition of public.ra355_dummy for values from (10) to (20);
+-- fixture: put an operator's namesake BEFORE pgpm's cell in pg_inherits' heap order, the order every plan that reaches a
+-- parent's partitions through pg_inherits reads them in (a seq scan, and the inhparent index, whose equal keys sort by
+-- heap TID). pgpm's cell is detached and attached again over its own bound until its tuple sorts after the namesake's:
+-- the attach writes a new tuple, which goes at the end of a page or onto another page, never into the dead slot of one
+-- deleted in the same transaction, so a page boundary can take at most a retry. The file used to free earlier slots
+-- with VACUUM for the namesake's ATTACH to reuse, and VACUUM frees nothing while any older snapshot in the database
+-- can still see the dead tuples: one other session's open transaction there failed part A's first witness (#1503).
+-- Answers the attempts it took, 0 when the order already held; the cell keeps its oid, its rows and its bound.
+create function pg_temp.namesake_first(p_parent regclass, p_cell oid, p_ops oid) returns int
+language plpgsql as $$
+declare v_bound text; v_n int := 0;
+begin
+  select pg_get_expr(c.relpartbound, c.oid) into strict v_bound from pg_class c where c.oid = p_cell;
+  while (select ctid from pg_inherits where inhrelid = p_cell and inhparent = p_parent)
+        < (select ctid from pg_inherits where inhrelid = p_ops and inhparent = p_parent) and v_n < 20 loop
+    execute format('alter table %s detach partition %s', p_parent, p_cell::regclass);
+    execute format('alter table %s attach partition %s %s', p_parent, p_cell::regclass, v_bound);
+    v_n := v_n + 1;
+  end loop;
+  return v_n;
+end
+$$;
 
+-- ============================ PART A: the namesake listed first ============================
 create table public.ra355 (id bigint primary key, payload text);
 insert into public.ra355 values (101, 'a'), (102, 'b');
 select pgpm_formal.baseline('public.ra355');   -- the invariant oracle's row ledger (docs/formal/phase3-design.md)
@@ -111,13 +129,12 @@ insert into public.ra355_ref values (1, 600);
 select child_name as a_cell, child_oid as a_cell_oid from pgpm.part
  where parent_table = 'public.ra355'::regclass and lo = '100' \gset
 
-drop table public.ra355_dummy;
-vacuum pg_inherits;
 create schema ra355_ops;
 create table ra355_ops.:"a_cell" (id bigint primary key, payload text);
 insert into ra355_ops.:"a_cell" values (5005, 'operator');
 alter table public.ra355 attach partition ra355_ops.:"a_cell" for values from (5000) to (5100);
 select to_regclass(format('ra355_ops.%I', :'a_cell'))::oid as a_ops_oid \gset
+select pg_temp.namesake_first('public.ra355', :a_cell_oid, :a_ops_oid) as a_moves \gset
 select pgpm_formal.operator_owns(format('ra355_ops.%I', :'a_cell')::regclass);
 select pgpm_formal.wrote('public.ra355', 'id = 5005');
 
@@ -254,9 +271,6 @@ select ok((select retiring_at is not null and retiring_oid = :cc_ops_oid from pg
   'LIVENESS: C''s mark names the namesake, and the job is armed with its detach');
 
 -- ============================ PART D: the #421 backfill, the namesake listed first ============================
-create table public.rd355_dummy (id int) partition by range (id);
-create table public.rd355_d1 partition of public.rd355_dummy for values from (0) to (10);
-create table public.rd355_d2 partition of public.rd355_dummy for values from (10) to (20);
 create table public.rd355 (id bigint primary key, payload text);
 insert into public.rd355 values (131, 'a'), (132, 'b');
 select pgpm_formal.baseline('public.rd355');
@@ -265,13 +279,12 @@ insert into public.rd355 values (600, 'frontier');
 select pgpm_formal.wrote('public.rd355', 'id = 600');
 select child_name as d_cell, child_oid as d_cell_oid from pgpm.part
  where parent_table = 'public.rd355'::regclass and lo = '100' \gset
-drop table public.rd355_dummy;
-vacuum pg_inherits;
 create schema rd355_ops;
 create table rd355_ops.:"d_cell" (id bigint primary key, payload text);
 insert into rd355_ops.:"d_cell" values (9009, 'operator');
 alter table public.rd355 attach partition rd355_ops.:"d_cell" for values from (9000) to (9100);
 select to_regclass(format('rd355_ops.%I', :'d_cell'))::oid as d_ops_oid \gset
+select pg_temp.namesake_first('public.rd355', :d_cell_oid, :d_ops_oid) as d_moves \gset
 select pgpm_formal.operator_owns(:d_ops_oid::oid::regclass);
 select pgpm_formal.wrote('public.rd355', 'id = 9009');
 -- fixture: the row as an install older than child_oid left it
@@ -498,13 +511,10 @@ select is((select count(*)::int from pgpm.log
   0, 'K, L, M: nothing detached or dropped after the upgrade');
 
 -- ============================ PART E: _child_nsp for an unanchored row ============================
--- The operator's schema is created before the parent's, so the namesake comes first both in pg_inherits (the freed
--- heap slots) and in pg_class's (relname, relnamespace) index, whichever way a plan reaches it.
+-- The operator's schema is created before the parent's, so the namesake comes first both in pg_inherits (heap order,
+-- arranged by namesake_first) and in pg_class's (relname, relnamespace) index, whichever way a plan reaches it.
 create schema re355_ops;
 create schema re355_own;
-create table re355_own.re355_dummy (id int) partition by range (id);
-create table re355_own.re355_d1 partition of re355_own.re355_dummy for values from (0) to (10);
-create table re355_own.re355_d2 partition of re355_own.re355_dummy for values from (10) to (20);
 create table re355_own.re355 (id bigint primary key, payload text);
 insert into re355_own.re355 values (141, 'a'), (142, 'b');
 select pgpm_formal.baseline('re355_own.re355');
@@ -513,12 +523,11 @@ insert into re355_own.re355 values (600, 'frontier');
 select pgpm_formal.wrote('re355_own.re355', 'id = 600');
 select child_name as e_cell, child_oid as e_cell_oid from pgpm.part
  where parent_table = 're355_own.re355'::regclass and lo = '100' \gset
-drop table re355_own.re355_dummy;
-vacuum pg_inherits;
 create table re355_ops.:"e_cell" (id bigint primary key, payload text);
 insert into re355_ops.:"e_cell" values (9505, 'operator');
 alter table re355_own.re355 attach partition re355_ops.:"e_cell" for values from (9500) to (9600);
 select to_regclass(format('re355_ops.%I', :'e_cell'))::oid as e_ops_oid \gset
+select pg_temp.namesake_first('re355_own.re355', :e_cell_oid, :e_ops_oid) as e_moves \gset
 select pgpm_formal.operator_owns(:e_ops_oid::oid::regclass);
 select pgpm_formal.wrote('re355_own.re355', 'id = 9505');
 -- fixture: an unanchored row, as the backfill leaves one it could not resolve
