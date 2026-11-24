@@ -38,8 +38,31 @@ select lives_ok(
   'set_obtain accepts a lookahead larger than one transaction can build: later ticks build the rest');
 
 -- ==================== (B) the obtain job's tick builds what fits and logs no failure ===============
-create temporary table ob_tick1 (s text);
-do $$ declare s text; begin call pgpm.maintain_obtain('public.ob212', s); insert into ob_tick1 values (s); end $$;
+-- The tick is run again when, and only when, it was deferred by a lock race. maintain_obtain runs obtain under a
+-- 200 ms lock_timeout and defers on any wait past it, as it documents: skip_obtain with the lock timeout's message,
+-- and its back-off armed. Another session's brief strong lock on a catalog every CREATE TABLE touches is enough, and
+-- a shared catalog's lock is every database's: ACCESS EXCLUSIVE on pg_shdepend or pg_database (autovacuum takes it to
+-- truncate one, and the suite creates and drops a database per file) gives exactly CI's four failures (#1504). A
+-- deferred tick built nothing for the witnesses below to measure, so the fixture clears the back-off and ticks again,
+-- a second apart, five tries at most. Any other failure (53200 above all) is not retried, and (B)'s skip_obtain
+-- assertion names it.
+create temporary table ob_tick1 (s text, tries int);
+do $$
+declare s text; v_try int := 0; v_mark bigint;
+begin
+  loop
+    v_try := v_try + 1;
+    select coalesce(max(id), 0) into v_mark from pgpm.log;
+    call pgpm.maintain_obtain('public.ob212', s);
+    exit when v_try = 5
+           or not exists (select 1 from pgpm.log where id > v_mark and parent_table = 'public.ob212'::regclass
+                           and action = 'skip_obtain' and method = 'canceling statement due to lock timeout');
+    update pgpm.config set obtain_retry_after = null where parent_table = 'public.ob212'::regclass;
+    perform pg_sleep(1);
+  end loop;
+  insert into ob_tick1 values (s, v_try);
+end $$;
+select diag(format('the obtain tick took %s tries', (select tries from ob_tick1)));
 create temporary table ob_n1 as
   select substring(s from '^obtained=([0-9]+)')::int as n from ob_tick1;
 
@@ -50,8 +73,9 @@ select cmp_ok((select n from ob_n1), '>=', 2,
 select cmp_ok((select n from ob_n1), '<', (select slots from ob_budget),
   'LIVENESS: and it stopped short of its lookahead, so the budget, not the lookahead, ended the tick');
 select is(
-  (select count(*)::int from pgpm.log where parent_table = 'public.ob212'::regclass and action = 'skip_obtain'),
-  0, 'the tick did not die exhausting the shared lock table: no skip_obtain was logged');
+  (select array_agg(method order by id) from pgpm.log where parent_table = 'public.ob212'::regclass
+      and action = 'skip_obtain' and method is distinct from 'canceling statement due to lock timeout'),
+  null, 'the tick did not die exhausting the shared lock table: no skip_obtain was logged but a retried lock race');
 select is(
   (select array_agg(lo::numeric order by lo::numeric) from pgpm.part
     where parent_table = 'public.ob212'::regclass and attached and lo::numeric >= (select hi from ob_top0)),
@@ -66,17 +90,20 @@ select is(
 -- partition that exists, which are not the creation loop's (#632 is their subject), and the call's own
 -- fixed reads. What is left to count is what building the cells costs. Fast-path locks are excluded:
 -- they live in the backend's own PGPROC, not in the shared table.
+-- The count after the call is read into a variable before the INSERT: the INSERT takes a lock of its own on
+-- ob_tick2, outside the fast path once the call has filled it, and counted in that statement it was charged to the
+-- call, one slot past half on a call that had built up to the bound (#1504).
 create temporary table ob_tick2 (idle int, made int, slots_taken int);
 do $$
-declare v_before int; v_idle int; v_made int;
+declare v_before int; v_after int; v_idle int; v_made int;
 begin
   perform pgpm.set_obtain('public.ob212', 0);
   v_idle := pgpm.obtain('public.ob212');
   perform pgpm.set_obtain('public.ob212', (select slots from ob_budget));
   select count(*) into v_before from pg_locks where pid = pg_backend_pid() and not fastpath;
   v_made := pgpm.obtain('public.ob212');
-  insert into ob_tick2
-    select v_idle, v_made, count(*)::int - v_before from pg_locks where pid = pg_backend_pid() and not fastpath;
+  select count(*) into v_after from pg_locks where pid = pg_backend_pid() and not fastpath;
+  insert into ob_tick2 values (v_idle, v_made, v_after - v_before);
 end $$;
 
 select is((select idle from ob_tick2), 0,
