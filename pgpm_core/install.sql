@@ -3366,9 +3366,10 @@ begin
 
   v_frontier := pgpm._frontier_native(p_parent);
   v_lo       := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, v_frontier, cfg.partition_tz);
-  -- the budget's zero (#786): after the frontier read, so the locks it holds on every existing partition
-  -- are not charged to the cells this call builds, and before the walk, so everything the walk itself
-  -- takes is (the first partition's cost includes the walk's own reads up to it)
+  -- the budget's zero (#786): after the frontier read, which holds only the parent's lock once it returns
+  -- (#632: it read every existing partition under one lock each and held them, uncharged, to the end of
+  -- the tick), and before the walk, so everything the walk itself takes is (the first partition's cost
+  -- includes the walk's own reads up to it)
   select count(*) into v_locks0 from pg_locks where pid = pg_backend_pid() and not fastpath;
   -- #1162: the attached rows the walk can meet, read once (after the budget's zero, where the first cell's
   -- _cell_attached used to read them), so a tick costs the lookahead plus the partitions, not their product
@@ -3494,8 +3495,8 @@ $$;
 -- (max_connections + max_prepared_transactions), leaving the other half to every other session. Measured
 -- rather than estimated from the catalog, because the cost depends on the table (~8 slots a partition for
 -- a primary key and a TOASTable column, one more per index). Counted from the first CREATE, not from the
--- call's start: the frontier read above locks every existing partition of the parent, and a table that
--- simply has many partitions must still be extendable by a few. The refusal raises, so the two partitions
+-- call's start: the frontier read above once locked every existing partition of the parent (it holds only
+-- the parent's lock now, #632), and a table that simply has many partitions must still be extendable by a few. The refusal raises, so the two partitions
 -- that paid for the measurement roll back with the rest: a refused call creates nothing, as p_max's does.
 create or replace function pgpm.extend_to(p_parent regclass, p_value text, p_max int default 10000)
 returns int language plpgsql as $$
