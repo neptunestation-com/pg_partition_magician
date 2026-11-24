@@ -260,6 +260,18 @@ database unless the coordinator hands them out; pass 2 ended with seven files nu
 renumbers a duplicate `pgpm_perfNN` (databases; the later whole name, and it stops when one is still
 duplicated afterwards) but cannot renumber files.
 
+## Open-issue sweep
+
+A staleness sweep asks, per bullet of each old open issue, whether main still has it: one read-only
+agent per batch of issues writes each bullet's status (`fixed`, `present`, `obsolete`, `unclear`) with
+evidence, and `sweep_actions.py <batch.json>... --main <sha> --out <dir>` turns those into each issue's
+action and its comment. Readers report statuses, not actions: the action follows from the statuses
+(close when every bullet is gone, keep when none is, trim otherwise), and on 2026-11-23 a reader's own
+"keep" on #1034 hid four obsolete bullets. The script also holds each bullet to the evidence its status
+needs (a `fixed` names a PR or sha and where main now does the right thing), so an issue it calls
+INVALID goes back to its reader, not out as a comment. Its docstring has the input format; `--selftest`
+holds the #1034 case.
+
 ## Per-PR verification tooling
 
 The standing mode after convergence (docs/adversarial-review.md, "Per-PR verification"), started early as a

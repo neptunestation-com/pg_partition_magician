@@ -74,10 +74,15 @@ nothing.
 `archive`, `perf`, `discriminate`, `locktrace` and `lockview` tracks each need their own
 image or service and are skipped, so a green `./test.sh all` does **not** predict a green CI.
 
-Use **`./test.sh ci`** before pushing anything that touches `pgpm_core/install.sql`, which
-every one of those tracks installs. It runs each track as a child invocation, so each gets
-its own `set -e` and behaves exactly as CI's separate jobs do, and it runs them all rather
-than stopping at the first failure.
+Every one of those tracks installs `pgpm_core/install.sql`, so a change to it needs them all,
+and that is **the PR's own jobs' work**: they run the tracks in parallel in about 25 minutes,
+where a serial **`./test.sh ci`** takes hours on one machine (the maintainer's ruling,
+2026-11-18). Locally, prove what your change touches (the fixer's step 4 in
+`.claude/agents/fixer.md` is the list), then push and read the PR's checks. Keep `./test.sh ci`
+for reproducing CI's whole run when Actions cannot: it runs each track as a child invocation,
+so each gets its own `set -e` and behaves exactly as CI's separate jobs do, and it runs them all
+rather than stopping at the first failure. Stop a run, and remove the containers it left, with
+**`./test.sh down`**.
 
 Two tracks are the exception, and they say so rather than hiding it: `locktrace` and
 `lockview` both need eBPF (a privileged container and the host's own kernel headers), so

@@ -16,13 +16,16 @@
 #   ./test.sh lockview                   # the lock-sequence renderer's eBPF capture (PG17, Linux only)
 #   ./test.sh lint                       # every job lint.yml's required Lint summary needs (no Docker)
 #   ./test.sh ci                         # every track CI runs AND the lint track, in one go
+#   ./test.sh down                       # stop every run this script started, in any checkout, and remove its containers
 #
 # `all` means all four PostgreSQL VERSIONS, not all tracks. The timescale, observe, archive, perf,
 # discriminate, locktrace and lockview tracks each need their own image or service, so `./test.sh all` deliberately skips them
 # and a green run of it does NOT mean CI will be green. That gap is real: a change to
 # pgpm_core/install.sql broke the archive track's fixture while `./test.sh all` stayed green from end
-# to end, and only the PR's archive job caught it. Use `./test.sh ci` before pushing anything that
-# touches pgpm_core, which every one of these tracks installs.
+# to end, and only the PR's archive job caught it. Every one of these tracks installs pgpm_core, so a
+# change to it needs them all, and that is the PR's own jobs' work: they run the tracks in parallel in
+# about 25 minutes, where a serial `./test.sh ci` takes hours. Locally, prove the track your change
+# touches, then push (CLAUDE.md, "`./test.sh all` is not what CI runs").
 #
 # Channels:
 #   psql    pgpm_core/install.sql via psql -f         (the source)
@@ -96,13 +99,61 @@ for arg in "$@"; do
     lint) TRACK="lint" ;;
     formal) TRACK="formal" ;;
     ci) TRACK="ci" ;;
-    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | formal [--part=core|live] | lint | ci"; exit 1 ;;
+    down) TRACK="down" ;;
+    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | formal [--part=core|live] | lint | ci | down"; exit 1 ;;
   esac
 done
 
 if command -v docker-compose &>/dev/null; then DC="docker-compose"; else DC="docker compose"; fi
 [ "$CHANNEL" = "all" ] && CHANNELS=(psql bundle dbdev) || CHANNELS=("$CHANNEL")
 [ -n "${CI:-}" ] && BUILD_PROGRESS="--progress=plain" || BUILD_PROGRESS=""
+
+# Every run records its pid in RUNS, so `./test.sh down` stops exactly the runs this script started. `pkill -f test.sh`
+# is the wrong tool: its pattern also matches the shell that runs it, which then dies with the cleanup half done (exit
+# 144, five times in one session). RUNS sits in the git common directory, which every worktree shares, because the
+# containers are shared too: their names are fixed in docker-compose.yml, so a run in one worktree holds the
+# containers a run in another needs.
+RUNS="$(cd "$(git rev-parse --git-common-dir 2>/dev/null || echo "${TMPDIR:-/tmp}")" && pwd)/pgpm_test_runs"
+if [ "$TRACK" = "down" ]; then
+  # Our own ancestors are never stopped: `down` run from inside a recorded run must not kill the shell that runs it.
+  mine=" $$ "; a=$$
+  while a=$(ps -o ppid= -p "$a" 2>/dev/null | tr -d ' ') && [ -n "$a" ] && [ "$a" != 0 ]; do mine="$mine$a "; done
+  stopped=0
+  for f in "$RUNS"/*; do
+    [ -e "$f" ] || continue
+    pid=${f##*/}; rm -f "$f"
+    # A stale file names a pid the system may have handed to something else; stop it only while it is still test.sh.
+    ps -o command= -p "$pid" 2>/dev/null | grep -q 'test\.sh' || continue
+    case "$mine" in *" $pid "*) continue ;; esac
+    # The run and every process under it (a bench script, a docker exec), found from one ps listing.
+    tree=$(ps -A -o pid=,ppid= | awk -v r="$pid" '{par[$1]=$2} END {seen[r]=1; print r; more=1
+      while (more) { more=0; for (c in par) if (!(c in seen) && (par[c] in seen)) { seen[c]=1; print c; more=1 } } }')
+    kill=""; for p in $tree; do case "$mine" in *" $p "*) ;; *) kill="$kill $p" ;; esac; done
+    echo "stopping run $pid ($(echo $kill | wc -w | tr -d ' ') processes)"
+    # shellcheck disable=SC2086 # one word per pid
+    kill -TERM $kill 2>/dev/null || true
+    sleep 1
+    # shellcheck disable=SC2086
+    kill -KILL $kill 2>/dev/null || true
+    stopped=$((stopped + 1))
+  done
+  # By name rather than through compose: `$DC down` reaches only this checkout's compose project, and a run in another
+  # worktree made its containers under that worktree's project. The networks go with them (pgpm_test_net, pinned in
+  # docker-compose.yml); one still in use by something else is left, and says so.
+  ctrs=$(docker ps -a --format '{{.Names}}' | grep -E '^pgpm_test-' || true)
+  nets=""
+  for c in $ctrs; do
+    nets="$nets $(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$c" 2>/dev/null || true)"
+  done
+  # shellcheck disable=SC2086 # one word per container name
+  [ -z "$ctrs" ] || docker rm -f -v $ctrs >/dev/null
+  for n in $(echo "$nets" | tr ' ' '\n' | sort -u); do
+    case "$n" in bridge|host|none) ;; *) docker network rm "$n" >/dev/null 2>&1 || echo "network $n is still in use; left" ;; esac
+  done
+  echo "down: stopped $stopped run(s); removed $(echo $ctrs | wc -w | tr -d ' ') container(s)${ctrs:+:}$(echo " $ctrs" | tr '\n' ' ')"
+  exit 0
+fi
+mkdir -p "$RUNS"; echo "$$" > "$RUNS/$$"; trap 'rm -f "$RUNS/$$"' EXIT
 
 VER=$(awk -F"'" '/default_version/ {print $2}' pgpm_core/extension.control)
 DBDEV_PKG="dist/pg_partition_magician--${VER}.sql"
@@ -1894,6 +1945,7 @@ lint_job_review_tooling_selftest() {
   python3 scripts/review/stop_check.py --selftest
   python3 scripts/review/loop_state.py --selftest
   python3 scripts/review/decisions_queue.py --selftest
+  python3 scripts/review/sweep_actions.py --selftest
 }
 lint_job_shellcheck() {
   # ludeeus/action-shellcheck@master with scandir '.' and severity warning: every shell script of the
