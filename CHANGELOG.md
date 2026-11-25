@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`extend_to`'s `p_max` counts the partitions the call would build, not the grid steps to the target**
+  (#1242). The dry count was the steps from the frontier's floor to the target's: on an `id` grid the frontier is
+  `max(id)`, on a `time` grid `now()`, so every cell `obtain`'s lookahead had already built above it counted as
+  new. A call needing two partitions behind a lookahead of three was refused under `p_max => 3`; behind a lookahead
+  of 200, one needing five was refused under `p_max => 10`. The count now walks the walk's own cells over its one
+  read of the attached rows and counts those the read does not show built, so it never undercounts what the call
+  creates. The lock budget's projection (#591) counts the partitions left to build for the same reason; projected
+  over the cells left to walk, it would come up short by the lookahead. Refusing a typo'd value costs about 55 ms at
+  the default `p_max` (about 20 before). Test `tests/403`, guard `bench/extend_to_counts_new.sh`, mutations
+  `extend_to_counts_grid_steps` and `extend_to_projects_walked_cells`; #836's two mutations are re-expressed for the
+  new count.
 - **`check_uuidv7` and `check_text_time` judge plausibility against 2015-01-01 UTC from every session**
   (#1144 bullet 2). Their floor was the unzoned `timestamptz '2015-01-01'`, read in the session's TimeZone: 05:00
   UTC from New York, 15:00 UTC the day before from Tokyo. The same rows from within a day of it were plausible
