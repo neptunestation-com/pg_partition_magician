@@ -490,7 +490,8 @@ select pgpm.extend_to('public.events', '50000000');
 frontier or touches data -- it only makes the future write legal -- and it is idempotent: partitions that
 already exist are left alone, and the return value is how many new ones it actually created.
 
-`p_max` bounds how many new partitions ONE call may create, checked up front before any are: a typo'd
+`p_max` bounds how many new partitions ONE call may create, checked up front before any are (partitions
+that already exist, the lookahead's included, do not count against it): a typo'd
 value that would need more than `p_max` is refused loudly, creating nothing, rather than silently stopping
 partway to the value you actually asked for. Raise `p_max` for a legitimately large jump.
 

@@ -3504,7 +3504,7 @@ declare
   cfg pgpm.config; v_nsp name; v_rel name;
   v_native text; v_target_lo text;
   v_frontier text; v_lo text; v_hi text; v_name name;
-  v_needed int := 0; v_edge int := 0; v_made int := 0; v_walked int := 0;
+  v_needed int := 0; v_made int := 0;
   v_slots bigint := current_setting('max_locks_per_transaction')::bigint
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
   v_locks0 bigint; v_locks1 bigint; v_locks2 bigint; v_projected bigint;
@@ -3529,36 +3529,43 @@ begin
 
   v_frontier := pgpm._frontier_native(p_parent);
   v_lo       := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, v_frontier, cfg.partition_tz);
+  -- #1162: the attached rows the walk can meet, read once, as obtain reads them. The dry count and the walk
+  -- both judge their cells by this one read.
+  select r.los, r.his, r.built into v_los, v_his, v_built
+    from pgpm._cell_walk_rows(p_parent, cfg.control_kind, v_lo) r;
 
-  -- count-only dry run: how many grid steps stand between the current forward edge and the target.
-  -- Deliberately ignorant of which of those already exist (a conservative, cheap upper bound) -- the
-  -- point is refusing BEFORE touching the catalog, not computing the tightest possible cap.
+  -- count-only dry run: how many partitions the walk below can build, refused before it builds any. It
+  -- walks the walk's own cells, from the frontier's floor to the target's, and counts each the read does
+  -- not show built. The walk builds only such a cell (and not even one of those that _cell_attached finds
+  -- covered, a partition attached by hand), so the count never undercounts what it builds, and a hole in the
+  -- grid (#710) is counted though the walk leaves it.
   --
-  -- PLUS THE EDGE'S OWN CELL WHEN IT IS MISSING (issue #836). The walk below starts AT the edge's floor, so
-  -- it visits v_needed + 1 cells and builds the first of them too when nothing attached overlaps it: a
-  -- 1-second time grid with a lookahead of 0, a few seconds after its last obtain, has no cell under now().
-  -- Counting steps alone let p_max => 1 create two partitions. The edge is asked exactly as the walk asks
-  -- it (overlap with an attached partition, a hand-dropped one forgotten first, #908), so the dry count
-  -- still never undercounts what the walk builds. A refusal raises, so a row forgotten here comes back.
-  if not pgpm._cell_attached(p_parent, cfg, v_lo,
-                             pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz))
-  then
-    v_edge := 1;
-  end if;
-  while pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo) loop
-    v_lo := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz);
-    v_needed := v_needed + 1;
-    exit when v_needed + v_edge > p_max;
+  -- NOT GRID STEPS (issue #1242). The count was the steps from the frontier's floor to the target's: on an
+  -- id grid the frontier is max(id), and the cells obtain's lookahead had already built above it counted as
+  -- new, so a call needing two partitions was refused under p_max => 3, "would need more than 3".
+  --
+  -- THE EDGE'S OWN CELL (issue #836) is the walk's first, counted the same way: a 1-second time grid with a
+  -- lookahead of 0, a few seconds after its last obtain, has no cell under now(), and counting steps past it
+  -- alone let p_max => 1 create two partitions.
+  loop
+    v_hi := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz);
+    select w.p_at, w.p_reach, w.p_dead_reach, w.p_covered into v_at, v_reach, v_dead_reach, v_covered
+      from pgpm._cell_walk_step(cfg.control_kind, v_lo, v_hi, v_los, v_his, v_built,
+                                v_at, v_reach, v_dead_reach) w;
+    if not v_covered then
+      v_needed := v_needed + 1;
+    end if;
+    exit when v_needed > p_max or not pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo);
+    v_lo := v_hi;
   end loop;
-  if v_needed + v_edge > p_max then
+  if v_needed > p_max then
     raise exception 'pg_partition_magician: extend_to(%, %) would need more than % new partitions to reach it; refusing rather than partially extending (raise p_max, or check p_value for a typo)',
       p_parent, p_value, p_max;
   end if;
 
+  -- the walk, over the same cells and the same read, from its start
   v_lo := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, v_frontier, cfg.partition_tz);
-  -- #1162: the attached rows the walk can meet, read once, as obtain reads them
-  select r.los, r.his, r.built into v_los, v_his, v_built
-    from pgpm._cell_walk_rows(p_parent, cfg.control_kind, v_lo) r;
+  v_at := 1; v_reach := null; v_dead_reach := null;
   loop
     v_hi := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz);
     -- the grid can run out (#299): a uuidv7 grid stops at the 48-bit ceiling. obtain() exits quietly
@@ -3592,10 +3599,11 @@ begin
           select count(*) into v_locks1 from pg_locks where pid = pg_backend_pid() and not fastpath;
         elsif v_made = 2 then
           select count(*) into v_locks2 from pg_locks where pid = pg_backend_pid() and not fastpath;
-          -- the rest of the walk is at most v_needed + 1 cells (the dry count's steps plus the edge's own
-          -- cell) less the ones walked so far, each costing what the second partition did
+          -- the rest of the walk builds at most the dry count's partitions less the two built, each costing
+          -- what the second did. Partitions, not cells (#1242): the cells it walks past are already built,
+          -- and on an id grid the lookahead's are all walked before the first partition it builds.
           v_projected := (v_locks2 - v_locks0)
-                         + greatest(v_locks2 - v_locks1, 1) * greatest(v_needed + 1 - (v_walked + 1), 0);
+                         + greatest(v_locks2 - v_locks1, 1) * greatest(v_needed - v_made, 0);
           if v_projected > v_slots / 2 then
             raise exception 'pg_partition_magician: extend_to(%, %) would hold about % lock-table slots in its one transaction (about % per partition), more than half the shared lock table''s % (max_locks_per_transaction % x (max_connections % + max_prepared_transactions %)); refusing rather than exhausting it for every other session. Extend in steps, each call in its own transaction, of at most about % partitions, or raise max_locks_per_transaction',
               p_parent, p_value, v_projected, greatest(v_locks2 - v_locks1, 1), v_slots,
@@ -3606,7 +3614,6 @@ begin
         end if;
       end if;
     end if;
-    v_walked := v_walked + 1;
     exit when not pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo);
     v_lo := v_hi;
   end loop;

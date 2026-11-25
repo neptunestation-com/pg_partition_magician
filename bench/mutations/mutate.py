@@ -8530,19 +8530,48 @@ select ok(
     ),
     "extend_to_edge_uncounted": (
         "bench/extend_to_edge_cell_count.sh",
-        "Pre-#836 extend_to: the p_max dry count counts grid steps past the frontier's floor only, while the "
+        "Pre-#836 extend_to: the p_max dry count counts the cells past the frontier's floor only, while the "
         "walk also builds the frontier's own cell when it is missing, so p_max => 1 creates two partitions. "
-        "One site, the edge's count. tests/230 part A catches it.",
-        [("  then\n    v_edge := 1;\n  end if;\n", "  then\n    v_edge := 0;\n  end if;\n", 1)],
+        "Re-expressed for #1242's count, which walks the walk's cells: the count starts one cell past the "
+        "walk's first. One site. tests/230 part A catches it.",
+        [("  -- count-only dry run: how many partitions the walk below can build, refused before it builds any. It\n",
+          "  v_lo := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz);\n"
+          "  -- count-only dry run: how many partitions the walk below can build, refused before it builds any. It\n", 1)],
     ),
     "extend_to_edge_always_counted": (
         "bench/extend_to_edge_cell_count.sh",
         "Issue #836, the over-correction: the edge's cell is counted whether or not it is built, so a call "
         "one step past a built edge needs p_max => 2 and p_max => 1 is refused where it must create its one "
-        "partition. One site, the edge's count. tests/230 part C catches it.",
-        [("  v_needed int := 0; v_edge int := 0; v_made int := 0; v_walked int := 0;\n",
-          "  v_needed int := 0; v_edge int := 1; v_made int := 0; v_walked int := 0;\n", 1),
-         ("  then\n    v_edge := 1;\n  end if;\n", "  then\n    null;\n  end if;\n", 1)],
+        "partition. Re-expressed for #1242's count, which walks the walk's cells: its first cell is counted "
+        "built or not. One site. tests/230 part C catches it.",
+        [("    if not v_covered then\n      v_needed := v_needed + 1;\n",
+          "    if not v_covered or v_lo = pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,\n"
+          "                                                 v_frontier, cfg.partition_tz) then\n"
+          "      v_needed := v_needed + 1;\n", 1)],
+    ),
+    # Issue #1242: extend_to's p_max dry count and its lock projection count partitions to build, not cells.
+    "extend_to_counts_grid_steps": (
+        "bench/extend_to_counts_new.sh",
+        "Pre-#1242 extend_to: the p_max dry count counts every grid cell from the frontier's floor to the "
+        "target's, built or not, so the cells obtain's lookahead built above max(id) or now() count as new and "
+        "a call needing two partitions behind a lookahead of three is refused under p_max => 2 and 3. One "
+        "site, the count's test of the read. tests/403 parts A and B catch it.",
+        [("    if not v_covered then\n      v_needed := v_needed + 1;\n    end if;\n",
+          "    v_needed := v_needed + 1;\n", 1)],
+    ),
+    "extend_to_projects_walked_cells": (
+        "bench/extend_to_counts_new.sh",
+        "Issue #1242, the plausible-but-wrong fix: the count becomes partitions to build, but the lock "
+        "budget's projection keeps the pre-fix shape, the count plus one less the cells walked so far. Behind "
+        "a lookahead every built cell is walked before the first partition is built, so the projection comes "
+        "up short by about the lookahead's cells times the per-partition cost, and a call the budget must "
+        "refuse can pass it. Three sites: the counter, its increment, the projection. tests/403 part C "
+        "catches it.",
+        [("  v_needed int := 0; v_made int := 0;\n", "  v_needed int := 0; v_made int := 0; v_walked int := 0;\n", 1),
+         ("                         + greatest(v_locks2 - v_locks1, 1) * greatest(v_needed - v_made, 0);\n",
+          "                         + greatest(v_locks2 - v_locks1, 1) * greatest(v_needed + 1 - (v_walked + 1), 0);\n", 1),
+         ("    exit when not pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo);\n    v_lo := v_hi;\n",
+          "    v_walked := v_walked + 1;\n    exit when not pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo);\n    v_lo := v_hi;\n", 1)],
     ),
     "obtain_trusts_dropped_cell": (
         "bench/obtain_rebuilds_dropped_cell.sh",

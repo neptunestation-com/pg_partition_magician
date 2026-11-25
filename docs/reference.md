@@ -1491,7 +1491,11 @@ partitions short of the value actually asked for. None of the three arguments ta
 `p_max` is not "no cap", and a null `p_value` names no cell, so either (or a null `p_parent`) is refused
 before anything is read, the message naming it. The count includes the forward edge's own cell when
 nothing attached covers it (on a fine `time` grid with a short lookahead, the cell `now()` has moved
-into since the last `obtain`), because the call builds that cell too. Like `obtain`, it stops (here, raises) if the next grid
+into since the last `obtain`), because the call builds that cell too. Partitions that already exist count
+for nothing, the ones `obtain`'s lookahead built above the frontier included: the count is of the cells
+between the frontier's and `p_value`'s that pgpm records no built partition over. It never undercounts what
+the call creates; it can overcount by a cell a partition attached by hand covers, or one whose name is
+taken (left unbuilt and logged). Like `obtain`, it stops (here, raises) if the next grid
 boundary cannot be expressed (the `uuidv7`/`text_time` ceilings described above).
 
 It is a function, so every partition one call creates is created in one transaction and holds its locks
