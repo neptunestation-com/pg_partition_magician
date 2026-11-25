@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Run tests/301 and tests/302 against an ARBITRARY copy of pgpm_core/install.sql, so bench/discriminate.sh
-# can point them at a mutant (issues #1081, #1084, #1039 bullet 3, #1120).
+# Run tests/301, tests/302 and tests/402 against an ARBITRARY copy of pgpm_core/install.sql, so
+# bench/discriminate.sh can point them at a mutant (issues #1081, #1084, #1039 bullet 3, #1120, #1144).
 #
-# WHY A WRAPPER. The two files are plain pgTAP files and the default matrix already runs them on every
+# WHY A WRAPPER. The three files are plain pgTAP files and the default matrix already runs them on every
 # version and channel, so on correct code this script adds nothing. What it adds is the standing proof that
 # they DISCRIMINATE: that check_text_time's report is wrong, or raises, or accepts a shape transmute refuses,
-# when one of its three contracts is taken out. Each file pairs its verdicts with liveness witnesses of its
-# own (the session really misreads a bare render of the epoch; the bad row really has the declared shape and
-# really overflows the plain decode; transmute really refuses the radix).
+# when one of its contracts is taken out, and that check_uuidv7's and check_text_time's plausibility count
+# follows the session's zone when their floor is unzoned again. Each file pairs its verdicts with liveness
+# witnesses of its own (the session really misreads a bare render of the epoch; the bad row really has the
+# declared shape and really overflows the plain decode; transmute really refuses the radix; the rows really
+# lie between the UTC floor and the session-zone one).
 #
 # tests/301's witnesses that a session misreads a bare render hold below PostgreSQL 18 only (18 reads the
 # session zone's own abbreviations first), so its mutant is caught on the discriminate track's PostgreSQL 17
@@ -24,6 +26,9 @@
 #                                           reports on unit 'h' over an overflowing column and an empty one
 #   check_text_time_shape_floor_dropped  -- check_text_time without the width and discard-bits rule it shares
 #                                           with transmute: tests/302 (C) samples width 0 and discard bits -1
+#   check_uuidv7_floor_session_zone      -- check_uuidv7's plausibility floor unzoned again: tests/402 counts 1
+#                                           of 5 from New York, 4 from Tokyo, and transmute refuses from New York
+#   check_text_time_floor_session_zone   -- the same for check_text_time and the text_time kind
 #
 # Usage: check_text_time_contract.sh <container> <db> [install.sql]
 # Runs on the plain core image (pgtap and pg_prove). CHECK_TEXT_TIME_TEST_DIR overrides the directory holding
@@ -31,7 +36,7 @@
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
 DIR="${CHECK_TEXT_TIME_TEST_DIR:-/repo/tests}"
-FILES="301_check_text_time_epoch_bound_test.sql 302_check_text_time_overflow_radix_test.sql"
+FILES="301_check_text_time_epoch_bound_test.sql 302_check_text_time_overflow_radix_test.sql 402_plausibility_floor_utc_test.sql"
 fail=0
 
 q() { docker exec "$C" psql -U postgres "$@"; }

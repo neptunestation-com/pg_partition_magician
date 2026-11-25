@@ -13,7 +13,7 @@
 --           the future, in every session (3.5 hours late it is 1.5 hours in the future).
 --   tt301b  the sample path (cuid ms): four rows, three plausible. 23.5 hours ahead is plausible (the window
 --           ends one day past now()) and falls out of it 3.5 hours late; 2015-01-01 00:30 UTC is plausible
---           (the floor is 2015-01-01 in the session's zone) and falls under it one hour early in Dublin;
+--           (the floor is 2015-01-01 UTC, #1144) and falls under it one hour early in Dublin;
 --           2013 is never plausible. So the defect counts 2 in each zone, for a different row in each.
 --   tt301c  a non-default epoch (seconds since 2014-05-13 16:53:20+00, KSUID's): the maximum decodes to its
 --           instant, so the bound parameter is p_epoch itself and not only the default.

@@ -9747,6 +9747,26 @@ select ok(
         "assertions 23 and 26 catch it.",
         [("  perform pgpm._text_time_shape_floor(p_width, p_discard_bits, 'p_');\n", "", 1)],
     ),
+    # issue #1144 bullet 2: the plausibility floor read in the session's TimeZone, one mutation per function;
+    # bench/check_text_time_contract.sh runs tests/402 against them.
+    "check_uuidv7_floor_session_zone": (
+        "bench/check_text_time_contract.sh",
+        "Pre-#1144 check_uuidv7: the plausibility floor is the unzoned timestamptz '2015-01-01' again, read in the "
+        "session's TimeZone, so from New York (05:00 UTC) rows from the first hours of 2015 are implausible and "
+        "from Tokyo (15:00 UTC the day before) a row from the last hours of 2014 is plausible, and transmute "
+        "refuses from New York a uuidv7 table that samples at 1.0 from UTC. Both counts, the plausible one and "
+        "the fraction's. tests/402 assertions 6, 9 and 13 catch it.",
+        [("filter (where ts between timestamptz '2015-01-01 00:00:00+00' and now()",
+          "filter (where ts between timestamptz '2015-01-01' and now()", 2)],
+    ),
+    "check_text_time_floor_session_zone": (
+        "bench/check_text_time_contract.sh",
+        "Pre-#1144 check_text_time: the plausibility floor is the unzoned timestamptz '2015-01-01' again, as "
+        "check_uuidv7_floor_session_zone's, for the text_time kind. Both counts. tests/402 assertions 7, 10 and "
+        "15 catch it.",
+        [("  where ts between timestamptz '2015-01-01 00:00:00+00' and now()",
+          "  where ts between timestamptz '2015-01-01' and now()", 2)],
+    ),
     "time_unit_anchor_unchecked": (
         "bench/transmute_step_precision.sh",
         "Issue #1039 bullet 1, the half rule: _time_unit_breach asks the step and not the anchor, so an anchor "
