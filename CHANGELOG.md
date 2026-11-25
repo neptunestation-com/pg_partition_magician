@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`check_uuidv7` and `check_text_time` judge plausibility against 2015-01-01 UTC from every session**
+  (#1144 bullet 2). Their floor was the unzoned `timestamptz '2015-01-01'`, read in the session's TimeZone: 05:00
+  UTC from New York, 15:00 UTC the day before from Tokyo. The same rows from within a day of it were plausible
+  from one session and not from another, and `transmute`, which refuses a uuidv7 or text_time column sampling
+  under 0.5, refused from New York a table of three rows from the first hours of 2015 and one recent row that
+  sampled at 1.0 from UTC. The floor is now the instant 2015-01-01 00:00 UTC, and the reference states the window.
+  Test `tests/402`, run against mutations `check_uuidv7_floor_session_zone` and
+  `check_text_time_floor_session_zone` by `bench/check_text_time_contract.sh`.
 - **`retire` judges the retention policy again once it holds the partition's lock** (#1454). It judged the horizon
   on the config it read at its start, then waited for `SHARE UPDATE EXCLUSIVE` on the partition as long as any reader
   of it liked. A `set_retain` that loosened retention past the partition and committed during that wait was never

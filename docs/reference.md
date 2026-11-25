@@ -3993,8 +3993,9 @@ pgpm.check_uuidv7(p_table regclass, p_control name, p_sample int default 1000)
 ```
 
 Samples a `uuid` column and reports the fraction whose decoded 48-bit timestamp prefix is a plausible
-recent time. Genuine UUIDv7/ULID scores `~1.0`; random UUIDv4 scores `~0`. A heuristic, not a proof; this
-is the check `transmute` runs to gate the uuidv7 kind.
+recent time: no earlier than 2015-01-01 00:00 UTC and no later than one day past `now()`, the same window
+whatever the session's TimeZone. Genuine UUIDv7/ULID scores `~1.0`; random UUIDv4 scores `~0`. A
+heuristic, not a proof; this is the check `transmute` runs to gate the uuidv7 kind.
 
 `sampled`, `plausible`, `fraction`, `oldest` and `newest` describe the **sample**. `newest_decoded` does
 not: it is the column's actual maximum (its greatest non-null value, however many NULLs the column holds),
@@ -4023,8 +4024,9 @@ pgpm.check_text_time(p_table regclass, p_control name, p_prefix text, p_width in
 
 The `text_time` analogue of `check_uuidv7`: samples a `text`/`varchar` column against a *declared* shape
 (the same `p_tt_prefix`/`p_tt_width`/`p_tt_radix`/`p_tt_unit` `transmute` takes) and reports the fraction
-that both match the shape and decode to a plausible recent time. A value that does not even match the
-shape counts as implausible directly, rather than raising -- one malformed row must not abort the sample.
+that both match the shape and decode to a plausible recent time (`check_uuidv7`'s window). A value that
+does not even match the shape counts as implausible directly, rather than raising -- one malformed row
+must not abort the sample.
 So does a value that matches the shape but spells a count past what the decode can hold (an interval holds
 about 9.2e12 seconds, and a `timestamptz` ends in 294276 AD): nine base-36 digits of seconds can spell
 about 1e14. A heuristic, not a proof; this is the check `transmute` runs to gate the text_time kind.

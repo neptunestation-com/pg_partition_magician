@@ -17088,14 +17088,17 @@ begin
   -- they would describe the visible rows as the column's.
   perform pgpm._refuse_filtered_reads(p_table, 'sample',
     'check_uuidv7 would report its fraction and the column''s maximum from those rows alone');
+  -- #1144: the plausibility floor is the instant 2015-01-01 00:00 UTC. Written without an offset it was read in
+  -- the session's TimeZone (05:00 UTC from New York, 15:00 UTC the day before from Tokyo), so the same rows were
+  -- plausible from one session and not from another, and transmute's refusal under 0.5 followed the caller's zone.
   -- by-name-ok: an operator's diagnostic read: it reports a sample of rows and moves none
   return query execute format($q$
     with s as (select pgpm._uuid_to_ts(%1$I) as ts from %2$s limit %3$s),
          m as (select pgpm._uuid_to_ts(t.%1$I) as ts from %2$s t where t.%1$I is not null
                 order by t.%1$I desc limit 1)
     select count(*)::bigint,
-           count(*) filter (where ts between timestamptz '2015-01-01' and now() + interval '1 day')::bigint,
-           round(coalesce(count(*) filter (where ts between timestamptz '2015-01-01' and now() + interval '1 day')::numeric
+           count(*) filter (where ts between timestamptz '2015-01-01 00:00:00+00' and now() + interval '1 day')::bigint,
+           round(coalesce(count(*) filter (where ts between timestamptz '2015-01-01 00:00:00+00' and now() + interval '1 day')::numeric
                           / nullif(count(*), 0), 0), 4),
            min(ts), max(ts),
            (select ts from m),
@@ -17177,6 +17180,7 @@ begin
   -- #873: as check_uuidv7's
   perform pgpm._refuse_filtered_reads(p_table, 'sample',
     'check_text_time would report its fraction and the column''s maximum from those rows alone');
+  -- #1144: the plausibility floor is 2015-01-01 UTC, as check_uuidv7's
   -- by-name-ok: an operator's diagnostic read: it reports a sample of rows and moves none
   return query execute format($q$
     with s as (select %1$I::text as v from %2$s limit %3$s),
@@ -17197,10 +17201,10 @@ begin
          )
     select (select count(*) from s where v is not null)::bigint,
            (select count(*) from decoded
-             where ts between timestamptz '2015-01-01' and now() + interval '1 day')::bigint,
+             where ts between timestamptz '2015-01-01 00:00:00+00' and now() + interval '1 day')::bigint,
            round(coalesce(
              (select count(*) from decoded
-               where ts between timestamptz '2015-01-01' and now() + interval '1 day')::numeric
+               where ts between timestamptz '2015-01-01 00:00:00+00' and now() + interval '1 day')::numeric
                / nullif((select count(*) from s where v is not null), 0), 0), 4),
            (select ts from m_decoded),
            (select ts > now() + interval '1 hour' from m_decoded)
