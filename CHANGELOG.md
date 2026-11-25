@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`retire` judges the retention policy again once it holds the partition's lock** (#1454). It judged the horizon
+  on the config it read at its start, then waited for `SHARE UPDATE EXCLUSIVE` on the partition as long as any reader
+  of it liked. A `set_retain` that loosened retention past the partition and committed during that wait was never
+  seen. A referenced partition's detach was dispatched, and since #1438 it lands, so the table was released with its
+  rows (counted, `fail_retain_reattach`). An unreferenced partition was dropped, its rows gone though the policy in
+  force kept them, and with no `archive_fn` they were gone everywhere. `set_retain`'s recall could save neither,
+  because the mark it clears was the waiting call's own, uncommitted. `retire` now reads the policy again under the
+  partition's lock, `FOR KEY SHARE`, and leaves a partition it no longer reaches as it is, returning `false`.
+  `set_retain` reads it `FOR UPDATE`, so a change begun after that read waits for the hand-off to commit and then
+  judges it as any dispatched retirement. Guard `bench/retire_policy_as_of_lock.sh`, mutations
+  `retire_policy_read_once`, `retire_policy_recheck_unlocked`, `set_retain_policy_unlocked`.
 - **The write frontier is read without locking every partition** (#632, #818 bullet 2). `_frontier_native`, which
   every `obtain` tick, `extend_to`, retention on an `id` grid and regrain dispatch call, read `max(control)` with one
   `ORDER BY ... LIMIT 1` over the parent. That read locked every partition and its index (two lock-table slots
