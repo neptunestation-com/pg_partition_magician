@@ -2,7 +2,7 @@
 name: verifier
 description: Independent verifier for one candidate claim from a pgpm review pass. Sees only the claim and its reproduction, re-runs it, tries to disprove it, and writes a verdict. Use from the /review-pass skill (one verifier per candidate) or the /pr-verify skill (one per candidate, and one in the claims-verifier role per pull request).
 tools: Read, Grep, Glob, Bash, Write
-model: opus
+model: sonnet
 effort: medium
 ---
 
