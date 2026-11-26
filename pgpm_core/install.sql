@@ -10935,10 +10935,14 @@ begin
           current_setting('max_locks_per_transaction'), current_setting('max_connections'),
           current_setting('max_prepared_transactions'),
           -- #1233: what the rollback leaves depends on the driver. Across ticks the copies committed in earlier
-          -- ticks; regrain() (and regrain_history(), through it) made them in this transaction, so none survives.
+          -- ticks; regrain() (and regrain_history(), through it) made them in this transaction, so none survives,
+          -- unless it resumed a run ticks had begun, whose committed copies and cursor outlive the call.
           case when current_setting('pgpm.regrain_one_call', true) = p_parent::oid::text
             then format('The swap rolls back whole, and every copy with it: this call made them in its one transaction (regrain and regrain_history do), so the source stays attached and holds every row, and no run is left in flight. Raise max_locks_per_transaction (a restart) and call it again, or regrain in two passes, each child split into at most about %s partitions (first to a coarser step, then each of its children to %s). maintain (auto-regrain) and regrain_step, one tick per transaction, keep each tick''s copies.',
                         greatest(v_slots / 2 / v_per, 1), v_step)
+            when current_setting('pgpm.regrain_one_call', true) = p_parent::oid::text || ':resumed'
+            then format('The swap rolls back whole, and with it the copies this call made, but not those committed before it: the run was already in flight when this call resumed it, so it stays in flight with those copies, and the source stays attached and holds every row. Raise max_locks_per_transaction (a restart) and call it again, which resumes from them, or abandon the run with pgpm.regrain_cancel(%s) and regrain in two passes, each child split into at most about %s partitions (first to a coarser step, then each of its children to %s).',
+                        p_parent, greatest(v_slots / 2 / v_per, 1), v_step)
             else format('The swap rolls back whole: the source stays attached and holds every row, and the copies are kept. Raise max_locks_per_transaction (a restart) and the next tick swaps, or abandon the run with pgpm.regrain_cancel(%s) and regrain in two passes, each child split into at most about %s partitions (first to a coarser step, then each of its children to %s).',
                         p_parent, greatest(v_slots / 2 / v_per, 1), v_step) end;
       end if;
@@ -11024,8 +11028,11 @@ begin
   -- the swap's DETACH waited on it for ACCESS EXCLUSIVE.
   perform pgpm._regrain_lock(p_parent);
   perform pgpm._lock_oid_or_raise(p_parent, 'share', true, 'regrain');   -- #1335 b10: by oid
-  -- #1233: tell regrain_step's swap refusals that the copies are this transaction's, so they roll back with it
-  perform set_config('pgpm.regrain_one_call', p_parent::oid::text, true);
+  -- #1233: tell regrain_step's swap refusals that the copies are this transaction's, so they roll back with it,
+  -- or, when ticks had already begun the run (asked under _regrain_lock, as _regrain_in_flight requires), that
+  -- the copies they committed outlive this call and the run stays in flight
+  perform set_config('pgpm.regrain_one_call',
+    p_parent::oid::text || case when pgpm._regrain_in_flight(p_parent) then ':resumed' else '' end, true);
   loop
     v_status := pgpm.regrain_step(p_parent, v_child, p_target_step, null);
     if v_status like 'swapped:%' then

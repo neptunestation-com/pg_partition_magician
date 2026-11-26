@@ -10,7 +10,9 @@
     Measured in Europe/London, 61 minutes to a day complete with every row. The message now says which (#1223).
   - The swap's lock-budget refusal, reached through `regrain()` or `regrain_history()`, promised kept copies, a
     next tick that swaps and a run to `regrain_cancel`, where the refusal rolls back every copy the call made in its
-    one transaction. `regrain()` now marks that transaction, and the refusal it reaches says so (#1233).
+    one transaction. `regrain()` now marks that transaction, and the refusal it reaches says so. A call that resumed
+    a run `maintain` ticks began says instead that the copies they committed and the run outlive it, and names
+    `regrain_cancel` (#1233).
   - `skip_archive_retired_range` offered the ledger delete only for chunks recorded under another name, so the
     genuine partition an upgrade straight from v0.5.0 or older holds over its own chunks was sent nowhere. The
     method, the runbook and the reference now name that remedy for it, and the guard follows it: typed as logged,

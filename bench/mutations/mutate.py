@@ -18964,7 +18964,18 @@ MUTATIONS["regrain_swap_refusal_one_call_unmarked"] = (
     "Issue #1233: regrain() does not mark its one transaction, so the swap's measured lock-budget refusal it reaches "
     "promises kept copies, a next tick that swaps and a run to regrain_cancel, where the refusal rolls back every copy "
     "the call made and leaves no run. One site, the mark. tests/315 part G catches it.",
-    [("  perform set_config('pgpm.regrain_one_call', p_parent::oid::text, true);\n", "", 1)],
+    [("  perform set_config('pgpm.regrain_one_call',\n"
+      "    p_parent::oid::text || case when pgpm._regrain_in_flight(p_parent) then ':resumed' else '' end, true);\n",
+      "", 1)],
+)
+MUTATIONS["regrain_swap_refusal_resumed_as_own"] = (
+    "bench/regrain_swap_lock_budget.sh",
+    "Issue #1233, Codex's P2 on #1514: regrain() marks every call as having made the run's copies, though one that "
+    "resumes a run ticks began keeps the copies they committed, and its cursor, through the refusal. Its refusal then "
+    "says every copy rolled back and no run is left, and offers no regrain_cancel for the run that is. One clause, "
+    "the in-flight test. tests/315 part H catches it.",
+    [("    p_parent::oid::text || case when pgpm._regrain_in_flight(p_parent) then ':resumed' else '' end, true);\n",
+      "    p_parent::oid::text, true);\n", 1)],
 )
 MUTATIONS["regrain_swap_refusal_always_one_call"] = (
     "bench/regrain_swap_lock_budget.sh",

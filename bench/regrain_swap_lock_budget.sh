@@ -21,6 +21,8 @@
 #                                          incoming keys swaps holding more than half the table (part E)
 #   regrain_swap_refusal_one_call_unmarked -- regrain() does not mark its one transaction, so its refusal promises
 #                                          kept copies and a next tick (part G, #1233)
+#   regrain_swap_refusal_resumed_as_own -- regrain() marks a call that resumed a run ticks began as having made
+#                                          its copies, so its refusal says none is kept and no run is left (part H)
 #   regrain_swap_refusal_always_one_call -- every refusal worded for regrain()'s one transaction, a tick's
 #                                          included (part D, #1233)
 #
