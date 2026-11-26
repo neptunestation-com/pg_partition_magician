@@ -5,7 +5,8 @@
 [![pg_partition_magician: partition a live Postgres table online](docs/screenshot.png)](https://neptunestation-com.github.io/pg_partition_magician/)
 
 Online RANGE partitioning for PostgreSQL, in **pure SQL**. No compiled extension, no superuser: install it
-by running one file. The only runtime dependency is **pg_cron**, and only to run the background job.
+by running one file. The only runtime dependency is **pg_cron**, and only to run the background job, which a
+role other than a superuser schedules after [three `pg_cron` grants](docs/guide.md#run-it) from one.
 
 It partitions on any **monotonic** key (time, integer/bigint ids including Snowflake, or **UUIDv7 / ULID**)
 and manages the whole lifecycle:
