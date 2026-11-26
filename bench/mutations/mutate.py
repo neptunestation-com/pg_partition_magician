@@ -1326,15 +1326,10 @@ MUTATIONS = {
              "r.parent_table::oid::text, 0)) then\n"
              "      continue;   -- still running; leave it alone\n"
              "    end if;\n", 1),
-            ("  if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then\n"
-             "    raise exception 'pg_partition_magician: cannot abort the transmute of % -- it is "
-             "still running in another session', p_parent;\n"
-             "  end if;\n",
+            # The test alone, not the refusal under it, which #1246 reworded to name the owner it read.
+            ("  if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then\n",
              "  if not pg_try_advisory_lock(hashtextextended('pgpm_transmute:' || "
-             "p_parent::oid::text, 0)) then\n"
-             "    raise exception 'pg_partition_magician: cannot abort the transmute of % -- it is "
-             "still running in another session', p_parent;\n"
-             "  end if;\n", 1),
+             "p_parent::oid::text, 0)) then\n", 1),
         ],
     ),
     "transmute_no_shape_precondition": (
@@ -18073,7 +18068,7 @@ MUTATIONS["scratch_mint_fn_unchecked"] = (
     "swapped while it waits for the function's lock hands the namesake function to the parent's owner. One clause, "
     "the effect check. tests/360 part D catches it.",
     [("    perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = p_fn) = v_owner, p_fn,\n"
-      "                                  'handing a capture function to its parent''s owner');\n", "", 1)],
+      "                                  'handing a capture function to its parent''s owner', 'function');\n", "", 1)],
 )
 MUTATIONS["scratch_owner_follow_fn_unchecked"] = (
     "bench/schema_swap_leftovers.sh",
@@ -18081,7 +18076,7 @@ MUTATIONS["scratch_owner_follow_fn_unchecked"] = (
     "(F9's hypothesis), so a schema swapped while it waits for the capture function's lock hands a namesake to the "
     "new owner. One clause, the effect check. tests/360 part E catches it.",
     [("      perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = r.oid) = v_want, r.oid,\n"
-      "                                    format('%s, handing a scratch function to %I,', p_what, v_want_n));\n", "", 1)],
+      "                                    format('%s, handing a scratch function to %I,', p_what, v_want_n), 'function');\n", "", 1)],
 )
 MUTATIONS["capture_fn_create_or_replace"] = (
     "bench/schema_swap_leftovers.sh",
@@ -18098,7 +18093,7 @@ MUTATIONS["drop_fn_by_oid_unchecked"] = (
     "_regrain_capture_install's and untransmute's drops had: the DROP waits for the function's lock and looks the "
     "name up again, so a schema swapped during the wait drops the operator's function and leaves pgpm's. One "
     "clause, the effect check. tests/360 part H catches it.",
-    [("  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what);\n", "", 1)],
+    [("  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what, 'function');\n", "", 1)],
 )
 
 # The class's static exhaustiveness check (scripts/check_by_name_after_wait.py). bench/by_name_after_wait_lint.sh
