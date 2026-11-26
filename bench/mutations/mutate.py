@@ -5133,6 +5133,49 @@ $$;''',
           "  `maintain` alone builds no forward partitions and writes past the grid start being refused.\n",
           "- **`maintain`**: the one procedure `pg_cron` calls (`obtain`, `retain`, optional auto-`regrain`).\n", 1)],
     ),
+    "guide_raw_cron_omits_detach": (
+        "bench/doc_cron_grants.sh",
+        "Pre-#1245 docs/guide.md: the raw equivalent of pgpm.schedule() registers pgpm and pgpm_obtain only, while "
+        "schedule() also registers the idle pgpm_detach job, which retiring a partition an incoming foreign key "
+        "references needs: an operator who schedules by hand retires no such partition. The exact pre-#1245 text.",
+        [("`cron.schedule('pgpm', '* * * * *', 'call pgpm.maintain_all()')`,\n"
+          "`cron.schedule('pgpm_obtain', '* * * * *', 'call pgpm.maintain_obtain_all()')` and\n"
+          "`cron.schedule('pgpm_detach', '* * * * *', 'select 1')`. The third stays idle until `retire` rewrites its\n"
+          "command to detach a partition an incoming foreign key references; leave it alone, since retiring such a\n"
+          "partition does not work without it.\n",
+          "`cron.schedule('pgpm', '* * * * *', 'call pgpm.maintain_all()')` and\n"
+          "`cron.schedule('pgpm_obtain', '* * * * *', 'call pgpm.maintain_obtain_all()')`.\n", 1)],
+    ),
+    "guide_cron_grants_unnamed": (
+        "bench/doc_cron_grants.sh",
+        "Pre-#1245 docs/guide.md: Run it names no pg_cron grant, while pg_cron revokes cron.schedule_in_database "
+        "and cron.alter_job from PUBLIC and grants no use of its schema, so a role other than a superuser that "
+        "follows the guide meets `permission denied` at pgpm.schedule(). The section as it was, the grants "
+        "paragraph, its statements and what each grant is for all gone.",
+        [("\n**As a role other than a superuser**, `pg_cron` needs three grants first, from a superuser, in its own\n"
+          "database. It revokes `cron.schedule_in_database` (which `schedule()` calls) and `cron.alter_job` (which a\n"
+          "tick calls to hand a referenced partition's detach to `pgpm_detach`) from `PUBLIC`, and grants no use of\n"
+          "its schema:\n"
+          "\n"
+          "```sql\n"
+          "grant usage on schema cron to app_owner;\n"
+          "grant execute on function cron.schedule_in_database(text, text, text, text, text, boolean) to app_owner;\n"
+          "grant execute on function cron.alter_job(bigint, text, text, text, text, boolean) to app_owner;\n"
+          "```\n"
+          "\n"
+          "Without the first two, `schedule()` fails with `permission denied`. Without the third, the role's ticks\n"
+          "cannot dispatch a referenced partition's detach: each such retirement logs `fail_retain_detach` and does\n"
+          "not happen.\n",
+          "", 1)],
+    ),
+    "guide_cron_alter_job_grant_unnamed": (
+        "bench/doc_cron_grants.sh",
+        "The #1501 half of #1245 in docs/guide.md: the schedule_in_database grant named and the alter_job one not, "
+        "so a role other than a superuser schedules its jobs and then never dispatches a referenced partition's "
+        "detach (fail_retain_detach every tick). One site: the alter_job grant statement.",
+        [("grant execute on function cron.alter_job(bigint, text, text, text, text, boolean) to app_owner;\n",
+          "", 1)],
+    ),
     "readme_install_runs_past_error": (
         "bench/doc_install_stops_on_error.sh",
         "Pre-#1090 README.md: the install and upgrade command is `psql \"$DATABASE_URL\" -f pgpm_core/install.sql`, "
@@ -10263,6 +10306,9 @@ MUTATION_SRC = {
     "reference_naive_east_of_utc_no_force": "docs/reference.md",
     "changelog_1161_stale_tail": "CHANGELOG.md",
     "readme_maintain_obtains": "README.md",
+    "guide_raw_cron_omits_detach": "docs/guide.md",
+    "guide_cron_grants_unnamed": "docs/guide.md",
+    "guide_cron_alter_job_grant_unnamed": "docs/guide.md",
     "readme_install_runs_past_error": "README.md",
     "runbook_fk_validate_by_restore": "docs/runbook.md",
     "runbook_dropped_table_syntax_symptom": "docs/runbook.md",

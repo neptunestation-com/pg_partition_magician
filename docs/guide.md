@@ -445,8 +445,26 @@ table can never delay obtain for another, since obtain is the one step where fal
 write is rejected outright rather than merely delayed. Re-running `schedule()` updates both cadences in
 place. `pgpm.unschedule()` removes both jobs (plus `pgpm_detach`, below). Run these from the database
 where `pg_cron` is installed. The raw equivalent is
-`cron.schedule('pgpm', '* * * * *', 'call pgpm.maintain_all()')` and
-`cron.schedule('pgpm_obtain', '* * * * *', 'call pgpm.maintain_obtain_all()')`.
+`cron.schedule('pgpm', '* * * * *', 'call pgpm.maintain_all()')`,
+`cron.schedule('pgpm_obtain', '* * * * *', 'call pgpm.maintain_obtain_all()')` and
+`cron.schedule('pgpm_detach', '* * * * *', 'select 1')`. The third stays idle until `retire` rewrites its
+command to detach a partition an incoming foreign key references; leave it alone, since retiring such a
+partition does not work without it.
+
+**As a role other than a superuser**, `pg_cron` needs three grants first, from a superuser, in its own
+database. It revokes `cron.schedule_in_database` (which `schedule()` calls) and `cron.alter_job` (which a
+tick calls to hand a referenced partition's detach to `pgpm_detach`) from `PUBLIC`, and grants no use of
+its schema:
+
+```sql
+grant usage on schema cron to app_owner;
+grant execute on function cron.schedule_in_database(text, text, text, text, text, boolean) to app_owner;
+grant execute on function cron.alter_job(bigint, text, text, text, text, boolean) to app_owner;
+```
+
+Without the first two, `schedule()` fails with `permission denied`. Without the third, the role's ticks
+cannot dispatch a referenced partition's detach: each such retirement logs `fail_retain_detach` and does
+not happen.
 
 **Upgrading from a version before this split:** if you already called `pgpm.schedule()` before
 upgrading, you must re-run it once to register the new `pgpm_obtain` job -- `maintain()` no longer

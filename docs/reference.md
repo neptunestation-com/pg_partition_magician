@@ -2106,6 +2106,21 @@ already holds a write lock on the table delays the start of `regrain` until it e
 under live writes, use auto-regrain ([`set_regrain`](#set_regrain)), which commits every tick and takes
 no such lock.
 
+Only `regrain` takes this lock; [`regrain_step`](#regrain_step) takes none. Steps driven by hand inside
+**one** transaction (a loop in a `DO` block, say) hold the change-capture trigger's lock on the source from
+the first step to the swap, so a write through the parent into the source's range deadlocks with them: the
+write queues on the source holding its lock on the parent, and the swap's `DETACH` queues on the parent.
+PostgreSQL ends one of the two with `deadlock detected`, and when it ends the steps' transaction, every copy
+made in it rolls back. Commit after every step, as auto-regrain does (a write then goes ahead between steps,
+and the change capture carries it into the fine children), or call `regrain`.
+
+The lock holds off writes through the parent only. A write made straight to the source partition, by its
+name, waits on the source until `regrain` commits and then looks the name up again. The source is gone by
+then, so the name belongs either to the first fine child, which takes it when the source's name would
+otherwise collide with that child's (a row in that child's range lands there, and any other fails with
+`new row for relation ... violates partition constraint`), or to nothing (`relation ... does not exist`).
+Write through the parent.
+
 **Older snapshots.** Its swap waits for every snapshot that cannot see its copies, under the session's
 `lock_timeout` (see [`regrain_step`](#regrain_step)), and refuses when one outlasts it. Call it from a direct
 session: a caller that holds a snapshot across the call is a reader the swap must wait for.
@@ -2135,7 +2150,9 @@ One resumable microbatch of `regrain`: it **copies** (never deletes) a within-ho
 budget-sized batch into its fine child, and performs the atomic swap once the cursor
 (`config.regrain_cursor`) reaches the coarse `hi`. A null `p_target_step` takes the partition step, and a null
 `p_batch` takes `config.regrain_batch`. It runs only in a `READ COMMITTED` transaction and refuses a stricter one
-before it reads anything (see [`regrain`](#regrain)).
+before it reads anything (see [`regrain`](#regrain)). Call it one step per transaction: unlike `regrain`, it
+takes no lock that holds writers off, and steps looped inside one transaction can deadlock with a write through
+the parent at the swap (see [`regrain`](#regrain), **Writes wait for the whole call**).
 
 A **below-horizon** sub-range is handled one of two ways, depending on whether the table archives. With
 `config.archive_fn` unset it is skipped, logged as `regrain_aged`, and discarded with the source at the
@@ -3427,7 +3444,11 @@ pgpm.schedule(p_every text default '* * * * *', p_obtain_every text default '* *
 
 Creates (or replaces) the `pg_cron` job named `pgpm` that runs `call pgpm.maintain_all()` on the
 `p_every` cron schedule in the current database, returning the job id. One job covers every managed
-table and is idle while they are paused. Raises if `pg_cron` is not installed.
+table and is idle while they are paused. Raises if `pg_cron` is not installed. `pg_cron` revokes
+`cron.schedule_in_database` and `cron.alter_job` from `PUBLIC` and grants no use of its schema, so a role
+other than a superuser needs three grants first: `USAGE` on schema `cron`, and `EXECUTE` on those two
+functions (`schedule` calls the first; a tick dispatching a referenced partition's detach calls the second).
+The guide's [Run it](guide.md#run-it) gives the statements.
 
 It also creates a second job, `pgpm_obtain`, that runs `call pgpm.maintain_obtain_all()` on its own,
 independent `p_obtain_every` cron schedule. obtain has its own job because it is the one step where

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **The docs name the `pg_cron` grants a role other than a superuser needs** (#1245). `pg_cron` revokes
+  `cron.schedule_in_database`, which `pgpm.schedule()` calls, and `cron.alter_job`, which a tick calls to hand a
+  referenced partition's detach to the `pgpm_detach` job, from `PUBLIC`, and grants no use of its schema. The README
+  said "no superuser" and no document named a grant, so such a role met `permission denied` at `schedule()`, or,
+  granted that alone, logged `fail_retain_detach` on every tick for a referenced partition that never retired. The
+  guide's Run it section now gives the three `GRANT` statements and what each is for, and the README and the
+  reference's `schedule` entry point to them. The guide's raw equivalent of `schedule()` registers `pgpm_detach`
+  too. Guard `bench/doc_cron_grants.sh`, which reads the jobs and the `cron` calls from `install.sql` and the revokes
+  from the `pg_cron` the harness ships; mutations `guide_raw_cron_omits_detach`, `guide_cron_grants_unnamed`,
+  `guide_cron_alter_job_grant_unnamed`.
+- **The reference says that only `regrain` holds writers off** (#642). `regrain_step` takes no lock on the parent,
+  so steps looped by hand inside one transaction deadlock at the swap with a write through the parent into the
+  source's range. Measured: PostgreSQL ended the steps' transaction with `deadlock detected` and every copy rolled
+  back; one transaction per step let the same write through, and the change capture carried it into its fine child.
+  A write made straight to the source partition by name is not held off by `regrain`'s lock: it waits for the call
+  and then reaches the first fine child, if that child took the source's name, or fails with `relation ... does not
+  exist`. The `regrain` and `regrain_step` entries now say both.
+
 - **`extend_to`'s `p_max` counts the partitions the call would build, not the grid steps to the target**
   (#1242). The dry count was the steps from the frontier's floor to the target's: on an `id` grid the frontier is
   `max(id)`, on a `time` grid `now()`, so every cell `obtain`'s lookahead had already built above it counted as

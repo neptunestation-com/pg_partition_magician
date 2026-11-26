@@ -1576,6 +1576,7 @@ run_perf() {
     "bench/uninstall_cron_jobs.sh pgpm_perf486"
     "bench/retire_policy_as_of_lock.sh pgpm_perf488"
     "bench/extend_to_counts_new.sh pgpm_perf489"
+    "bench/doc_cron_grants.sh pgpm_perf490"
     # The invariant oracle as a guard (formal Phase 3 W5): the clean-code halves of the pairs discriminate.sh completes
     # with the formal_* mutations of pgpm and the oracle_* and summarize_* mutations of the oracle itself.
     "bench/formal_no_lost_row.sh pgpm_perf472"
