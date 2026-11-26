@@ -17,10 +17,14 @@
 #      shape an older install leaves (the two ledger columns dropped, one partition's block origin-only, another's
 #      lifted, a hand-re-created successor's pgpm.part anchor nulled as before #421) and install.sql is re-run over
 #      it, so the recording of adopted anchors, the backfill and the drop of the record are the copy's own.
+#      It also takes the v0.5.0 shape of a genuine archived partition (its anchor nulled, its block origin-only), which
+#      the upgrade holds over its own chunks, and follows the skip_archive_retired_range remedy that names the ledger
+#      delete under the partition's own name (#1234): typed as logged, the partition archives afresh and is dropped.
 #
 # Mutations (bench/mutations/mutate.py): archive_ledger_backfill_origin_only_retired,
 # archive_ledger_backfill_lifted_retired, archive_ledger_backfill_hand_state_attributed,
-# archive_ledger_backfill_adopted_blocked_attributed, archive_ledger_upgrade_adoption_unrecorded.
+# archive_ledger_backfill_adopted_blocked_attributed, archive_ledger_upgrade_adoption_unrecorded,
+# archive_retired_range_own_name_remedy_unnamed.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside
 # the container, for a worktree mounted somewhere other than /repo.
@@ -76,7 +80,8 @@ if ! q -d "$UP" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/n
 fi
 # a: [0, 100) ids 1..9 a<id> (its block left origin-only), [100, 200) ids 101..104 b<id> (its block lifted by
 # pgpm's own _remove_write_block). s: [0, 100) ids 1..3 old<id>, archived, dropped by hand and re-created with ids
-# 5..6 new<id>, blocked origin-only, its anchor nulled as an install before #421 leaves it.
+# 5..6 new<id>, blocked origin-only, its anchor nulled as an install before #421 leaves it. g: [0, 100) ids 1..4 g<id>,
+# archived and kept, its block origin-only and its anchor nulled: the genuine partition as v0.5.0 leaves it (#1234).
 docker exec -i "$C" psql -U postgres -d "$UP" -q -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<'SQL'
 set client_min_messages = warning;
 create schema g330;
@@ -107,8 +112,11 @@ call pgpm.maintain('g330.a');
 call g330.mk('s');
 insert into g330.s select g, 'old' || g from generate_series(1, 3) g;
 call pgpm.maintain('g330.s');
+call g330.mk('g');
+insert into g330.g select g, 'g' || g from generate_series(1, 4) g;
+call pgpm.maintain('g330.g');
 do $$
-declare a0 name; a1 name; s0 name;
+declare a0 name; a1 name; s0 name; g0 name;
 begin
   select child_name into a0 from pgpm.part where parent_table = 'g330.a'::regclass and lo = '0';
   select child_name into a1 from pgpm.part where parent_table = 'g330.a'::regclass and lo = '100';
@@ -123,6 +131,9 @@ begin
   perform pgpm._install_write_block('g330.s', s0);
   execute format('alter table g330.%I enable trigger pgpm_write_block', s0);
   update pgpm.part set child_oid = null where parent_table = 'g330.s'::regclass and child_name = s0;
+  select child_name into g0 from pgpm.part where parent_table = 'g330.g'::regclass and lo = '0';
+  execute format('alter table g330.%I enable trigger pgpm_write_block', g0);
+  update pgpm.part set child_oid = null where parent_table = 'g330.g'::regclass and child_name = g0;
 end $$;
 alter table pgpm.archive_ledger drop column retired_at, drop column child_oid;
 SQL
@@ -157,6 +168,25 @@ check "s's object still holds the dropped rows, the only copy" "$(v "select body
 check "a's two partitions were archived again and dropped" \
   "$(v "select string_agg(format('%s|%s', lo, hi), ' ' order by lo::int) from pgpm.log where parent_table = 'g330.a'::regclass and action = 'retain_drop' and lo::int < 200")|$(v "select string_agg(format('%s=%s', key, body), ' ' order by key) from g330.objects where key in ('g330.a/0', 'g330.a/100')")" \
   "0|100 100|200|g330.a/0=1:a1,2:a2,3:a3,4:a4,5:a5,6:a6,7:a7,8:a8,9:a9 g330.a/100=101:b101,102:b102,103:b103,104:b104"
+
+# g, the genuine partition (#1234): the upgrade adopted its own relation, marked its chunk retired and held it, and
+# the logged remedy for rows that ARE the chunks' rows, under its own name, releases it when typed as logged
+g0=$(v "select child_name from pgpm.part where parent_table = 'g330.g'::regclass and lo = '0'")
+for _ in 1 2; do v "call pgpm.maintain('g330.g')" >/dev/null; done
+check "LIVENESS: g's own relation adopted, its chunk retired and held" \
+  "$(v "select format('%s|%s', p.child_oid = to_regclass(format('g330.%I', p.child_name))::oid, l.retired_at is not null)
+          from pgpm.part p join pgpm.archive_ledger l on l.parent_table = p.parent_table and l.child_name = p.child_name
+         where p.parent_table = 'g330.g'::regclass and p.lo = '0'")|$(v "select string_agg(lo, ',') from pgpm.log where parent_table = 'g330.g'::regclass and action = 'skip_archive_retired_range'")" \
+  "t|t|0"
+want="delete from pgpm.archive_ledger where parent_table = 'g330.g'::regclass and child_name = '$g0' and retired_at is not null"
+check "g's remedy names the ledger delete under its own name (#1234)" \
+  "$(v "select position(\$w\$$want\$w\$ in method) > 0 from pgpm.log where parent_table = 'g330.g'::regclass and action = 'skip_archive_retired_range'")" "t"
+v "$want" >/dev/null
+v "update pgpm.config set retain_batch = null where parent_table = 'g330.g'::regclass" >/dev/null
+for _ in 1 2; do v "call pgpm.maintain('g330.g')" >/dev/null; done
+check "typed as logged it releases g: archived afresh, then dropped" \
+  "$(v "select string_agg(format('%s|%s', lo, hi), ' ') from pgpm.log where parent_table = 'g330.g'::regclass and action = 'retain_drop' and lo = '0'")|$(v "select body from g330.objects where key = 'g330.g/0'")" \
+  "0|100|1:g1,2:g2,3:g3,4:g4"
 
 q -q -c "drop database if exists $UP" >/dev/null 2>&1
 exit "$fail"

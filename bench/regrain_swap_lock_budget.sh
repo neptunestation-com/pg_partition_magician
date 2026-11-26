@@ -19,6 +19,10 @@
 #                                          measured runs swap holding more than half the table (parts D and E)
 #   regrain_swap_incoming_fk_uncharged  -- the swap projects the ATTACHes alone, so the run referenced by twenty
 #                                          incoming keys swaps holding more than half the table (part E)
+#   regrain_swap_refusal_one_call_unmarked -- regrain() does not mark its one transaction, so its refusal promises
+#                                          kept copies and a next tick (part G, #1233)
+#   regrain_swap_refusal_always_one_call -- every refusal worded for regrain()'s one transaction, a tick's
+#                                          included (part D, #1233)
 #
 # Usage: regrain_swap_lock_budget.sh <container> <db> [install.sql]
 # Runs on the plain core image (it needs pgtap and pg_prove, both of which it has). The file sizes every fixture

@@ -47,7 +47,7 @@ create table clk324.clock (t timestamptz);
 insert into clk324.clock values ('2024-10-15 00:00:00+00');
 create function clk324.now() returns timestamptz language sql stable as $$ select t from clk324.clock $$;
 set search_path = clk324, pg_catalog, public;
-select plan(36);
+select plan(37);
 
 -- ============ six time grids, each with a frozen monolith over [2024-08-01, 2024-11-01) ============
 create table public.d324 (id bigint, dt date not null, primary key (id, dt));
@@ -201,16 +201,21 @@ select lives_ok($$ select pgpm.set_regrain('public.u324', null) $$, 'u324''s tar
 select is(pg_temp.attempt(format('select pgpm.regrain(%L, %L, %L)', 'public.e324', :'e_mono', '1 day')), 'completed',
   'LIVENESS: e324 (a date key recorded in Etc/UTC, a zero-offset zone) regrains its monolith to 1 day');
 select throws_like(format('select pgpm.regrain_step(%L, %L, %L)', 'public.z324', :'z_mono', '1 day'),
-  'pg_partition_magician: cannot regrain z324 toward 1 day -- its control column dt is date, which carries no zone, but its grid is recorded in partition_tz America/New_York rather than UTC%A whole number of months is not refused.%',
-  'regrain_step refuses a day on a date grid recorded in America/New_York, naming the zone');
+  'pg_partition_magician: cannot regrain z324 toward 1 day -- its control column dt is date, which carries no zone, but its grid is recorded in partition_tz America/New_York rather than UTC%so the run would copy every sub-range before its swap failed (a date bound at that offset reads as the date before). A whole number of months is not refused.%',
+  'regrain_step refuses a day on a date grid recorded in America/New_York, naming the zone and the swap that would fail');
 select is(pg_temp.run_marks('public.z324'), '0 copies/0 captures/no cursor',
   'nothing was copied for z324');
 select lives_ok($$ select pgpm.set_regrain('public.z324', '1 month') $$,
   'set_regrain accepts a whole month on the same grid: a calendar step round-trips through the zone');
 select lives_ok($$ select pgpm.set_regrain('public.z324', null) $$, 'z324''s target cleared again');
 select throws_like(format('select pgpm.set_regrain(%L, %L)', 'public.w324', '1 hour'),
-  'pg_partition_magician: cannot regrain w324 toward 1 hour -- its control column ts is timestamp without time zone, which carries no zone, but its grid is recorded in partition_tz Europe/London rather than UTC%',
-  'set_regrain refuses an hour on a naive timestamp grid recorded in Europe/London');
+  'pg_partition_magician: cannot regrain w324 toward 1 hour -- its control column ts is timestamp without time zone, which carries no zone, but its grid is recorded in partition_tz Europe/London rather than UTC%and a run spanning a fall-back would copy every sub-range before its swap failed%',
+  'set_regrain refuses an hour on a naive timestamp grid recorded in Europe/London: a fall-back fails its swap');
+-- #1223: a day on the same grid completes when let through (measured: every row kept, each fine partition at the
+-- zone's offset on the column's clock), so it is refused without claiming a swap that would fail
+select throws_like(format('select pgpm.set_regrain(%L, %L)', 'public.w324', '1 day'),
+  'pg_partition_magician: cannot regrain w324 toward 1 day -- %on the column''s clock, so every fine partition would sit off the column''s own bounds. A whole number of months is not refused.%',
+  'set_regrain refuses a day on that grid for the fine partitions off the column''s bounds, not for a swap that would fail');
 
 -- ============ the remedy names its one-way door (P1-02) ============
 select throws_like(format('select pgpm.set_regrain(%L, %L)', 'public.d324', '1 day'),

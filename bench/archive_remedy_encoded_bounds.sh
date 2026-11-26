@@ -12,6 +12,8 @@
 # The mutation it is required to fail against (bench/mutations/mutate.py):
 #   archive_remedy_bounds_unencoded  -- pgpm._attach_back_sql spells the native bounds, the pre-fix remedy. Parts U
 #                                       and T.
+#   archive_remedy_parent_unqualified -- pgpm._attach_back_sql names the parent by its regclass text, which drops the
+#                                       schema on the writing session's search_path (#1414 b1). Part S.
 #
 # Runs on the plain core image (pgtap and pg_prove; no pg_cron). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.

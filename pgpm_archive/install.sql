@@ -3027,8 +3027,22 @@ begin
   -- canonical spelling, so a namesake configured '/P/' reaches the claim the dropped table's 'P/' base holds
   v_base_q := archive._canonical_key(v_base_q);
   if v_base_q ~ '(^|/)\.{1,2}(/|$)' then
-    raise exception 'pg_partition_magician: the object key base % has a "." or ".." segment (archive.config.prefix is %); no store can be addressed with one, so nothing is written there. Spell the prefix without it: archive.configure(%, ..., p_prefix => <the prefix without "." and ".." segments>)',
-      v_base_q, p_prefix, p_parent;
+    -- #1337 b4: say what puts the segment there. archive.configure refuses one in a prefix, so a stored prefix holds
+    -- one only from an older module or a hand UPDATE; otherwise a quoted schema or relation name holding '/./' or
+    -- '/../' does, under a clean prefix, and no prefix changes that: the name is what has to change
+    if archive._canonical_key(p_prefix || 's.t') ~ '(^|/)\.{1,2}(/|$)' then
+      raise exception 'pg_partition_magician: the object key base % has a "." or ".." segment (archive.config.prefix is %); no store can be addressed with one, so nothing is written there. Spell the prefix without it: archive.configure(%, ..., p_prefix => <the prefix without "." and ".." segments>)',
+        v_base_q, p_prefix, p_parent;
+    elsif v_nsp ~ '/\.{1,2}/' then
+      raise exception 'pg_partition_magician: the object key base % has a "." or ".." segment, which the name of schema % puts there (archive.config.prefix % holds none); no store can be addressed with one, so nothing is written there, and no prefix changes that. Rename the schema to a name without "/./" or "/../": ALTER SCHEMA % RENAME TO <the new name>',
+        v_base_q, quote_ident(v_nsp), p_prefix, quote_ident(v_nsp);
+    elsif p_child is null then
+      raise exception 'pg_partition_magician: the object key base % has a "." or ".." segment, which the name of table %.% puts there (archive.config.prefix % holds none); no store can be addressed with one, so nothing is written there, and no prefix changes that. Rename the table to a name without "/./" or "/../": ALTER TABLE %.% RENAME TO <the new name>',
+        v_base_q, quote_ident(v_nsp), quote_ident(v_name), p_prefix, quote_ident(v_nsp), quote_ident(v_name);
+    else
+      raise exception 'pg_partition_magician: the object key base % has a "." or ".." segment, which the name of partition %.% puts there (archive.config.prefix % holds none); no store can be addressed with one, so nothing is written there, and no prefix changes that. Rename the partition to a name without "/./" or "/../", setting pgpm.part.child_name and pgpm.archive_ledger.child_name of % to the new name in the same transaction, before ALTER TABLE %.% RENAME TO <the new name> (docs/guide.md, "Do not rename a partition out from under pgpm")',
+        v_base_q, quote_ident(v_nsp), quote_ident(v_name), p_prefix, p_parent, quote_ident(v_nsp), quote_ident(v_name);
+    end if;
   end if;
   insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing
@@ -4153,7 +4167,7 @@ begin
     raise exception 'pg_partition_magician: % cannot archive a chunk of % -- it is not managed by pgpm', p_routine, p_parent;
   end if;
   if not pgpm._native_gt(v_kind, p_hi, p_lo) then
-    raise exception 'pg_partition_magician: % refuses the range [%, %) of % -- it is empty or inverted, and the object key is derived from lo alone, so the call would read no row and write an empty object over the one the chunk at % was archived to. Pass the chunk''s own [lo, hi).',
+    raise exception 'pg_partition_magician: % refuses the range [%, %) of % -- it is empty or inverted, and the object key is derived from lo alone, so the call would read no row and write an empty object over the one the chunk at % was archived to. Pass the chunk''s own [lo, hi), while its rows are still in the table.',
       p_routine, p_lo, p_hi, p_parent, p_lo;
   end if;
 end;

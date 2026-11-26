@@ -21,6 +21,8 @@
 #   scratch_owner_follow_fn_unchecked  -- _scratch_owner_follow's function branch is not checked (360 E).
 #   capture_fn_create_or_replace       -- the capture function is minted by CREATE OR REPLACE again (360 G).
 #   drop_fn_by_oid_unchecked           -- pgpm._drop_fn_by_oid does not ask whether the oid is gone (360 H).
+#   effect_check_kind_fixed_relation   -- _effect_or_raise calls a redirected function another relation (#1414 b5;
+#                                         360 D, E and H).
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_DIR overrides the tests' directory inside
 # the container, for a worktree mounted somewhere other than /repo.

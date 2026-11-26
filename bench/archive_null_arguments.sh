@@ -25,6 +25,9 @@
 #   archive_parquet_empty_range_unrefused    -- the Parquet strategy does not
 #   archive_empty_range_compared_as_text     -- the bounds compared as text, where '9' > '10' (part B's
 #                                               control refuses [9, 10) of an id grid)
+#   archive_empty_range_advice_unqualified   -- the refusal advises the chunk's own [lo, hi) with no "while its
+#                                               rows are still in the table", a call #975 refuses after retire()
+#                                               (part B, #1030 b5)
 #
 # Usage: archive_null_arguments.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs

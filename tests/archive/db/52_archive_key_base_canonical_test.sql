@@ -18,13 +18,15 @@
 --           refused (#975) and a later namesake still takes the oid shape
 --   Part C  a '.' or '..' segment: archive.configure refuses it, archive._owned_key refuses one already stored,
 --           and the remedy each message names, typed here, archives the chunk
+--   Part D  a '..' segment a table's own quoted name puts there, under a clean prefix (#1337 b4): the refusal names
+--           the table and the rename, not the prefix, and the rename it names, typed here, archives the chunk
 --
 -- Fixtures are asymmetric so a replaced object cannot pass an identity check: the first f holds 9 'old' rows in
 -- [0, 10) and each namesake fewer 'new' ones; g's chunk holds ids 1, 2, 3 and 7, so a write of [0, 5) over it
 -- would leave three. The prefix carries current_database() because the bucket outlives a test database, and every
 -- key is cleared and witnessed absent before the work that writes it.
 set client_min_messages = warning;
-select plan(26);
+select plan(29);
 
 create schema t52;
 
@@ -190,9 +192,24 @@ select archive.configure('t52.h', 'archive-test-bucket', p_endpoint => 'http://m
 select is(t52.arch('t52.h', '0', '10') || '/' || t52.rows(:'p' || 't52.h_0.ndjson'), :'p' || 't52.h_0.ndjson/1:h,2:h',
   'C: the remedy the refusal names, archive.configure with the prefix spelled without it, archives the chunk');
 
+-- ======================= PART D: a '..' segment the table's own name puts there (#1337 b4) =======================
+create table t52."d/../x" (id bigint primary key, payload text not null);
+insert into t52."d/../x" values (1, 'd'), (2, 'd'), (3, 'd'), (11, 'd');
+select pgpm_formal.baseline('t52."d/../x"');
+call pgpm.transmute('t52."d/../x"', 'id', 10::bigint, p_paused => true);
+select archive.configure('t52."d/../x"', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
+select is(t52.arch('t52."d/../x"', '0', '10'),
+  'ERROR: pg_partition_magician: the object key base ' || :'p' || 't52."d/../x" has a "." or ".." segment, which the name of table t52."d/../x" puts there (archive.config.prefix ' || :'p' || ' holds none); no store can be addressed with one, so nothing is written there, and no prefix changes that. Rename the table to a name without "/./" or "/../": ALTER TABLE t52."d/../x" RENAME TO <the new name>',
+  'D: under a clean prefix, a table name holding "/../" is refused naming the table and the rename, not the prefix');
+alter table t52."d/../x" rename to dx;
+select is(t52.clear(:'p' || 't52.dx_0.ndjson'), 404, 'fixture: (D) nothing at <p>t52.dx_0.ndjson before the work');
+select is(t52.arch('t52.dx', '0', '10') || '/' || t52.rows(:'p' || 't52.dx_0.ndjson'), :'p' || 't52.dx_0.ndjson/1:d,2:d,3:d',
+  'D: the remedy the refusal names, the table renamed, archives the chunk');
+
 -- the bucket outlives this database: leave nothing behind
 select t52.req('DELETE', k) from unnest(array[
   :'p' || 't52.f_0.ndjson', :'p' || 't52.f.' || :'f2_oid' || '_0.ndjson', :'p' || 't52.f.' || :'f3_oid' || '_0.ndjson',
-  :'p' || 't52.g_0.ndjson', :'p' || 't52.g.' || :'g2_oid' || '_0.ndjson', :'p' || 't52.h_0.ndjson']) k;
+  :'p' || 't52.g_0.ndjson', :'p' || 't52.g.' || :'g2_oid' || '_0.ndjson', :'p' || 't52.h_0.ndjson',
+  :'p' || 't52.dx_0.ndjson']) k;
 
 select * from finish();

@@ -13,6 +13,8 @@
 -- bounds, after which its rows read through the parent.
 --   PART U  a uuidv7 grid, all three remedies, through _archive_step.
 --   PART T  a text_time grid (cuid v1 shaped), all three remedies, through _archive_step.
+--   PART S  a uuidv7 grid ticked with its schema on the search_path, the remedies typed from a session without it
+--           (#1414 b1: a regclass renders unqualified when its schema is on the writing session's search_path).
 --
 -- THE FIXTURE. Per grid, three month partitions in 2020 (aged under retain 1 year) built by hand on encoded bounds and
 -- recorded with adopt_partition, then write-blocked by _enforce_write_blocks: _a (ids 1, 2) is unanchored and detached
@@ -29,7 +31,7 @@ set client_min_messages = warning;
 set datestyle = 'ISO, MDY';
 set timezone = 'UTC';
 
-select plan(24);
+select plan(31);
 
 create schema t358;
 -- a control value of the grid's kind at p_at, distinct per n
@@ -191,5 +193,47 @@ select is((select array_agg(pg_get_expr(c.relpartbound, c.oid) order by c.relnam
 
 update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 't358.t'::regclass;
+
+-- ======== PART S: the tick's search_path holds the parent's schema; the operator's does not (#1414 b1) ========
+create table t358.s (id uuid primary key, v int not null);
+insert into t358.s values (t358.key('uuidv7', now(), 100)::uuid, 100), (t358.key('uuidv7', now(), 101)::uuid, 101);
+select pgpm_formal.baseline('t358.s');
+call pgpm.transmute('t358.s', 'id', interval '1 month', p_obtain => 1, p_retain => interval '1 year', p_paused => true,
+                    p_force_uuidv7 => true);
+select t358.hand_cells('t358.s', 'uuidv7');
+select pgpm_formal.wrote('t358.s', 'v < 100');
+select pgpm._enforce_write_blocks('t358.s');
+update pgpm.part set child_oid = null where parent_table = 't358.s'::regclass and child_name = 's_a';
+alter table t358.s detach partition t358.s_a;
+update pgpm.part set retiring_at = now(), retiring_oid = child_oid, detach_dispatched_oid = child_oid
+ where parent_table = 't358.s'::regclass and child_name = 's_b';
+alter table t358.s detach partition t358.s_b;
+select pgpm.set_archive_fn('t358.s', 't358.strategy(regclass,name,text,text)'::regprocedure);
+update pgpm.config set archive_batch = 5 where parent_table = 't358.s'::regclass;
+set search_path = t358, public;
+select 't358.s'::regclass::text as s_bare \gset
+select pgpm._archive_step('t358.s');
+reset search_path;
+select is(:'s_bare'::text, 's', 'LIVENESS: S: the tick''s search_path renders the parent without its schema');
+select t358.remedy('t358.s', '2020-01-01 00:00:00+00', '%records no oid%') as s_a,
+       t358.remedy('t358.s', '2020-02-01 00:00:00+00', '%by a retirement of pgpm''s%') as s_b,
+       t358.remedy('t358.s', '2020-03-01 00:00:00+00', '%stopped being an attached partition%') as s_c \gset
+select ok(:'s_a' like 'ALTER TABLE t358.s ATTACH PARTITION t358.s_a FOR VALUES FROM %'
+          and :'s_b' like 'ALTER TABLE t358.s ATTACH PARTITION t358.s_b FOR VALUES FROM %'
+          and :'s_c' like 'ALTER TABLE t358.s ATTACH PARTITION t358.s_c FOR VALUES FROM %',
+  'S: each remedy''s ATTACH names the parent schema-qualified, whatever the tick''s search_path: ' || :'s_b');
+select ok((select l.method like '%select pgpm.adopt_partition(''t358.s'', ''t358.s_a'')%'
+                  and l.method like '%delete from pgpm.part where parent_table = ''t358.s''::regclass and child_name = ''s_a''%'
+             from pgpm.log l where l.parent_table = 't358.s'::regclass and l.action = 'skip_archive'
+              and l.method like '%records no oid%' order by l.id desc limit 1),
+  'S: and the no-oid remedy''s adopt_partition and delete name it schema-qualified too');
+select lives_ok(:'s_a', 'S: typed from a search_path without t358, the no-oid remedy''s ATTACH runs');
+select lives_ok(:'s_b', 'S: and the retirement remedy''s');
+select lives_ok(:'s_c', 'S: and the left-under-the-hold remedy''s');
+select is((select array_agg(v order by v) from t358.s where v < 100), array[1, 2, 3, 4, 5, 6],
+  'S: and all three are partitions again: ids 1 to 6 read through the parent');
+
+update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+ where parent_table = 't358.s'::regclass;
 
 select * from finish();
