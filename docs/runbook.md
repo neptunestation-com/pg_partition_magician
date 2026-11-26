@@ -433,7 +433,13 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    held for good, so it stays in `retain_backlog` while retention goes on past it. Look for its one
    `skip_archive_retired_range` row in `pgpm.log`; `method` names the archived objects that are the only copy of
    the dropped rows, and the remedy (export the partition with `archive.to_s3`, then detach and drop it and
-   delete its `pgpm.part` row). A flat `retain_backlog`
+   delete its `pgpm.part` row). An upgrade straight from v0.5.0 or older holds every partition it had archived
+   the same way, because it cannot tell the partition the chunks were read from from one re-created under its
+   name; there the rows are usually the partition's own, and `method` names the remedy for that too: once you
+   have confirmed the partition holds the chunks' rows,
+   `delete from pgpm.archive_ledger where parent_table = ... and child_name = <its name> and retired_at is not null`,
+   and the next tick archives it afresh. Never run that delete for a partition re-created after a drop: its
+   chunks are the only copy of the dropped rows. A flat `retain_backlog`
    with `retain_drop_failures` actually **climbing** is a real failure: the reason is in the log
    (`fail_retain_drop`, `fail_retain_crossing`, `fail_retain_detach`, `fail_retain_identity`,
    `fail_archive_identity`, `fail_write_block_identity` or `fail_archive_contract` rows, `method`).

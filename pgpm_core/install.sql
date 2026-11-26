@@ -2958,7 +2958,7 @@ begin
     -- ALTER FUNCTION ... OWNER waits for the function's lock behind any DDL on it and looks the name up again once
     -- granted, so a schema swapped meanwhile handed a namesake function to the owner: by oid, it must be p_fn
     perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = p_fn) = v_owner, p_fn,
-                                  'handing a capture function to its parent''s owner');
+                                  'handing a capture function to its parent''s owner', 'function');
   end if;
 end;
 $$;
@@ -3126,7 +3126,7 @@ begin
       execute format('alter function %I.%I(%s) owner to %I', r.nspname, r.proname, r.args, v_want_n);
       -- as the relation's above: it waits for the function's lock and looks the name up again, so by oid
       perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = r.oid) = v_want, r.oid,
-                                    format('%s, handing a scratch function to %I,', p_what, v_want_n));
+                                    format('%s, handing a scratch function to %I,', p_what, v_want_n), 'function');
     exception when insufficient_privilege then
       if not pg_has_role(current_user, r.proowner, 'USAGE') then v_stuck := v_stuck || r.proowner; end if;
     end;
@@ -4609,12 +4609,15 @@ $$;
 -- back. So each site asks what the statement did to the relation it identified, by oid, which no rename can fake
 -- (the oid gone after a DROP, the rows deleted from it, its new relfilenode, the trigger on it), and raises when that
 -- is not what it asked for; the statement has not committed, and rolls back with the caller's transaction or block.
-create or replace function pgpm._effect_or_raise(p_ok boolean, p_rel oid, p_what text)
+-- p_kind names what p_rel is (#1414 b5): 'relation' for a pg_class oid, 'function' for a pg_proc one, so the
+-- refusal does not call a redirected function another relation.
+drop function if exists pgpm._effect_or_raise(boolean, oid, text);
+create or replace function pgpm._effect_or_raise(p_ok boolean, p_rel oid, p_what text, p_kind text default 'relation')
 returns void language plpgsql as $$
 begin
   if not coalesce(p_ok, false) then
-    raise exception 'pg_partition_magician: % reached another relation than the one it identified (oid %): a schema was renamed while the statement waited for a lock, and another relation stood under the name; rolled back',
-      p_what, p_rel;
+    raise exception 'pg_partition_magician: % reached another % than the one it identified (oid %): a schema was renamed while the statement waited for a lock, and another % stood under the name; rolled back',
+      p_what, p_kind, p_rel, p_kind;
   end if;
 end;
 $$;
@@ -4682,7 +4685,7 @@ returns void language plpgsql as $$
 begin
   if not exists (select 1 from pg_proc p where p.oid = p_fn) then return; end if;
   execute format('drop function %s', p_fn::regprocedure::text);
-  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what);
+  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what, 'function');
 end;
 $$;
 
@@ -6953,7 +6956,7 @@ $$;
 
 drop function if exists pgpm._over_retired_chunks(regclass);
 create or replace function pgpm._over_retired_chunks(p_parent regclass)
-returns table(child_name name, lo text, hi text, chunks text, other_names text, unnamed text)
+returns table(child_name name, lo text, hi text, chunks text, other_names text, unnamed text, own_name boolean)
 language plpgsql stable as $$
 declare v_kind text; v_tz text; v_floor numeric; v_unkeyed boolean;
 begin
@@ -6994,7 +6997,8 @@ begin
                        ''; '' order by l.lo_k),
             string_agg(distinct quote_ident(l.child_name), '', '')
               filter (where l.child_name is distinct from m.child_name),
-            string_agg(quote_literal(l.lo), '', '' order by l.lo_k) filter (where l.wide)
+            string_agg(quote_literal(l.lo), '', '' order by l.lo_k) filter (where l.wide),
+            coalesce(bool_or(l.child_name = m.child_name), false)   -- #1234: chunks under the partition''s own name
        from mine m join led l on l.lo_k < m.hi_k and l.hi_k > m.lo_k
       where m.lo_k < (select max(x.hi_k) from led x)
       group by m.child_name, m.lo, m.hi',
@@ -7117,18 +7121,23 @@ $$;
 -- values, so the native text typed as one is refused ('invalid input syntax for type uuid') or names other bounds.
 create or replace function pgpm._attach_back_sql(p_parent regclass, p_nsp name, p_child name, p_lo text, p_hi text)
 returns text language plpgsql stable as $$
-declare cfg pgpm.config;
+declare cfg pgpm.config; v_parent_q text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
+  -- #1414 b1: the parent schema-qualified, as the child is. regclass text drops the schema when it is on the
+  -- writing session's search_path, and the operator types the remedy from a session of their own
+  select format('%I.%I', n.nspname, c.relname) into v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_parent_q := coalesce(v_parent_q, p_parent::text);
   -- by-name-ok: a remedy text a skip_archive row carries; nothing runs it
-  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)', p_parent, p_nsp, p_child,   -- part-row-by-name: remedy text the operator types, runs nothing
+  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)', v_parent_q, p_nsp, p_child,   -- part-row-by-name: remedy text the operator types, runs nothing
     pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
     pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
 exception when others then
   -- by-name-ok: a remedy text a skip_archive row carries; nothing runs it
   return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM ... TO ..., its bounds [%s, %s) as the column''s values (they could not be encoded here: %s)',   -- part-row-by-name: the same
-                p_parent, p_nsp, p_child, p_lo, p_hi, sqlerrm);
+                coalesce(v_parent_q, p_parent::text), p_nsp, p_child, p_lo, p_hi, sqlerrm);
 end;
 $$;
 
@@ -7145,13 +7154,17 @@ $$;
 create or replace function pgpm._archive_unheld_reason(p_parent regclass, p_child name, p_child_oid oid, p_rel oid,
                                                        p_lo text, p_hi text)
 returns text language plpgsql stable as $$
-declare v_nsp name;
+declare v_nsp name; v_parent_q text;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);
+  -- #1414 b1: the parent schema-qualified in the statements this remedy hands the operator
+  select format('%I.%I', n.nspname, c.relname) into v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_parent_q := coalesce(v_parent_q, p_parent::text);
   if p_child_oid is null and not pgpm._detach_dispatched(p_parent, p_child, p_rel) then
     return format('pgpm.part''s row for %I.%I over [%s, %s) records no oid (an upgrade from before child_oid could not anchor it), so pgpm cannot tell that the relation is a partition of %s and does not hand it to a strategy; not archived and nothing recorded, and retire() keeps it while the range is uncovered. If it is a partition of %s, anchor the row (select pgpm.adopt_partition(%L, %L)) and the next tick archives it; if it was detached by hand, first attach it back on its bounds (%s), or, to keep it as yours, forget the row (delete from pgpm.part where parent_table = %L::regclass and child_name = %L)',
-                  v_nsp, p_child, p_lo, p_hi, p_parent, p_parent, p_parent::text, format('%I.%I', v_nsp, p_child),   -- part-row-by-name: text of the message
-                  pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi), p_parent::text, p_child);
+                  v_nsp, p_child, p_lo, p_hi, p_parent, p_parent, v_parent_q, format('%I.%I', v_nsp, p_child),   -- part-row-by-name: text of the message
+                  pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi), v_parent_q, p_child);
   end if;
   if not pgpm._detach_dispatched(p_parent, p_child, p_rel) then return null; end if;
   return format('%I.%I was detached from %s by a retirement of pgpm''s before its range [%s, %s) was archived (archiving was configured after the retirement began), so a strategy reading the range through the parent would read none of its rows; not archived and nothing recorded, and retire() keeps the table while the range is uncovered. To archive it, once it is no longer pending a detach attach it back on its bounds (%s); the archive step then archives it and retire() completes the retirement',
@@ -7182,7 +7195,7 @@ returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_ncast text; v_nsp name; v_now regclass;
   r record; v_range record; v_result pgpm.archive_result; v_breach text; v_count int := 0;
-  v_held name[] := '{}';
+  v_held name[] := '{}'; v_parent_q text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -7190,7 +7203,9 @@ begin
   if cfg.archive_fn is null then return 0; end if;
 
   v_ncast := pgpm._native_type(cfg.control_kind);
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  -- the parent schema-qualified for the remedies the log rows carry (#1414 b1): typed from any search_path
+  select n.nspname, format('%I.%I', n.nspname, c.relname) into v_nsp, v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   -- COVERAGE UNDER A NAME NO LONGER TRACKED IS DISCARDED (issue #511). The ledger is keyed
   -- (parent_table, lo) and matched to its partition by child_name, so coverage is attached to a
@@ -7286,14 +7301,19 @@ begin
                       and lo = r.lo and hi = r.hi) then
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'skip_archive_retired_range', r.lo, r.hi,
-                format('%I.%I holds [%s, %s), over chunk(s) pgpm.archive_ledger marks retired: %s. Marked because the relation they were read from no longer exists (dropped by retire() or by hand) or, when an upgrade marked them, because nothing vouches where their rows are, so their objects are the only copy pgpm can vouch for. Archived, its first chunk would go to the same object key (a strategy keys a chunk by parent and lo), so it is not archived, and with no coverage retire() will not drop it. If its rows are not the chunks'' rows, export them with archive.to_s3 (keyed by the partition''s own name), then detach and drop it and delete its pgpm.part row%s%s',
+                format('%I.%I holds [%s, %s), over chunk(s) pgpm.archive_ledger marks retired: %s. Marked because the relation they were read from no longer exists (dropped by retire() or by hand) or, when an upgrade marked them, because nothing vouches where their rows are, so their objects are the only copy pgpm can vouch for. Archived, its first chunk would go to the same object key (a strategy keys a chunk by parent and lo), so it is not archived, and with no coverage retire() will not drop it. If its rows are not the chunks'' rows, export them with archive.to_s3 (keyed by the partition''s own name), then detach and drop it and delete its pgpm.part row%s%s%s',
                        pgpm._child_nsp(p_parent, r.child_name), r.child_name, r.lo, r.hi, r.chunks,
+                       -- #1234: the chunks were read from this very partition, under its own name, and an upgrade
+                       -- from v0.5.0 or older marked them because nothing then recorded which relation that was
+                       case when r.own_name then format(
+                         '. If they are, because %I is the relation those chunks were read from (an upgrade from v0.5.0 or older marks the chunks of every partition it had archived, since a name alone cannot tell that partition from one re-created under its name after a drop), the rows are in this partition: once you have confirmed it holds them, delete the retired rows recorded under its name (delete from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is not null) and it archives afresh',
+                         r.child_name, v_parent_q, r.child_name) else '' end,
                        case when r.other_names is not null then format(
                          '. If they are, because %I is the relation those chunks were read from, renamed (an upgrade cannot tell that from a drop), the rows are in a live partition: once you have confirmed it holds them, delete the retired rows recorded under %s (delete from pgpm.archive_ledger where parent_table = %L::regclass and child_name = <that name> and retired_at is not null) and it archives afresh',
-                         r.child_name, r.other_names, p_parent::text) else '' end,
+                         r.child_name, r.other_names, v_parent_q) else '' end,
                        case when r.unnamed is not null then format(
                          '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach at any offset a session can take (to 168 hours west of UTC and 169 east) and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
-                         r.unnamed, p_parent::text) else '' end));
+                         r.unnamed, v_parent_q) else '' end));
     end if;
   end loop;
 
@@ -9519,10 +9539,18 @@ begin
     -- recorded in the converting session's zone sits at that zone's midnight, off the column's own clock (see
     -- _naive_grid_zone_off), with an anchor and a step the rule above passes. A whole-month target round-trips
     -- and is left alone; a fixed one (days, hours) is refused before anything is copied, which a date key's
-    -- swap otherwise failed 'empty range bound' on after copying every sub-range.
+    -- swap otherwise failed 'empty range bound' on after copying every sub-range. A timestamp key's swap fails
+    -- that way only at a step of an hour or less across a fall-back, which renders two bounds to one wall time
+    -- (#1223, measured in Europe/London: 30 and 60 minutes fail, 61 minutes to a day complete); a longer step
+    -- completes with every fine partition at the zone's offset on the column's clock, so the message says which.
     if v_months = 0 and pgpm._naive_grid_zone_off(v_type, cfg.partition_tz) then
-      raise exception 'pg_partition_magician: cannot regrain % toward % -- its control column % is %, which carries no zone, but its grid is recorded in partition_tz % rather than UTC (an install from before pgpm held a naive column''s grid to the column''s own clock recorded the converting session''s zone): every bound sits at that zone''s midnight instead of the column''s, and a fixed step''s fine bounds land at the zone''s offset on the column''s clock, so the run would copy every sub-range before its swap failed. A whole number of months is not refused. %',
+      raise exception 'pg_partition_magician: cannot regrain % toward % -- its control column % is %, which carries no zone, but its grid is recorded in partition_tz % rather than UTC (an install from before pgpm held a naive column''s grid to the column''s own clock recorded the converting session''s zone): every bound sits at that zone''s midnight instead of the column''s, and a fixed step''s fine bounds land at the zone''s offset on the column''s clock, %. A whole number of months is not refused. %',
         p_parent, p_step, quote_ident(cfg.control_column), format_type(v_type, v_typmod), cfg.partition_tz,
+        case when v_type = 'date'::regtype
+               then 'so the run would copy every sub-range before its swap failed (a date bound at that offset reads as the date before)'
+             when p_step::interval <= interval '1 hour'
+               then 'so every fine partition would sit off the column''s own bounds, and a run spanning a fall-back would copy every sub-range before its swap failed (the fall-back renders two bounds an hour or less apart to one wall time, or out of order)'
+             else 'so every fine partition would sit off the column''s own bounds' end,
         pgpm._reconvert_remedy(p_parent, 'the zone transmute now records for such a column (UTC, whatever the session''s zone)');
     end if;
     -- #980: and a fixed step finer than a timestamp(p) column's precision. Every fine bound is a multiple
@@ -10902,10 +10930,21 @@ begin
       v_per := greatest(v_locks2 - v_locks1, 2) + case when v_fk > 0 then 2 + 2 * v_fk else 0 end;
       v_projected := v_per * v_ncopies;
       if v_projected > v_slots / 2 then
-        raise exception 'pg_partition_magician: cannot swap the regrain of % of % at target step % -- attaching its % fine partitions in one transaction would hold about % lock-table slots (about % a partition: what the second ATTACH took, with what re-adding the incoming foreign keys costs), more than half the shared lock table''s % (max_locks_per_transaction % x (max_connections % + max_prepared_transactions %)); refusing rather than exhausting it for every other session. The swap rolls back whole: the source stays attached and holds every row, and the copies are kept. Raise max_locks_per_transaction (a restart) and the next tick swaps, or abandon the run with pgpm.regrain_cancel(%) and regrain in two passes, each child split into at most about % partitions (first to a coarser step, then each of its children to %).',
+        raise exception 'pg_partition_magician: cannot swap the regrain of % of % at target step % -- attaching its % fine partitions in one transaction would hold about % lock-table slots (about % a partition: what the second ATTACH took, with what re-adding the incoming foreign keys costs), more than half the shared lock table''s % (max_locks_per_transaction % x (max_connections % + max_prepared_transactions %)); refusing rather than exhausting it for every other session. %',
           v_child_name, p_parent, v_step, v_ncopies, v_projected, v_per, v_slots,
           current_setting('max_locks_per_transaction'), current_setting('max_connections'),
-          current_setting('max_prepared_transactions'), p_parent, greatest(v_slots / 2 / v_per, 1), v_step;
+          current_setting('max_prepared_transactions'),
+          -- #1233: what the rollback leaves depends on the driver. Across ticks the copies committed in earlier
+          -- ticks; regrain() (and regrain_history(), through it) made them in this transaction, so none survives,
+          -- unless it resumed a run ticks had begun, whose committed copies and cursor outlive the call.
+          case when current_setting('pgpm.regrain_one_call', true) = p_parent::oid::text
+            then format('The swap rolls back whole, and every copy with it: this call made them in its one transaction (regrain and regrain_history do), so the source stays attached and holds every row, and no run is left in flight. Raise max_locks_per_transaction (a restart) and call it again, or regrain in two passes, each child split into at most about %s partitions (first to a coarser step, then each of its children to %s). maintain (auto-regrain) and regrain_step, one tick per transaction, keep each tick''s copies.',
+                        greatest(v_slots / 2 / v_per, 1), v_step)
+            when current_setting('pgpm.regrain_one_call', true) = p_parent::oid::text || ':resumed'
+            then format('The swap rolls back whole, and with it the copies this call made, but not those committed before it: the run was already in flight when this call resumed it, so it stays in flight with those copies, and the source stays attached and holds every row. Raise max_locks_per_transaction (a restart) and call it again, which resumes from them, or abandon the run with pgpm.regrain_cancel(%s) and regrain in two passes, each child split into at most about %s partitions (first to a coarser step, then each of its children to %s).',
+                        p_parent, greatest(v_slots / 2 / v_per, 1), v_step)
+            else format('The swap rolls back whole: the source stays attached and holds every row, and the copies are kept. Raise max_locks_per_transaction (a restart) and the next tick swaps, or abandon the run with pgpm.regrain_cancel(%s) and regrain in two passes, each child split into at most about %s partitions (first to a coarser step, then each of its children to %s).',
+                        p_parent, greatest(v_slots / 2 / v_per, 1), v_step) end;
       end if;
     end if;
   end loop;
@@ -10989,9 +11028,17 @@ begin
   -- the swap's DETACH waited on it for ACCESS EXCLUSIVE.
   perform pgpm._regrain_lock(p_parent);
   perform pgpm._lock_oid_or_raise(p_parent, 'share', true, 'regrain');   -- #1335 b10: by oid
+  -- #1233: tell regrain_step's swap refusals that the copies are this transaction's, so they roll back with it,
+  -- or, when ticks had already begun the run (asked under _regrain_lock, as _regrain_in_flight requires), that
+  -- the copies they committed outlive this call and the run stays in flight
+  perform set_config('pgpm.regrain_one_call',
+    p_parent::oid::text || case when pgpm._regrain_in_flight(p_parent) then ':resumed' else '' end, true);
   loop
     v_status := pgpm.regrain_step(p_parent, v_child, p_target_step, null);
-    if v_status like 'swapped:%' then return split_part(v_status, ':', 2)::int; end if;
+    if v_status like 'swapped:%' then
+      perform set_config('pgpm.regrain_one_call', '', true);
+      return split_part(v_status, ':', 2)::int;
+    end if;
     if v_status in ('active', 'nosubdiv', 'nokey', 'idle') then
       raise exception 'pg_partition_magician: cannot regrain % -- %', p_child,
         case v_status
@@ -13226,7 +13273,7 @@ begin
         raise exception 'pg_partition_magician: % cannot be partitioned on a % grid using %: its newest value % decodes to %, which is % ahead of now() (%). A time-ordered id dated that far ahead is almost always a client with a wrong clock, and because the frontier is the newer of the data and the clock, that one value would fix the monolith''s permanent upper bound at % instead of %: every row written until then lands in the monolith, which cannot be regrained, and nothing behind it can be dropped, until the clock actually gets there. Delete or correct the rows whose % sorts above % (the value encoding now() + one step + one hour, the most a maximum may lead the clock by) and re-run, or re-run with p_force_frontier => true to accept that bound.',
           p_parent, p_control_kind, quote_ident(p_control), v_max_raw, v_max_ts, justify_interval(date_trunc('second', v_max_ts - now())), now(),
           v_hi_native, pgpm._grid_next(p_control_kind, p_step, pgpm._grid_floor(p_control_kind, p_step, p_anchor, pgpm._ts_text(now()), v_tz), v_tz),
-          quote_ident(p_control), pgpm._encode(p_control_kind, v_skew_limit::text, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz);
+          quote_ident(p_control), pgpm._encode(p_control_kind, pgpm._ts_text(v_skew_limit), p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz);   -- #1414 b2: _ts_text, not ::text, whose zone abbreviation can parse back as another zone (IST)
       end if;
       raise notice 'pg_partition_magician: the newest % value % in % decodes to %, % ahead of now(); p_force_frontier accepted it, so the monolith''s permanent upper bound is % rather than %. Rows written until then land in the monolith, and it cannot be regrained until the clock passes that bound.',
         quote_ident(p_control), v_max_raw, p_parent, v_max_ts, justify_interval(date_trunc('second', v_max_ts - now())),
@@ -14462,7 +14509,9 @@ begin
   -- reaper keeps the plain liveness test on purpose: an operator whose session is still open keeps the
   -- right to retry, and a maintain_all run by hand from that session must not undo their bound.
   if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then
-    raise exception 'pg_partition_magician: cannot abort the transmute of % -- it is still running in another session', p_parent;
+    -- #1246: and which session, the one place that says what to wait for or end
+    raise exception 'pg_partition_magician: cannot abort the transmute of % -- it is still running in another session, backend pid % (started %), which pgpm.transmute_inflight records as the claim''s owner: wait for that session to end, or end it (select pg_terminate_backend(%)), then abort again',
+      p_parent, r.owner_pid, r.owner_backend_start, r.owner_pid;
   end if;
   -- #575: by the claim's oid (p_parent resolved to it, which is how the claim was found), not the name the
   -- claim recorded: after a rename or a SET SCHEMA that name is another relation or none at all.
@@ -17072,9 +17121,9 @@ $$;
 -- ~1.0; random UUIDv4 columns score near 0. A heuristic, not a proof.
 --
 -- sampled/plausible/fraction/oldest/newest are over the SAMPLE (the first p_sample rows in whatever order
--- the scan returns them). newest_decoded is not: it is the column's actual maximum, found the way
--- transmute finds its frontier (ORDER BY ... DESC LIMIT 1, an index scan when the control column is the
--- key), decoded. That is the value one future-dated row hides behind a passing fraction (#457): 1 bad row
+-- the scan returns them). newest_decoded is not: it is the column's actual maximum, found by the read
+-- transmute's frontier uses (ORDER BY ... DESC LIMIT 1, an index scan when the control column is the
+-- key) with NULLs skipped, which transmute's own read does not do (#709, #770 b3), decoded. That is the value one future-dated row hides behind a passing fraction (#457): 1 bad row
 -- in 402 samples at 0.9975, and the sample max only sees it if the row happened to be in the sample.
 -- #734: the read skips NULLs in its WHERE clause. DESC sorts NULLs FIRST, so one NULL in the column (it is
 -- sampled before converting, when it may still be nullable) was "the maximum", and both columns came back
@@ -17131,7 +17180,7 @@ select pgpm._surface_carry_grants('pgpm.check_uuidv7(regclass,name,integer)');  
 -- it; an alphabet holding `\` left the bracket unclosed and raised on every column.
 --
 -- newest_decoded / newest_in_future are check_uuidv7's (#457): the column's ACTUAL maximum (not the
--- sample's), found the way transmute finds its frontier and decoded, and whether it sits more than one hour
+-- sample's), found by the read transmute's frontier uses, NULLs skipped, and decoded, and whether it sits more than one hour
 -- past now(). A maximum that does not match the declared shape reports null rather than raising, for the
 -- same reason a malformed sampled row counts as implausible rather than aborting the sample. NULLs are
 -- skipped in the read's WHERE clause, as in check_uuidv7 and for its reason (#734).
@@ -17269,9 +17318,10 @@ $$;
 -- inflight_partitions stays, but now counts only REGRAIN copy-children not yet attached.
 --
 -- fks_suspended / fks_unvalidated surface preserve-managed incoming FK state (issue #95):
--- fks_suspended = incoming FKs currently DROPPED (RI off on the referencing table). That is now a
--- transient, sub-transaction state inside regrain's swap rather than something spanning a drain
--- campaign, so a standing non-zero value means a swap died mid-flight. fks_unvalidated = FKs re-added
+-- fks_suspended = incoming FKs currently DROPPED (RI off on the referencing table). A regrain swap drops and
+-- re-adds its keys inside one transaction, so no other session ever counts one (#770 b2, the claim #747 corrected
+-- in the reference): a standing non-zero value is a transmute cutover's preserve drop that restore_incoming_fks
+-- has not re-added yet, which maintain does on a later tick and a paused table waits for by hand. fks_unvalidated = FKs re-added
 -- NOT VALID (enforcing new writes) but blocked from full validation by pre-existing orphans (see
 -- incoming_fk_orphans() / validate_incoming_fks()).
 -- parent_missing (#296) says the managed relation itself is gone -- dropped without untransmute, so the

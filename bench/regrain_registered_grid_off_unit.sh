@@ -21,6 +21,8 @@
 #                                                  zone (the zone test at the refusal alone).
 #   upgrade_grid_off_unit_unflagged              -- the upgrade block finds the off-unit grid and logs nothing.
 #   upgrade_grid_zone_unflagged                  -- the upgrade block does not ask a naive key's zone.
+#   regrain_zone_refusal_day_claims_swap_failure -- the zone refusal gives a day on a timestamp grid the reason an
+#                                                  hour has, a swap that would fail (#1223).
 #
 # Runs on the plain core image (pgtap and pg_prove). The install path is read inside the container.
 # TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted somewhere

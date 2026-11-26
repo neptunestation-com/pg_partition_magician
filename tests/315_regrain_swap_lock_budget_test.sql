@@ -22,7 +22,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(24);
+select plan(34);
 
 create temporary table rs_budget as
   select slots, slots / 4 as cap
@@ -168,6 +168,10 @@ select throws_like(
   format('%%cannot swap the regrain of %s of rs315_ofk at target step 100 -- attaching its %s fine partitions in one transaction would hold about %%more than half the shared lock table''s %s%%',
          pg_temp.rs_source('rs315_ofk'), :slots / 100, :slots),
   'D: the swap measures what a child costs and refuses a swap whose children would hold more than half the table');
+select throws_like(
+  format($$ select pgpm.regrain_step('public.rs315_ofk', %L, '100') $$, pg_temp.rs_source('rs315_ofk')),
+  '%The swap rolls back whole: the source stays attached and holds every row, and the copies are kept. Raise max_locks_per_transaction (a restart) and the next tick swaps, or abandon the run with pgpm.regrain_cancel(rs315_ofk)%',
+  'D: a tick''s refusal says the copies are kept and the next tick swaps, which they are and it would (#1233)');
 select is(
   (select array_agg(p.child_oid order by p.child_oid) from pgpm.part p
     where p.parent_table = 'public.rs315_ofk'::regclass and not p.attached),
@@ -235,5 +239,85 @@ select is(
     where parent_table = 'public.rs315_small'::regclass and attached and lo::numeric < 500),
   array[0, 100, 200, 300, 400]::numeric[],
   'F: and its five fine partitions are the attached ones below 500, by lower bound');
+
+-- ==================== (G) regrain() refused at the swap: the copies were its own transaction's (#1233) ======
+-- D's shape driven by regrain(), which makes every copy in its one transaction: the refusal rolls them all back
+-- and leaves no run, so it must not promise kept copies, a next tick or a run to cancel
+\o /dev/null
+select pg_temp.rs_monolith('rs315_one', (:slots / 100) * 100);
+\o
+select pgpm_formal.baseline('public.rs315_one');
+\o /dev/null
+select format('alter table public.rs315_one add constraint rs315_one_fk%s foreign key (b) references public.rs315_ref', g)
+  from generate_series(1, 30) g \gexec
+\o
+call pgpm.transmute('public.rs315_one', 'id', ((:slots / 100) * 100)::bigint, p_obtain => 2);
+insert into public.rs315_one (id, a) values ((:slots / 100) * 100 + 1, 'frontier');
+select pgpm_formal.wrote('public.rs315_one', 'a = ''frontier''');
+create temporary table rs_one_msg (m text);
+do $$
+begin
+  perform pgpm.regrain('public.rs315_one', pg_temp.rs_source('rs315_one'), '100');
+  insert into rs_one_msg values ('no error');
+exception when others then
+  insert into rs_one_msg values (sqlerrm);
+end $$;
+select ok((select m like '%cannot swap the regrain of % of rs315_one at target step 100 -- attaching its % fine partitions in one transaction would hold about %' from rs_one_msg),
+  'LIVENESS: (G) regrain() reached the swap and the measured budget refused it: ' || (select left(m, 100) from rs_one_msg));
+select ok((select count(*) from pgpm.part where parent_table = 'public.rs315_one'::regclass and not attached) = 0
+          and (select regrain_cursor is null from pgpm.config where parent_table = 'public.rs315_one'::regclass),
+  'LIVENESS: (G) and its one transaction rolled back every copy: no copy and no cursor are left');
+select ok((select m like '%The swap rolls back whole, and every copy with it: this call made them in its one transaction%no run is left in flight. Raise max_locks_per_transaction (a restart) and call it again%' from rs_one_msg),
+  'G: regrain()''s refusal says every copy rolled back with it, and to call it again');
+select ok((select m not like '%the copies are kept%' and m not like '%the next tick swaps%' and m not like '%regrain_cancel%' from rs_one_msg),
+  'G: and promises no kept copy, no next tick and no run to cancel');
+
+-- ==================== (H) regrain() that resumed a run ticks began: their copies outlive it (#1233, #1514) ====
+-- G's shape, but three ticks commit the prepare and three copies first, so regrain() resumes the run: its refusal
+-- rolls back the copies IT made and leaves those three and the cursor, so the run stays in flight and only
+-- regrain_cancel abandons it. Three kept against the many the call makes, so a refusal that kept none, or all,
+-- cannot match the names below.
+\o /dev/null
+select pg_temp.rs_monolith('rs315_res', (:slots / 100) * 100);
+\o
+select pgpm_formal.baseline('public.rs315_res');
+\o /dev/null
+select format('alter table public.rs315_res add constraint rs315_res_fk%s foreign key (b) references public.rs315_ref', g)
+  from generate_series(1, 30) g \gexec
+\o
+call pgpm.transmute('public.rs315_res', 'id', ((:slots / 100) * 100)::bigint, p_obtain => 2);
+insert into public.rs315_res (id, a) values ((:slots / 100) * 100 + 1, 'frontier');
+select pgpm_formal.wrote('public.rs315_res', 'a = ''frontier''');
+\o /dev/null
+select format('select pgpm.regrain_step(%L, pg_temp.rs_source(%L), %L)', 'public.rs315_res', 'rs315_res', '100')
+  from generate_series(1, 4) \gexec
+\o
+create temporary table rs_res_before as
+  select (select array_agg(child_name::text order by lo::numeric) from pgpm.part
+           where parent_table = 'public.rs315_res'::regclass and not attached) as copies,
+         (select regrain_cursor from pgpm.config where parent_table = 'public.rs315_res'::regclass) as cur;
+select ok((select cardinality(copies) = 3 and cur is not null from rs_res_before),
+  'LIVENESS: (H) the ticks began the run and committed three copies: '
+  || (select coalesce(array_to_string(copies, ', '), 'none') || ', cursor ' || coalesce(cur, 'null') from rs_res_before));
+create temporary table rs_res_msg (m text);
+do $$
+begin
+  perform pgpm.regrain('public.rs315_res', pg_temp.rs_source('rs315_res'), '100');
+  insert into rs_res_msg values ('no error');
+exception when others then
+  insert into rs_res_msg values (sqlerrm);
+end $$;
+select ok((select m like '%cannot swap the regrain of % of rs315_res at target step 100 -- attaching its % fine partitions in one transaction would hold about %' from rs_res_msg),
+  'LIVENESS: (H) regrain() resumed the run to its swap and the measured budget refused it: ' || (select left(m, 100) from rs_res_msg));
+select is(
+  (select array_agg(child_name::text order by lo::numeric) from pgpm.part
+    where parent_table = 'public.rs315_res'::regclass and not attached)
+  || array[(select regrain_cursor from pgpm.config where parent_table = 'public.rs315_res'::regclass)],
+  (select copies || array[cur] from rs_res_before),
+  'H: the refusal kept exactly the three copies the ticks committed, and their cursor: the run is still in flight');
+select ok((select m like '%The swap rolls back whole, and with it the copies this call made, but not those committed before it: the run was already in flight when this call resumed it, so it stays in flight with those copies%abandon the run with pgpm.regrain_cancel(rs315_res)%' from rs_res_msg),
+  'H: regrain()''s refusal says the copies committed before it are kept, and names regrain_cancel for the run');
+select ok((select m not like '%every copy with it%' and m not like '%no run is left in flight%' from rs_res_msg),
+  'H: and does not say every copy rolled back or that no run is left');
 
 select * from finish();

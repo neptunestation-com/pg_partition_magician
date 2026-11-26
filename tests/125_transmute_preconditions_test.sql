@@ -298,7 +298,8 @@ select throws_ok(
 -- Scope again: from a different live session the abort is still refused.
 select throws_ok(
   $$ select pgpm.transmute_abort('public.ab') $$,
-  'P0001', 'pg_partition_magician: cannot abort the transmute of ab -- it is still running in another session',
+  'P0001', (select format('pg_partition_magician: cannot abort the transmute of %s -- it is still running in another session, backend pid %s (started %s), which pgpm.transmute_inflight records as the claim''s owner: wait for that session to end, or end it (select pg_terminate_backend(%s)), then abort again', 'ab', owner_pid, owner_backend_start, owner_pid)
+     from pgpm.transmute_inflight where parent_table = 'public.ab'::regclass),
   'C2: from ANOTHER session the abort is still refused while the owner is alive');
 
 select lives_ok(

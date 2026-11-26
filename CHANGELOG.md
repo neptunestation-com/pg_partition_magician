@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+- **Eight refusals and remedies say what is true of the call that met them** (#1223, #1233, #1234, #1246, #770,
+  #1414 bullets 1, 2 and 5, #1030 bullet 5, #1337 bullet 4). Each named a cause, a state or a remedy that did not
+  fit the case in front of it. No refusal now refuses anything it did not refuse before.
+  - The zone rule's refusal on a naive key whose grid is recorded off UTC said every fixed target's swap would fail.
+    That holds for a `date` key, and for a `timestamp` key only at a step of an hour or less, across a fall-back.
+    Measured in Europe/London, 61 minutes to a day complete with every row. The message now says which (#1223).
+  - The swap's lock-budget refusal, reached through `regrain()` or `regrain_history()`, promised kept copies, a
+    next tick that swaps and a run to `regrain_cancel`, where the refusal rolls back every copy the call made in its
+    one transaction. `regrain()` now marks that transaction, and the refusal it reaches says so. A call that resumed
+    a run `maintain` ticks began says instead that the copies they committed and the run outlive it, and names
+    `regrain_cancel` (#1233).
+  - `skip_archive_retired_range` offered the ledger delete only for chunks recorded under another name, so the
+    genuine partition an upgrade straight from v0.5.0 or older holds over its own chunks was sent nowhere. The
+    method, the runbook and the reference now name that remedy for it, and the guard follows it: typed as logged,
+    the partition archives afresh and is dropped (#1234).
+  - `transmute_abort`'s "still running in another session" now names that session's pid and start. The reference's
+    `pgpm.transmute_inflight` table documents the two owner columns, and its `config` and `scratch` tables the two
+    `written_xid` columns, all four missing before (#1246).
+  - The ATTACH every `skip_archive` remedy spells, and the no-oid remedy's `adopt_partition` and `delete`, name the
+    parent schema-qualified. A regclass rendered without its schema when that schema was on the writing session's
+    `search_path`, so the remedy typed from the operator's own session named no table (#1414 bullet 1).
+  - `transmute`'s uuidv7 and text_time skew refusal named a value three and a half hours past its limit under
+    DateStyle `SQL, DMY` in Asia/Kolkata, where the limit's text renders `IST`, read back as Israel time. The limit
+    is now encoded from zone-free text (#1414 bullet 2).
+  - The effect check that refuses a statement redirected by a schema swap called a redirected function "another
+    relation". It now names a function as a function (#1414 bullet 5).
+  - The empty-range refusal of the archive strategies advises the chunk's own `[lo, hi)` "while its rows are still in
+    the table", as the #975 refusal that meets the same call after `retire()` does (#1030 bullet 5).
+  - A dot segment in an object key that a quoted schema or table name puts there, under a clean prefix, was blamed
+    on `archive.config.prefix`, whose remedy changed nothing. The refusal now names the schema, table or partition
+    and the rename that lets it archive (#1337 bullet 4).
+  - Two stale code comments and one sentence of the reference, about a standing `fks_suspended` and about how the
+    check functions find a column's maximum, are corrected (#770 bullets 2 and 3).
+
+  Tests `tests/404` (new), `tests/315` part G, `tests/324`, `tests/358` part S, `tests/360`, `tests/101`,
+  `tests/125`, `tests/archive/db/41` and `tests/archive/db/52` part D. New guards `bench/transmute_skew_value_zone_free.sh`
+  and `bench/doc_catalog_columns.sh`. `bench/ledger_backfill_origin_only_block.sh` gains the v0.5.0 partition. Ten
+  mutations: `regrain_zone_refusal_day_claims_swap_failure`, `regrain_swap_refusal_one_call_unmarked`,
+  `regrain_swap_refusal_always_one_call`, `archive_retired_range_own_name_remedy_unnamed`,
+  `reference_inflight_owner_unnamed`, `archive_remedy_parent_unqualified`, `transmute_skew_value_from_session_text`,
+  `effect_check_kind_fixed_relation`, `archive_empty_range_advice_unqualified` and
+  `archive_key_dot_segment_blames_prefix`.
 - **The docs name the `pg_cron` grants a role other than a superuser needs** (#1245). `pg_cron` revokes
   `cron.schedule_in_database`, which `pgpm.schedule()` calls, and `cron.alter_job`, which a tick calls to hand a
   referenced partition's detach to the `pgpm_detach` job, from `PUBLIC`, and grants no use of its schema. The README

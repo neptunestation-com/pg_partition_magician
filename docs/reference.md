@@ -3683,7 +3683,10 @@ is recorded in a zone other than UTC (an install from before such a grid was rec
 converting session's zone, so every bound sits at that zone's midnight rather than the column's; a zone whose
 offset is always zero, such as `Etc/UTC`, is UTC here, and a whole number of months round-trips and is not
 refused): the run would copy every sub-range and every swap would then fail, so each is refused with the same
-remedy, and the upgrade logs such a grid as `warn_grid_off_unit`; a domain is judged by its
+remedy (on such a `timestamp` key the swap fails only at a step of an hour or less, where the run spans a
+fall-back that renders two of its bounds to one wall time; a longer step would complete, but with every fine
+partition at the zone's offset on the column's clock rather than on its own bounds, so it is refused too, and
+the message says which), and the upgrade logs such a grid as `warn_grid_off_unit`; a domain is judged by its
 base type and typmod; a fractional step on an unconstrained `numeric` column is allowed), one coarser than
 `partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
 names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
@@ -4024,7 +4027,8 @@ heuristic, not a proof; this is the check `transmute` runs to gate the uuidv7 ki
 
 `sampled`, `plausible`, `fraction`, `oldest` and `newest` describe the **sample**. `newest_decoded` does
 not: it is the column's actual maximum (its greatest non-null value, however many NULLs the column holds),
-found the way `transmute` finds its frontier and decoded, and `newest_in_future` is whether that maximum
+found by the backward read `transmute` uses for its frontier (an index scan when the column is the key) with
+NULLs skipped, which `transmute`'s own read does not do, and decoded, and `newest_in_future` is whether that maximum
 sits more than one hour past `now()`. Both are null only when the column holds no non-null value. Look
 at these before converting: a single future-dated row (a client with a wrong clock) leaves `fraction` at
 `0.99+` and can still pin the monolith's permanent `hi` years out, which is why `transmute` refuses one that
@@ -4263,6 +4267,7 @@ One row per managed table (`parent_table` is the primary key). Columns:
 | `regrain_cursor` | `text` | how far the in-progress regrain has copied (null = not regraining); [`progress`](#progress) reads it as a fraction of the range |
 | `regrain_delta_oid` / `regrain_capture_fn_oid` | `oid` / `oid` | the change-capture delta table and trigger function the last prepare tick minted for this parent, by identity; every reader of the delta resolves them from here, so a rename of the parent mid-regrain is harmless (null until the first regrain; backfilled by an upgrade, only for a pair pgpm provably minted) |
 | `regrain_source_mark` | `jsonb` | what the in-flight regrain copies from: the source partition's relfilenode and each column's attnum, recorded by the prepare tick and compared by every later tick, so an `ALTER TABLE` that rewrote the source or replaced a column restarts the run (meaningful only while `regrain_cursor` is set; null before the first regrain, and a null one over copies restarts the run too; an upgrade restarts a run in flight with copies and records the mark of one without) |
+| `regrain_written_xid` | `xid8` | the transaction of the regrain run's last write into its fine children, set by every copy and reconcile batch that wrote one; the swap waits for every other session's snapshot that cannot see it (see [Older snapshots](#regrain)). Null for a table not regrained since the column was added, and the swap then waits for every snapshot older than itself |
 | `archive_fn` | `regprocedure` | the pluggable archive strategy (null = `none`); see [Archive strategy contract](#archive-strategy-contract) |
 | `archive_byte_budget` / `archive_probe_sample` | `bigint` / `int` | byte-budget chunking knobs for the built-in chunked archiver (see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
 | `archive_batch` | `int` | max partitions one `_archive_step` call touches, oldest first (default 1; null = unbounded -- see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
@@ -4308,6 +4313,7 @@ them here, by oid, never by name. (The core's own are recorded where they always
 | `parent_oid` | `oid` | the hypertable, by oid (a hypertable dropped by hand leaves its rows naming nothing) |
 | `kind` | `text` | `hypertable_dest` (the copy), `hypertable_delta` (a tracking copy's delta), or `hypertable_delta_fn` (its trigger function) |
 | `obj` | `oid` | the relation (`pg_class`) or, for `hypertable_delta_fn`, the function (`pg_proc`) |
+| `written_xid` | `xid8` | on the `hypertable_dest` row, the transaction of the copy's last write, set by every copy batch and drain step; the cutover waits for every snapshot that cannot see it before it swaps (see [`from_hypertable_cutover`](#from_hypertable_cutover)). Null on the other kinds, and on a copy made before the column existed, for which the cutover waits for every snapshot older than itself |
 
 Primary key `(parent_oid, kind)`. The swap removes a hypertable's rows. An upgrade records a copy made by an
 earlier release from the comment that release put on it. `uninstall.sql` drops every object recorded here
@@ -4435,6 +4441,7 @@ carries a `pgpm_monolith_bound` `CHECK` and is refusing writes outside `[lo, hi)
 | `control_attnum` | `smallint` | the attribute number of the control column `lo` and `hi` were computed on, which the `CHECK` constrains; a retry on another column is refused, one on the same column under a new name resumes (null on a row written before the column existed, which a retry does not check) |
 | `text_time_encoding` | `jsonb` | on a `text_time` key, the encoding the `CHECK`'s literals were written in (`prefix`, `width`, `radix`, `unit`, `alphabet` with an omitted one written out as the default it stands for, `discard_bits`, and `epoch` in seconds since 1970-01-01 UTC); a retry under another encoding is refused, the same one spelled otherwise resumes (null for every other kind, and on a row written before the column existed, which a retry does not check) |
 | `started_at` | `timestamptz` | when the conversion added the bound |
+| `owner_pid` / `owner_backend_start` | `int` / `timestamptz` | the session that claimed the conversion: its backend's pid and its `pg_stat_activity.backend_start`. While a backend with that pid and start is connected, the conversion is running in another session: a second `transmute` of the table is refused, `maintain_all`'s sweep leaves the claim, and [`transmute_abort`](#transmute_abort) refuses from any other session, naming the pid and start. Once it is gone (ended, or its pid reused by a backend that started later) the claim is abandoned, and a retry takes it over. Null on a row written before the columns existed, which counts as abandoned |
 
 ### `pgpm.archive_ledger`
 
@@ -4491,7 +4498,8 @@ because a name alone cannot tell the partition pgpm archived from one re-created
 and a pgpm before v0.6.0 write-blocked such a successor just as it did the original: a chunk under an adopted oid
 is marked retired, whatever the block, and the partition over its range is held rather than archived over the
 only copy. So an upgrade straight from v0.5.0 or older holds every partition it had archived, recoverable by the
-logged remedy; one from v0.6.0 does not. What this cannot see: an install upgraded to v0.6.0 from an older
+logged remedy (for a partition whose rows are the chunks' rows, under its own name: once you have confirmed it
+holds them, delete the retired rows recorded under its name, and it archives afresh); one from v0.6.0 does not. What this cannot see: an install upgraded to v0.6.0 from an older
 release had its oids adopted by that upgrade, which recorded nothing about it, so they count as recorded here, and
 a partition re-created by hand under a dropped one's name before that upgrade (and not dropped by it since) is
 attributed the dropped one's chunks. Under an identity oid, the block decides only whether pgpm kept the

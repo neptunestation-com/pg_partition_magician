@@ -109,7 +109,7 @@ select ok(:'d_squat'::oid <> :'d_fn'::oid, 'LIVENESS: D: the function''s name de
 
 select is((select pg_get_userbyid(proowner) from pg_proc where oid = :'d_squat'::oid), 'postgres',
   'D: the stranger''s function keeps its owner');
-select ok(:'d_err' like '%reached another relation than the one it identified%',
+select ok(:'d_err' like '%reached another function than the one it identified%' and :'d_err' not like '%another relation%',
   format('D: the hand-over refused, rolled back, naming the redirection (%s)', :'d_err'));
 select is((select pg_get_userbyid(proowner) from pg_proc where oid = :'d_fn'::oid), 'postgres',
   'D: and the function it identified is as it was, the refusal rolled back');
@@ -145,7 +145,7 @@ select ok(:'e_squat'::oid <> :'e_fn'::oid, 'LIVENESS: E: the capture function''s
 
 select is((select pg_get_userbyid(proowner) from pg_proc where oid = :'e_squat'::oid), 'postgres',
   'E: the stranger''s function keeps its owner');
-select ok(:'e_err' like '%reached another relation than the one it identified%',
+select ok(:'e_err' like '%reached another function than the one it identified%' and :'e_err' not like '%another relation%',
   format('E: the follow refused, rolled back, naming the redirection (%s)', :'e_err'));
 select is((select pg_get_userbyid(proowner) from pg_proc where oid = :'e_fn'::oid), 'postgres',
   'E: and the capture function pgpm recorded is as it was, the refusal rolled back');
@@ -212,7 +212,7 @@ select count(*) as h_drained from dblink_get_result('r360', false) as t(x text) 
 select ok(:'h_squat'::oid <> :'h_fn'::oid, 'LIVENESS: H: the function''s name denotes the stranger''s once the holder commits');
 
 select ok(exists (select 1 from pg_proc where oid = :'h_squat'::oid), 'H: the stranger''s function is not dropped');
-select ok(:'h_err' like '%reached another relation than the one it identified%',
+select ok(:'h_err' like '%reached another function than the one it identified%' and :'h_err' not like '%another relation%',
   format('H: the drop refused, rolled back, naming the redirection (%s)', :'h_err'));
 select ok(exists (select 1 from pg_proc where oid = :'h_fn'::oid), 'H: and the function it identified is still there, the refusal rolled back');
 

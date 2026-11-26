@@ -79,7 +79,8 @@ select is(pgpm._transmute_reap(), 0, 'the reaper does not touch a claim whose ow
 select throws_ok(
   $$ select pgpm.transmute_abort('public.cl1') $$,
   null,
-  'pg_partition_magician: cannot abort the transmute of cl1 -- it is still running in another session',
+  (select format('pg_partition_magician: cannot abort the transmute of %s -- it is still running in another session, backend pid %s (started %s), which pgpm.transmute_inflight records as the claim''s owner: wait for that session to end, or end it (select pg_terminate_backend(%s)), then abort again', 'cl1', owner_pid, owner_backend_start, owner_pid)
+     from pgpm.transmute_inflight where parent_table = 'public.cl1'::regclass),
   'transmute_abort refuses a claim whose owner is alive');
 
 -- THE DISCRIMINATOR. Same row, same table, owner cleared to stand in for a session that died mid-run: the

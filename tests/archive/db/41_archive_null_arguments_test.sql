@@ -28,7 +28,7 @@
 -- 9, and [10, 20) archives rows 10 to 19, so the range check refuses only what is empty.
 -- bench/archive_null_arguments.sh runs this file against the module's mutants.
 set client_min_messages = warning;
-select plan(22);
+select plan(23);
 
 create schema t41;
 
@@ -283,6 +283,10 @@ select throws_like($$ select * from pgpm.archive_to_s3_ndjson('t41.ev', 'unused'
 select throws_like($$ select * from pgpm.archive_to_s3_parquet('t41.ev', 'unused', '1', '1') $$,
   'pg_partition_magician: archive_to_s3_parquet refuses the range [1, 1) of t41.ev -- it is empty or inverted%',
   'B: archive_to_s3_parquet refuses the empty range [1, 1)');
+-- #1030 b5: its advice is qualified as #975's refusal is, since after retire() that same call is refused
+select throws_like($$ select * from pgpm.archive_to_s3_ndjson('t41.ev', 'unused', '1', '1') $$,
+  '%Pass the chunk''s own [lo, hi), while its rows are still in the table.',
+  'B: and advises the chunk''s own [lo, hi) only while its rows are still in the table');
 
 select is(t41.rows((select s3_key from good_nd)), '1:r1,2:r2,3:r3,4:r4,5:r5,6:r6,7:r7,8:r8,9:r9',
   'B: the NDJSON object [1, 10) was archived to still holds rows 1 to 9');

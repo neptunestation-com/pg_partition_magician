@@ -21,6 +21,9 @@
 #                                             key's spelling, so a chunk an older install recorded as '/<p>...'
 #                                             is not found under the canonical key, and a direct call writes a
 #                                             subset over it (part B, #975 on an upgraded install)
+#   archive_key_dot_segment_blames_prefix  -- the dot-segment refusal blames the prefix whatever put the segment
+#                                             there, so a table name holding '/../' under a clean prefix is sent
+#                                             to a prefix remedy that changes nothing (part D, #1337 b4)
 #
 # Usage: archive_key_base_canonical.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs and reads

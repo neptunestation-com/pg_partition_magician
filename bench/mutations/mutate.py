@@ -1326,15 +1326,10 @@ MUTATIONS = {
              "r.parent_table::oid::text, 0)) then\n"
              "      continue;   -- still running; leave it alone\n"
              "    end if;\n", 1),
-            ("  if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then\n"
-             "    raise exception 'pg_partition_magician: cannot abort the transmute of % -- it is "
-             "still running in another session', p_parent;\n"
-             "  end if;\n",
+            # The test alone, not the refusal under it, which #1246 reworded to name the owner it read.
+            ("  if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then\n",
              "  if not pg_try_advisory_lock(hashtextextended('pgpm_transmute:' || "
-             "p_parent::oid::text, 0)) then\n"
-             "    raise exception 'pg_partition_magician: cannot abort the transmute of % -- it is "
-             "still running in another session', p_parent;\n"
-             "  end if;\n", 1),
+             "p_parent::oid::text, 0)) then\n", 1),
         ],
     ),
     "transmute_no_shape_precondition": (
@@ -18073,7 +18068,7 @@ MUTATIONS["scratch_mint_fn_unchecked"] = (
     "swapped while it waits for the function's lock hands the namesake function to the parent's owner. One clause, "
     "the effect check. tests/360 part D catches it.",
     [("    perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = p_fn) = v_owner, p_fn,\n"
-      "                                  'handing a capture function to its parent''s owner');\n", "", 1)],
+      "                                  'handing a capture function to its parent''s owner', 'function');\n", "", 1)],
 )
 MUTATIONS["scratch_owner_follow_fn_unchecked"] = (
     "bench/schema_swap_leftovers.sh",
@@ -18081,7 +18076,7 @@ MUTATIONS["scratch_owner_follow_fn_unchecked"] = (
     "(F9's hypothesis), so a schema swapped while it waits for the capture function's lock hands a namesake to the "
     "new owner. One clause, the effect check. tests/360 part E catches it.",
     [("      perform pgpm._effect_or_raise((select p.proowner from pg_proc p where p.oid = r.oid) = v_want, r.oid,\n"
-      "                                    format('%s, handing a scratch function to %I,', p_what, v_want_n));\n", "", 1)],
+      "                                    format('%s, handing a scratch function to %I,', p_what, v_want_n), 'function');\n", "", 1)],
 )
 MUTATIONS["capture_fn_create_or_replace"] = (
     "bench/schema_swap_leftovers.sh",
@@ -18098,7 +18093,7 @@ MUTATIONS["drop_fn_by_oid_unchecked"] = (
     "_regrain_capture_install's and untransmute's drops had: the DROP waits for the function's lock and looks the "
     "name up again, so a schema swapped during the wait drops the operator's function and leaves pgpm's. One "
     "clause, the effect check. tests/360 part H catches it.",
-    [("  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what);\n", "", 1)],
+    [("  perform pgpm._effect_or_raise(not exists (select 1 from pg_proc p where p.oid = p_fn), p_fn, p_what, 'function');\n", "", 1)],
 )
 
 # The class's static exhaustiveness check (scripts/check_by_name_after_wait.py). bench/by_name_after_wait_lint.sh
@@ -18952,6 +18947,104 @@ for _name in ("uninstall_unschedules_by_name", "uninstall_unschedules_every_data
               "uninstall_vouch_unlocked", "uninstall_unschedules_before_refusal", "uninstall_refuses_own_retirement",
               "uninstall_unwarned_foreign_jobs"):
     MUTATION_SRC[_name] = "pgpm_core/uninstall.sql"
+
+# The Tier 4 operator messages (#1223, #1233, #1234, #1246, #1414 b1 b2 b5, #1030 b5, #1337 b4): each refusal or remedy
+# says what is true of the call that met it. One mutation per message puts its pre-fix text, or its pre-fix choice of
+# text, back, caught by the file each guard runs.
+MUTATIONS["regrain_zone_refusal_day_claims_swap_failure"] = (
+    "bench/regrain_registered_grid_off_unit.sh",
+    "Issue #1223: the zone rule's refusal on a naive timestamp grid recorded off UTC gives every fixed target the "
+    "reason a step of an hour or less has, that the run would copy every sub-range before its swap failed, where a "
+    "longer step completes when let through (measured in Europe/London: 61 minutes to a day keep every row). One "
+    "clause, the step test. tests/324's day refusal on w324 catches it.",
+    [("             when p_step::interval <= interval '1 hour'\n", "             when true\n", 1)],
+)
+MUTATIONS["regrain_swap_refusal_one_call_unmarked"] = (
+    "bench/regrain_swap_lock_budget.sh",
+    "Issue #1233: regrain() does not mark its one transaction, so the swap's measured lock-budget refusal it reaches "
+    "promises kept copies, a next tick that swaps and a run to regrain_cancel, where the refusal rolls back every copy "
+    "the call made and leaves no run. One site, the mark. tests/315 part G catches it.",
+    [("  perform set_config('pgpm.regrain_one_call',\n"
+      "    p_parent::oid::text || case when pgpm._regrain_in_flight(p_parent) then ':resumed' else '' end, true);\n",
+      "", 1)],
+)
+MUTATIONS["regrain_swap_refusal_resumed_as_own"] = (
+    "bench/regrain_swap_lock_budget.sh",
+    "Issue #1233, Codex's P2 on #1514: regrain() marks every call as having made the run's copies, though one that "
+    "resumes a run ticks began keeps the copies they committed, and its cursor, through the refusal. Its refusal then "
+    "says every copy rolled back and no run is left, and offers no regrain_cancel for the run that is. One clause, "
+    "the in-flight test. tests/315 part H catches it.",
+    [("    p_parent::oid::text || case when pgpm._regrain_in_flight(p_parent) then ':resumed' else '' end, true);\n",
+      "    p_parent::oid::text, true);\n", 1)],
+)
+MUTATIONS["regrain_swap_refusal_always_one_call"] = (
+    "bench/regrain_swap_lock_budget.sh",
+    "Issue #1233, the over-correction: every swap refusal is worded for regrain()'s one transaction, so a tick's "
+    "refusal says no copy is kept and no run is left, though its copies committed in earlier ticks and the next tick "
+    "swaps once the knob is raised. One clause, the driver test. tests/315 part D's tick wording catches it.",
+    [("          case when current_setting('pgpm.regrain_one_call', true) = p_parent::oid::text\n",
+      "          case when true\n", 1)],
+)
+MUTATIONS["archive_retired_range_own_name_remedy_unnamed"] = (
+    "bench/ledger_backfill_origin_only_block.sh",
+    "Issue #1234: skip_archive_retired_range offers the ledger delete only for chunks recorded under another name, so "
+    "the genuine partition an upgrade from v0.5.0 holds over its own chunks is offered only the export-and-drop meant "
+    "for rows that are not the chunks'. One clause, the own-name remedy. The guard's round trip catches it (g's "
+    "logged remedy names no ledger delete under its name).",
+    [("                       case when r.own_name then format(\n",
+      "                       case when false then format(\n", 1)],
+)
+MUTATIONS["reference_inflight_owner_unnamed"] = (
+    "bench/doc_catalog_columns.sh",
+    "Issue #1246: docs/reference.md's pgpm.transmute_inflight table without owner_pid and owner_backend_start, the "
+    "claiming session transmute_abort's refusal is judged by. The table's one row for them, removed.",
+    [(re.compile(r"^\| `owner_pid` / `owner_backend_start` \|.*\n", re.M), "", 1)],
+)
+MUTATION_SRC["reference_inflight_owner_unnamed"] = "docs/reference.md"
+MUTATIONS["archive_remedy_parent_unqualified"] = (
+    "bench/archive_remedy_encoded_bounds.sh",
+    "Issue #1414 bullet 1: the skip_archive remedies' ATTACH names the parent by its regclass text, which drops the "
+    "schema when it is on the writing session's search_path, so typed from the operator's own session it names no "
+    "table. One site, _attach_back_sql's parent. tests/358 part S catches it.",
+    [("  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)', v_parent_q, p_nsp, p_child,",
+      "  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)', p_parent, p_nsp, p_child,", 1)],
+)
+MUTATIONS["transmute_skew_value_from_session_text"] = (
+    "bench/transmute_skew_value_zone_free.sh",
+    "Issue #1414 bullet 2: transmute's uuidv7 and text_time skew refusal encodes its limit from the limit's ::text, "
+    "which under DateStyle 'SQL, DMY' in Asia/Kolkata renders IST and reads back as Israel time, so the value named "
+    "sits three and a half hours past the limit. One site. tests/404 catches it.",
+    [("pgpm._encode(p_control_kind, pgpm._ts_text(v_skew_limit), ", "pgpm._encode(p_control_kind, v_skew_limit::text, ", 1)],
+)
+MUTATIONS["effect_check_kind_fixed_relation"] = (
+    "bench/schema_swap_leftovers.sh",
+    "Issue #1414 bullet 5: _effect_or_raise's one fixed text, which calls the object a statement reached in place of "
+    "the one it identified a relation, a function's oid included. One site, the message. tests/360 parts D, E and H "
+    "catch it (the hand-over, the follow and the drop of a function).",
+    [("    raise exception 'pg_partition_magician: % reached another % than the one it identified (oid %): a schema was "
+      "renamed while the statement waited for a lock, and another % stood under the name; rolled back',\n"
+      "      p_what, p_kind, p_rel, p_kind;\n",
+      "    raise exception 'pg_partition_magician: % reached another relation than the one it identified (oid %): a schema "
+      "was renamed while the statement waited for a lock, and another relation stood under the name; rolled back',\n"
+      "      p_what, p_rel;\n", 1)],
+)
+MUTATIONS["archive_empty_range_advice_unqualified"] = (
+    "bench/archive_null_arguments.sh",
+    "Issue #1030 bullet 5: #969's empty-range refusal advises the chunk's own [lo, hi) with no qualification, a call "
+    "#975 refuses once retire() has dropped the chunk's rows. One site, the advice. tests/archive/db/41 part B catches "
+    "it.",
+    [("Pass the chunk''s own [lo, hi), while its rows are still in the table.',", "Pass the chunk''s own [lo, hi).',", 1)],
+)
+MUTATION_SRC["archive_empty_range_advice_unqualified"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_key_dot_segment_blames_prefix"] = (
+    "bench/archive_key_base_canonical.sh",
+    "Issue #1337 bullet 4: archive._owned_key's dot-segment refusal blames archive.config.prefix whatever put the "
+    "segment there, so for a quoted table name holding '/../' under a clean prefix it names a prefix remedy that "
+    "changes nothing, and never the rename that does. One clause, the origin test. tests/archive/db/52 part D "
+    "catches it.",
+    [("    if archive._canonical_key(p_prefix || 's.t') ~ '(^|/)\\.{1,2}(/|$)' then\n", "    if true then\n", 1)],
+)
+MUTATION_SRC["archive_key_dot_segment_blames_prefix"] = "pgpm_archive/install.sql"
 
 # ---------------------------------------------------------------------------------------- the invariant oracle (W5)
 # Formal methods Phase 3 W5 (docs/formal/phase3-design.md, "Guards on the oracle"). The oracle is a guard, so each of its
